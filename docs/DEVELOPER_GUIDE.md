@@ -33,12 +33,14 @@
 
 ### B. 检测模型 (DetectionModel)
 - **作用**: 用户上传的基础权重文件（`.pt` 或 `.onnx`）。
-- **特殊设计 (Label Mapping)**: 模型文件含有 `label_config` 字段。不同模型的分类索引可能不同（如模型 A 中 `0` 为 `smoke`，模型 B 中 `1` 才是 `smoke`）。我们在 `ModelList.vue` 中封装了 `LabelMappingEditor.vue` 组件，允许对每个模型可视化定制标签映射体系，保证了前向推理算法输出正确的语义名称。
-- **存储**: 文件被物理存储在后台指定的上传文件夹下，路径存入数据库记录中。
+- **稳定设计 (Bare-metal 1:1 Mapping)**: 在 **v1.1.0** 中，我们回归了最纯粹的 1:1 裸传映射逻辑。模型输出的 Raw Index 将直接对照 `label_config` 中的 Key 进行翻译。这一设计大幅降低了算法推断的黑箱性，确保了“所见即所得”的标签对应关系。
+- **存储**: 模型物理存储在 `backend/data/models/` 目录下（注意：该目录已被 `.gitignore` 排除，上传前需手动确认环境）。
 
 ### C. 任务 (Task) 及结果 (Result)
-- **任务 (Task)**: 执行的一个实例。任务分为三种类型：`image` (静态图片)，`video` (视频文件)，`stream` (流媒体 RTSP/HTTP-FLV 等)。
-- **结果 (Result)**: 记录从推理中产生的边界框（BBoxes）、置信度和截图记录。与任务是一对多或一对一的关系。
+- **任务 (Task)**: 分为 `image`、`video`、`stream`。
+- **性能优化 (v1.1.0)**: 
+    - **VideoStream**: 采用非阻塞拉流与 `stimeout=1s` 的激进重连配置，实现“秒进”体验。
+    - **TaskRunner**: 针对视频文件新增“抽帧采样”逻辑（5x 提速），显著提升资源周转率。
 
 ---
 

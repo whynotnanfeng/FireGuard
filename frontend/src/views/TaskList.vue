@@ -72,7 +72,7 @@
             >暂停</a-button>
             
             <a-popconfirm title="确定删除该任务吗？" @confirm="handleDelete(record.id)">
-               <a-button type="link" danger :disabled="['running', 'queued', 'creating'].includes(record.status)">删除</a-button>
+               <a-button type="link" danger>删除</a-button>
             </a-popconfirm>
           </a-space>
         </template>

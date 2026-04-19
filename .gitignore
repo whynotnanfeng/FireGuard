@@ -21,7 +21,16 @@ backend/.pytest_cache/
 
 # Project Data (Crucial: Ignore all local state)
 backend/data/
+backend/logs/              # Local execution logs
+backend/fireguard.db       # Local SQLite database
 backend/uploaded_models/   # Legacy cleanup
 backend/uploaded_media/    # Legacy cleanup
- fire_detection.db         # Legacy cleanup
+fire_detection.db          # Legacy cleanup
+backend/scratch/           # AI Scratch scripts
+
+# Simulator Binaries and Data
+simulator/__pycache__/
+simulator/bin/             # MediaMTX and FFmpeg binaries (>100MB)
+simulator/data/            # Sample video files (>500MB)
+simulator/uploads/         # Uploaded video data
 

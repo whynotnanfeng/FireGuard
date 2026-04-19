@@ -65,7 +65,7 @@
         <a-form-item label="输入类型" name="input_types">
           <a-checkbox-group v-model:value="form.input_types">
             <a-checkbox value="rgb">RGB</a-checkbox>
-            <a-checkbox value="ir">IR(红外)</a-checkbox>
+            <a-checkbox value="ir">IR</a-checkbox>
           </a-checkbox-group>
         </a-form-item>
         <a-form-item label="模型描述">

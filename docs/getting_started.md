@@ -59,7 +59,27 @@ cd fireguard
 
 ---
 
-## 4. 常见问题排查 (FAQ)
+## 4. 辅助模拟服务部署 (可选)
+为了方便在本地测试视频流检测，项目提供了一个基于 **MediaMTX** 和 **FFmpeg** 的推流模拟器。由于二进制程序体积巨大，Git 仓库中仅包含管理脚本。
+
+### 4.1 安装二进制依赖
+1. **下载 MediaMTX**: 前往 [MediaMTX GitHub Releases](https://github.com/bluenviron/mediamtx/releases) 下载适用于您系统的版本，解压后重命名为 `mediamtx.exe` 并放置于 `simulator/bin/` 文件夹下。
+2. **下载 FFmpeg**: 前往 [FFmpeg 官网](https://ffmpeg.org/download.html) 或 [Gyan.dev](https://www.gyan.dev/ffmpeg/builds/) 下载构建好的二进制文件，将 `ffmpeg.exe` 放置于 `simulator/bin/` 文件夹下。
+
+### 4.2 启动模拟服务
+1. **安装环境**:
+   ```bash
+   cd simulator
+   pip install -r requirements.txt
+   ```
+2. **运行管理器**:
+   `python main.py`
+3. **推流测试**:
+   通过模拟器界面上传视频，系统会自动调用 FFmpeg 将其推送到本地 MediaMTX 服务的 `rtsp://localhost:8554/live` 路径。
+
+---
+
+## 5. 常见问题排查 (FAQ)
 
 ### 视频流无法播放？
 - 请确保后端能够访问对应的 RTSP 或流媒体地址。

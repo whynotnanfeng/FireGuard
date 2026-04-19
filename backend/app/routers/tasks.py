@@ -256,12 +256,13 @@ def delete_task(
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Stop if running/queued (stream or batch)
+    # Force stop if running/queued (stream or batch)
     from app.services.task_runner import stream_manager, task_runner
-    if task.task_type == "stream" and task.status in ("running", "paused"):
+    if task.task_type == "stream":
         stream_manager.stop_stream(task_id)
-    else:
-        task_runner.cancel_task(task_id)
+    
+    # Always send cancel signal to TaskRunner (for batch tasks or queued items)
+    task_runner.cancel_task(task_id)
 
     # Delete result record
     result = session.exec(select(Result).where(Result.task_id == task_id)).first()

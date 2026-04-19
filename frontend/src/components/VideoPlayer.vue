@@ -83,7 +83,8 @@ onUnmounted(() => {
 
 function connect() {
   const token = localStorage.getItem('token')
-  ws = new WebSocket(`${props.wsUrl}?token=${token}`)
+  // Fix: Include taskId in the path as required by the backend
+  ws = new WebSocket(`${props.wsUrl}/${props.taskId}?token=${token}`)
 
   ws.onmessage = (event) => {
     try {
@@ -92,7 +93,9 @@ function connect() {
         frameSrc.value = `data:image/jpeg;base64,${data.data}`
         detections.value = data.detections || []
       } else if (data.type === 'error') {
+        // High priority error from backend
         errorMsg.value = data.message
+        status.value = 'failed'
       } else if (data.type === 'status') {
         status.value = data.status
         emit('status-change', data.status)
@@ -102,9 +105,12 @@ function connect() {
     }
   }
 
-  ws.onclose = () => {
-    if (!errorMsg.value && status.value !== 'ended') {
-       errorMsg.value = '视频流连接断开'
+  ws.onclose = (event) => {
+    console.log("WebSocket closed", event);
+    if (!errorMsg.value) {
+       if (status.value !== 'ended' && status.value !== 'paused') {
+          errorMsg.value = '视频流连接已终止 (超时或源异常)'
+       }
     }
   }
 }

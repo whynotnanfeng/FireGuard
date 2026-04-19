@@ -142,22 +142,45 @@ async def websocket_stream(
         from app.services.detector import get_detector
         from app.services.video_stream import VideoStream
         from app.services.task_runner import stream_manager
+        import json
 
-        detector = get_detector(model_path)
+        # --- Reference the same label matching strategy as image/video tasks ---
+        mapping = None
+        if dm and dm.label_config:
+            try:
+                mapping = json.loads(dm.label_config)
+                logger.info(f"Stream Task {task_id}: Using synced label mapping: {mapping}")
+            except Exception as e:
+                logger.warning(f"Stream Task {task_id}: Failed to parse label_config: {e}")
+
+        detector = get_detector(model_path, label_mapping=mapping)
         stream = VideoStream(source, detector)
 
         # Sync stream pause state
         if stream_manager.is_paused(task_id):
             stream.pause()
-
+        
+        # --- FAST CONNECTION: Avoid double initialization blocking ---
+        # We start the stream.run loop immediately so Websocket activates instantly.
+        # Continuous run
         await stream.run(websocket)
+
+        # After run finishes, if it stopped due to a new internal error (e.g. 60s timeout)
+        if stream._error_msg:
+             with Session(engine) as session:
+                db_task = session.get(Task, task_id)
+                if db_task:
+                    db_task.status = "exception"
+                    db_task.error_msg = stream._error_msg
+                    session.add(db_task)
+                    session.commit()
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for task {task_id}")
     except Exception as e:
         logger.error(f"WebSocket error for task {task_id}: {e}")
         try:
-            await websocket.send_text(f'{{"type":"error","message":"{str(e)}"}}')
+            await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
         except Exception:
             pass
     finally:

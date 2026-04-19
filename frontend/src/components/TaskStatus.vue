@@ -17,6 +17,7 @@ const statusMap: Record<string, { type: string; text: string }> = {
   paused:    { type: 'default', text: '已暂停' },
   completed: { type: 'success', text: '已完成' },
   failed:    { type: 'error', text: '失败' },
+  exception: { type: 'error', text: '出现异常' },
 }
 
 const statusType = computed(() => statusMap[props.status]?.type || 'default')

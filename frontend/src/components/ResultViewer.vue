@@ -23,10 +23,22 @@
 
       <div class="summary">
         <h4>文件: {{ currentImageName }}</h4>
-        <p>当前突破目标: {{ currentImageDetections.length }} 个 | 所有图片共计: {{ totalImageDetections }} 个</p>
+        <div class="stats-bar mb-2">
+            <span class="stat-item">当前检测结果: <strong>{{ currentImageDetections.length }}</strong> 个目标</span>
+            <span class="divider">|</span>
+            <span class="stat-item">所有图片共计: {{ totalImageDetections }} 个</span>
+        </div>
+        
+        <!-- Updated dynamic statistics display -->
+        <div class="category-summary mb-2" v-if="Object.keys(currentCategorySummary).length > 0">
+            <span v-for="(count, cls) in currentCategorySummary" :key="cls" class="category-badge">
+                {{ cls }}: {{ count }}
+            </span>
+        </div>
+
         <div class="tags">
-            <a-tag v-for="(d, i) in currentImageDetections" :key="i" color="error" style="margin: 4px;">
-                {{d.class}} ({{(d.confidence*100).toFixed(0)}}%)
+            <a-tag v-for="(d, i) in currentImageDetections" :key="i" color="error" style="margin: 4px; font-weight: bold;">
+                {{ d.class }} ({{ (d.confidence * 100).toFixed(0) }}%)
             </a-tag>
         </div>
       </div>
@@ -94,11 +106,32 @@ const currentImageName = computed(() => {
     return result.value?.filenames?.[currentImageIndex.value] || '';
 })
 
+/**
+ * Robustly matches detection data with current filename.
+ * Handles cases with/without 'annotated_' prefix and cross-platform path separators.
+ */
 const currentImageDetections = computed(() => {
     if (!result.value?.detections) return [];
-    const filename = 'annotated_' + currentImageName.value.replace('annotated_', '');
-    // The dictionary keys have 'annotated_' prefix
-    return result.value.detections[filename] || [];
+    
+    const target = currentImageName.value;
+    const base = target.replace(/^annotated_/, '');
+    
+    // Attempt multiple key variations for maximum compatibility
+    return result.value.detections[target] || 
+           result.value.detections[base] || 
+           result.value.detections['annotated_' + base] || [];
+})
+
+/**
+ * Dynamically counts unique classes in the current frame.
+ */
+const currentCategorySummary = computed(() => {
+    const summary: Record<string, number> = {};
+    currentImageDetections.value.forEach((d: any) => {
+        const cls = d.class || 'Unknown';
+        summary[cls] = (summary[cls] || 0) + 1;
+    });
+    return summary;
 })
 
 const totalImageDetections = computed(() => {
@@ -236,5 +269,36 @@ async function downloadFile() {
 }
 .download-btn {
     width: 200px;
+}
+
+/* New Stats Styling */
+.stats-bar {
+    font-size: 14px;
+    color: var(--text-secondary);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+}
+.divider {
+    color: #ddd;
+}
+.mb-2 {
+    margin-bottom: 8px;
+}
+.category-summary {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.category-badge {
+    background: rgba(255, 77, 79, 0.1);
+    color: #ff4d4f;
+    border: 1px solid rgba(255, 77, 79, 0.2);
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
 }
 </style>

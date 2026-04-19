@@ -268,13 +268,16 @@ class TaskRunner:
 
                 # VP80 for standard WebM compatibility
                 fourcc = cv2.VideoWriter_fourcc(*"VP80")
-                writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
-
                 vid_detections = []
                 frame_idx = 0
+                frame_step = 5 # Process 1 detection every 5 frames
+
+                # Optimization: Adjust output FPS to match our sampling rate to save CPU encoding time
+                output_fps = max(1, fps // frame_step)
+                writer = cv2.VideoWriter(str(out_path), fourcc, output_fps, (w, h))
 
                 while True:
-                    if frame_idx % 10 == 0 and task_id in self._cancelled_tasks:
+                    if frame_idx % 20 == 0 and task_id in self._cancelled_tasks:
                         logger.info(f"Video task {task_id} cancelled during processing")
                         cap.release()
                         writer.release()
@@ -283,10 +286,16 @@ class TaskRunner:
                     ret, frame = cap.read()
                     if not ret:
                         break
-                    dets = detector.detect(frame)
-                    annotated = Detector.draw_boxes(frame, dets)
-                    writer.write(annotated)
-                    vid_detections.extend([d.to_dict() for d in dets])
+                    
+                    # Only detect and WRITE every Nth frame to drastically speed up
+                    if frame_idx % frame_step == 0:
+                        dets = detector.detect(frame)
+                        vid_detections.extend([d.to_dict() for d in dets])
+                        
+                        # Only draw and write when we detect (sampling)
+                        annotated = Detector.draw_boxes(frame, dets)
+                        writer.write(annotated)
+                    
                     frame_idx += 1
 
                 cap.release()
