@@ -1,87 +1,77 @@
-# 本地运行指南 (Getting Started)
+# 快速启动指南
 
-本指南将帮助您在本地开发环境中搭建并运行**火灾目标检测系统**。
+本文档将引导您在本地环境搭建并运行 **火灾监测系统 (FireGuard)**。
 
-## 1. 环境要求 (Prerequisites)
+## 环境要求
 
 在开始之前，请确保您的系统中已安装以下软件：
-- **Python**: 3.12+
-- **Node.js**: 18+
-- **NPM**: (通常随 Node.js 一起安装)
-- **Git**: 用于克隆或管理代码
+
+- **Python**: 3.9 或更高版本
+- **Node.js**: 18 或更高版本 (建议使用 LTS)
+- **Git**: 用于源码管理
+- **C++ 编译环境**: 部分 Python 依赖库（如 `opencv-python`）可能需要
 
 ---
 
-## 2. 后端部署 (Backend Setup)
+## 1. 克隆项目
 
-后端基于 FastAPI 开发，建议使用虚拟环境进行安装。
-
-### 2.1 创建并激活虚拟环境
-在项目根目录下的 `backend` 目录中执行：
-
-```powershell
-# Windows
-cd backend
-python -m venv venv
-.\venv\Scripts\activate
-
-# Linux/macOS
-cd backend
-python3 -m venv venv
-source venv/bin/activate
-```
-
-### 2.2 安装依赖
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/whynotnanfeng/fireguard.git
+cd fireguard
 ```
 
-### 2.3 启动后端服务
-```bash
-# 在 backend 目录下执行
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-- 服务启动后，API 文档地址为：[http://127.0.0.1:8000/api/docs](http://127.0.0.1:8000/api/docs)
-- 首次运行会自动在 `backend/data/` 目录下创建 `fire_detection.db` 数据库文件。
+## 2. 后端部署 (FastAPI)
+
+后端主要负责模型推理与任务调度。
+
+1. **进入后端目录**:
+   `cd backend`
+
+2. **创建虚拟环境**:
+   ```bash
+   python -m venv .venv
+   # Windows
+   .venv\Scripts\activate
+   # Linux/Mac
+   source .venv/bin/activate
+   ```
+
+3. **安装依赖**:
+   `pip install -r requirements.txt`
+
+4. **启动服务**:
+   `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload`
+   *服务启动后，可以通过 `http://127.0.0.1:8000/api/docs` 查看交互式 API 文档。*
+
+## 3. 前端部署 (Vue 3 + AntD)
+
+1. **进入前端目录**:
+   `cd frontend`
+
+2. **安装依赖包**:
+   `npm install`
+
+3. **启动开发服务器**:
+   `npm run dev`
+
+4. **访问系统**:
+   在浏览器中打开 `http://localhost:5173`。
 
 ---
 
-## 3. 前端部署 (Frontend Setup)
+## 4. 常见问题排查 (FAQ)
 
-前端基于 Vue 3 + Vite 构建。
+### 视频流无法播放？
+- 请确保后端能够访问对应的 RTSP 或流媒体地址。
+- 检查本地是否已安装 `mpegts.js` (前端已默认集成)。
 
-### 3.1 安装依赖
-在项目根目录下的 `frontend` 目录中执行：
+### 数据库初始化
+- 系统在初次启动后端时，会自动在 `backend/data/` 目录下创建 `fire_detection.db`。无需手动干预。
 
-```bash
-cd frontend
-npm install
-```
-
-### 3.2 启动开发服务器
-```bash
-npm run dev
-```
-- 服务启动后，访问地址通常为：[http://localhost:5173](http://localhost:5173)
+### 关于 Docker
+- 如果您习惯容器化部署，可以参考根目录下的 `.gitignore` 排除数据目录后，使用 `docker compose build`（需自行编写 Dockerfile）进行构建。
 
 ---
 
-## 4. 系统使用流程 (Workflow)
-
-1. **注册与登录**：首次使用需在页面注册账号并登录。
-2. **上传模型**：进入“模型管理”页面，上传您的 YOLO (.pt) 或 ONNX (.onnx) 模型文件，并设置标签映射（Label Mapping，例如：`0: fire`）。
-3. **创建任务**：
-   - 选择检测类型（图片、视频、实时流）。
-   - 上传对应文件或输入 RTSP 地址。
-   - 选择已上传的模型。
-4. **查看结果**：
-   - 图片/视频任务：等待后端处理完成后，在任务列表查看检测后的标注结果。
-   - 实时流任务：在“实时监控”页面查看低延迟的检测推流。
-
----
-
-## 5. 常见问题 (Troubleshooting)
-
-- **模型推理失败**：请检查模型格式是否正确，以及是否安装了对应的推理库（`ultralytics` 或 `onnxruntime`）。
-- **WebSocket 连接中断**：请确保后端服务正在运行，且前端配置的 API 基础路径正确。
-- **跨域问题 (CORS)**：后端 `app/main.py` 已默认配置允许 `localhost:5173` 访问，如修改前端端口，请同步更新后端配置。
+> [!TIP]
+> 默认登录账户为系统内置测试号（或根据 `app/routers/auth.py` 中的逻辑自行注册）。建议进入系统后首先到 **模型库** 页面上传一个 YOLO 或 ONNX 模型，并配置好标签映射。
