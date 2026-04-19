@@ -10,11 +10,13 @@ graph TD
     Frontend <-->|HTTP / WebSocket| Backend[后端层: FastAPI]
     
     subgraph Backend
-        Router(API 路由)
-        Runner(任务引擎 TaskRunner)
-        Detector(推理分析 Detector)
-        Stream(流媒体中心 VideoStream)
+    subgraph ExternalSources
+        RealStream(第三方视频源/监控探头)
+        Simulator{{可选: 模拟器 Simulator}}
     end
+    
+    RealStream <--> Backend
+    Simulator -.->|推流| RealStream
     
     Backend <--> DB[(数据层: SQLite)]
     Backend <--> Filesystem[[工程数据: Models/Uploads/Results]]

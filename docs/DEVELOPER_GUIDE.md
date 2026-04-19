@@ -58,14 +58,22 @@
 
 ---
 
-## 4. 后续开发工作建议 (Next Steps)
+## 4. 生产部署与模拟环境说明 (Production vs. Simulation)
 
-如果您是新加入的开发者，建议从以下几个方向切入扩展：
+在接手本项目时，请务必区分核心业务与辅助工具：
 
-1. **拓展大屏数据 Dashboard**: 在现有 `TaskList` 之外增加一个首页（例如 `Dashboard.vue`），汇总过去 24 小时的报警次数趋势图、设备连通率饼图等，采用 ECharts 接入。
-2. **AI 推理引擎深化**: 目前后端的 `task_runner` 对于深度学习的调用可进一步封装。您可以接入最新的 YOLOv10 或其他开源的 TensorRT 引擎加速流媒体逐帧渲染。
-3. **完善流媒体播放协议**: 前端目前应对 `stream` 任务，可以进一步深度集成 WEBRTC 及 mpegts 播放器，以应对各种极端网络情况的监控探头。
-4. **事件报警机制**: 集成 WebSocket 甚至基于 Server-Sent Events (SSE)，将报警信息实时推送至右上角的全局消息通知铃铛中，而非每次手动点击刷新。
+### 核心平台 (Core Architecture)
+- 本系统设计为**“流不可知” (Stream Agnostic)**。它完全能够直接消费标准的 RTSP、HTTP-FLV 或 RTMP 流（详见 `VideoStream` 服务的 OpenCV 底层实现）。
+- **生产推荐**：在生产环境下，您应当直接在任务配置中输入监控摄像头的 RTSP 地址（如 `rtsp://admin:password@192.168.1.100:554/ch1`）。
+
+### 模拟辅助服务 (Optional Simulator)
+- **定位**：为了解决开发者在本地环境下没有实体探头而提供的“推流桥接器”。
+- **工作流**：它通过 Python 后台管理 FFmpeg 命令，将本地视频文件循环推送到 `MediaMTX` 形成 RTSP 流。
+- **解耦设计**：主系统与该模拟器完全解耦。如果您不需要模拟功能，可以完全忽略根目录下的 `simulator/` 文件夹。
+
+---
+
+## 5. 后续开发工作建议 (Next Steps)
 
 ---
 
