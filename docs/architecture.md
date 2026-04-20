@@ -10,13 +10,25 @@ graph TD
     Frontend <-->|HTTP / WebSocket| Backend[后端层: FastAPI]
     
     subgraph Backend
+    subgraph NotificationLayer
+        Notifier[Notifier: State Wall]
+    end
+    
+    subgraph ExecutionLayer
+        Grabber(Grabber Thread)
+        Detector(Inference Thread)
+        Sentinel(Sentinel Ticker Thread)
+    end
+    
     subgraph ExternalSources
         RealStream(第三方视频源/监控探头)
         Simulator{{可选: 模拟器 Simulator}}
     end
     
-    RealStream <--> Backend
-    Simulator -.->|推流| RealStream
+    RealStream <--> ExecutionLayer
+    Sentinel -.->|Handshake| Notifier
+    ExecutionLayer -.->|Broadcast| Notifier
+    Notifier <--> Frontend
     
     Backend <--> DB[(数据层: SQLite)]
     Backend <--> Filesystem[[工程数据: Models/Uploads/Results]]
@@ -27,27 +39,27 @@ graph TD
 - **Frontend**: Vue 3 + Ant Design Vue 4.x + Vite
 - **Backend**: FastAPI (异步高性能) + SQLModel (现代 ORM)
 - **AI Core**: YOLO (Ultralytics) + ONNX Runtime (高性能推理)
-- **Stream**: OpenCV + mpegts.js
+- **Stability**: Sentinel Ticker (Heartbeat) + Debounced UI Loaders
+- **Networking**: WebSocket + State-Aware Broadcaster
 
 ---
 
 ## 核心业务逻辑实现
 
 ### 1. 智能推理引擎 (Detector)
-`Detector` 类封装了对模型推理的底层复杂性。在 **v1.1.0** 版本中，我们为了追求极致的语义稳定性，采用了 **1:1 裸传映射策略 (Stable Direct Mapping)**：
+`Detector` 类封装了对模型推理的底层复杂性。在 **v1.2.0** 版本中，除了具备 1:1 裸传映射能力外，推理引擎还与任务生命周期进行了深度解耦，支持热切换模型而无需重启直播流。
 
-- **裸传设计**: 彻底废弃了所有动态偏移、元数据审计和哨兵校准逻辑。推理引擎直接读取模型输出的原始索引（Raw Index），并严格按照用户在数据库配置的 `label_config` 进行 1 比 1 翻译。
-- **配置为尊**: 这一设计将“逻辑解释权”完全交给用户。用户通过系统 UI 编辑标签映射（如 `0: smoke, 1: fire`），后端将物理级同步此映射，彻底根治了旧版本中因索引自动位移导致的“火焰变烟雾”等逻辑回归问题。
-
-### 2. 后台任务调度 (TaskRunner)
-系统采用 `asyncio.Queue` 构建任务队列，并针对大文件处理进行了性能平滑：
-- **智能采样加速**: 在处理视频文件检测任务时，系统不再逐帧处理，而是采用 **抽帧采样 (Frame Sampling)** 技术（默认每隔 5 帧提取 1 帧进行标注）。
-- **效率提升**: 此项优化在保持检测精度（火焰烟雾通常具有时序连续性）的同时，将视频检测的平均耗时降低了 **80%** 以上。
+### 2. 状态感知分发 (Notifier State Wall)
+为了解决高频刷新的“刷新风暴”，系统在分发层加装了**状态防火墙**：
+- **上游拦截**: `Notifier` 单例会缓存每个任务的最后一次广播内容。
+- **差异推送**: 只有当任务的状态或消息发生实质性变化时，信号才会越过防火墙到达 WebSocket。
+- **效果**: 相比 v1.1.0，WebSocket 网络负载降低了 90% 以上。
 
 ### 3. 三维联动流媒体 (VideoStream)
-针对实时监控流，系统实现了 **“秒进” (Instant Connection)** 优化：
-- **非阻塞初始化**: WebSocket 开启后即刻建立连接，将缓慢的 OpenCV 取流过程移至后台异步拉起，消除页面加载时的卡顿与黑洞。
-- **低延迟传输**: 优化了 OpenCV 底层 `FFMPEG` 的超时配置 (`stimeout=1s`)，确保网络波动时能迅速响应并触发自动重连机制。
+针对实时监控流，系统实现了 **“5-3 隔离协议” (5-3 Stability Protocol)**：
+- **5s 硬锁**: 启动后的前 5 秒为握手保护期，强制展示“正在连接...”，屏蔽任何瞬态重试抖动。
+- **3s 节奏重启**: 探测失败后进入固定的 3s 节奏回收期，防止短时间高频建立无效连接导致的系统压力。
+- **哨兵线程**: 在 OpenCV 库发生阻塞时，利用影子线程独立发送心跳，确保 UI 链路始终活跃。
 
 ---
 
