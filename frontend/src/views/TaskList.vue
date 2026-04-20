@@ -55,13 +55,13 @@
           <a-space>
             <a-button 
                type="link"
-               :disabled="record.status !== 'completed' && !(record.task_type === 'stream' && ['running', 'paused'].includes(record.status))"
+               :disabled="record.status !== 'completed' && !(record.task_type === 'stream' && record.status === 'running')"
                @click="handleViewResult(record)"
             >查看</a-button>
 
             <a-button 
                type="link" 
-               :disabled="record.status !== 'pending' && record.status !== 'paused'"
+               :disabled="!['pending', 'paused', 'failed', 'exception'].includes(record.status)"
                @click="handleExecute(record)"
             >执行</a-button>
             
@@ -155,46 +155,56 @@ async function loadData() {
   })
 }
 
-let timer: any = null
+let notificationWs: WebSocket | null = null
+let pollTimer: any = null
 
 onMounted(() => {
   loadData()
-  startPolling()
+  startNotifications()
+  
+  // V18: Defensive polling heartbeat for final consistency
+  pollTimer = setInterval(() => {
+    console.log('[Poll Heartbeat] Syncing task status...')
+    loadData()
+  }, 30000)
 })
 
 onUnmounted(() => {
-  stopPolling()
+  stopNotifications()
+  if (pollTimer) clearInterval(pollTimer)
 })
 
-function startPolling() {
-    if (timer) return
-    timer = setInterval(() => {
-        const hasActiveProcessing = taskStore.tasks.some(t => 
-            t.status === 'running' && t.task_type !== 'stream'
-        )
-        if (hasActiveProcessing) {
-            loadData()
-        } else {
-            stopPolling()
-        }
-    }, 3000)
-}
-
-function stopPolling() {
-    if (timer) {
-        clearInterval(timer)
-        timer = null
+function startNotifications() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const url = `${protocol}//${window.location.hostname}:8000/ws/notifications`
+    notificationWs = new WebSocket(url)
+    
+    notificationWs.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data)
+            console.log('Task Status Update Received:', data)
+            if (data.type === 'task_status_update') {
+                loadData()
+            }
+        } catch(e) {}
+    }
+    
+    notificationWs.onclose = () => {
+        // Retry connection after 5 seconds if lost
+        setTimeout(() => {
+            if (!notificationWs || notificationWs.readyState === WebSocket.CLOSED) {
+                startNotifications()
+            }
+        }, 5000)
     }
 }
 
-watch(() => taskStore.tasks, (newTasks) => {
-    const hasActiveProcessing = newTasks.some(t => 
-        t.status === 'running' && t.task_type !== 'stream'
-    )
-    if (hasActiveProcessing) {
-        startPolling()
+function stopNotifications() {
+    if (notificationWs) {
+        notificationWs.close()
+        notificationWs = null
     }
-}, { deep: true })
+}
 
 function handleCreateSuccess() {
   showCreate.value = false
@@ -205,7 +215,6 @@ function handleCreateSuccess() {
 async function handleExecute(row: any) {
   const oldStatus = row.status
   try {
-    row.status = 'queued'
     await tasksApi.execute(row.id)
     message.success('任务已加入执行队列')
     loadData()

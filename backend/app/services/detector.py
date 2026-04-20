@@ -58,6 +58,8 @@ class Detector:
         self.model_path = model_path
         self.label_mapping = label_mapping
         self.backend: str = ""
+        self.is_rgbir: bool = False
+        self.input_names: List[str] = []
         self._load(model_path)
 
 
@@ -92,7 +94,16 @@ class Detector:
             providers = self._get_providers()
             self.session = ort.InferenceSession(path, sess_options=opts, providers=providers)
             self.backend = "onnxruntime"
-            self.input_name = self.session.get_inputs()[0].name
+            
+            inputs = self.session.get_inputs()
+            self.input_names = [i.name for i in inputs]
+            self.input_name = self.input_names[0]
+            
+            # Detect RGB-IR Multi-modal model
+            if len(self.input_names) == 2 and "rgb" in self.input_names and "ir" in self.input_names:
+                self.is_rgbir = True
+                logger.info(f"Detected RGB-IR Multimodal model: {path}")
+            
             # Try to read class names from metadata
             meta = self.session.get_modelmeta().custom_metadata_map
             found_names = False
@@ -131,14 +142,16 @@ class Detector:
 
     # 鈹€鈹€ Inference 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-    def detect(self, image: np.ndarray, conf: float = 0.25, task_id: str = "") -> List[Detection]:
-        """Run detection on a single BGR image (OpenCV format)."""
+    def detect(self, image: np.ndarray | List[np.ndarray], conf: float = 0.25, task_id: str = "") -> List[Detection]:
+        """Run detection on a single image (or pair of images for multi-modal)."""
         if self.backend == "ultralytics":
+            if isinstance(image, list):
+                image = image[0] # YOLO doesn't support our multi-input yet
             return self._detect_pt(image, conf)
         else:
             return self._detect_onnx(image, conf, task_id)
 
-    def detect_batch(self, images: List[np.ndarray], conf: float = 0.25, task_id: str = "") -> List[List[Detection]]:
+    def detect_batch(self, images: List[np.ndarray | List[np.ndarray]], conf: float = 0.25, task_id: str = "") -> List[List[Detection]]:
         """Batch inference."""
         return [self.detect(img, conf, task_id) for img in images]
 
@@ -179,8 +192,38 @@ class Detector:
                 
         return detections
 
-    def _detect_onnx(self, image: np.ndarray, conf: float, task_id: str = "") -> List[Detection]:
+    def _detect_onnx(self, image: np.ndarray | List[np.ndarray], conf: float, task_id: str = "") -> List[Detection]:
         """ONNX inference with diagnostic logging and preprocessing."""
+        if self.is_rgbir and isinstance(image, list) and len(image) >= 2:
+            # Multi-modal RGB-IR logic
+            rgb_img, ir_img = image[0], image[1]
+            orig_h, orig_w = rgb_img.shape[:2]
+            
+            # Preprocess both
+            rgb_tensor, ratio, pad = self._preprocess_multi(rgb_img, mode="rgb")
+            ir_tensor, _, _ = self._preprocess_multi(ir_img, mode="ir")
+            
+            # Run inference
+            input_feed = {"rgb": rgb_tensor, "ir": ir_tensor}
+            outputs = self.session.run(None, input_feed)
+            
+            # RT-DETR variant post-processing
+            # Guide says: Output 1: pred_scores (Batch, 300, 3), Output 2: pred_boxes (Batch, 300, 4)
+            # Usually Index 0 is pred_boxes, Index 1 is pred_scores or vice-versa. 
+            # We check shapes to be sure.
+            pred_boxes, pred_scores = None, None
+            for out in outputs:
+                if out.shape[-1] == 4: pred_boxes = out
+                if out.shape[-1] == 3: pred_scores = out # 3 classes as per guide
+            
+            if pred_boxes is not None and pred_scores is not None:
+                return self._postprocess_rgbir(pred_boxes, pred_scores, orig_w, orig_h, ratio, pad, conf)
+            else:
+                logger.error(f"[Detector] RGB-IR output shapes mismatch. Outputs: {[o.shape for o in outputs]}")
+                return []
+        
+        # Standard single-input logic
+        if isinstance(image, list): image = image[0]
         orig_h, orig_w = image.shape[:2]
         input_tensor, ratio, pad = self._preprocess(image)
         
@@ -194,14 +237,6 @@ class Detector:
                 # Flatten to find first detection row regardless of batching
                 sample = out.reshape(-1, out.shape[-1])[0] if out.ndim >= 2 else out
                 logger.info(f"[ONNX Diagnostic] Sample first row: {sample.tolist()[:10]}")
-            if i == 1 and out.size > 0:
-                 # Sample scores
-                 s_sample = out.flatten()[:10]
-                 logger.info(f"[ONNX Diagnostic] Sample scores: {s_sample.tolist()}")
-            if i == 2 and out.size > 0:
-                 # Sample class IDs
-                 c_sample = out.flatten()[:10]
-                 logger.info(f"[ONNX Diagnostic] Sample class IDs: {c_sample.tolist()}")
 
         # Determine effective primary output
         primary_out = outputs[0]
@@ -236,6 +271,36 @@ class Detector:
         # BGR 鈫?RGB, normalize, NCHW
         rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         tensor = np.transpose(rgb, (2, 0, 1))[np.newaxis]
+        return tensor, ratio, (pad_w, pad_h)
+
+    def _preprocess_multi(
+        self, image: np.ndarray, mode: str = "rgb"
+    ) -> Tuple[np.ndarray, float, Tuple[int, int]]:
+        """RGB-IR specific letterbox + Mean/Std normalization."""
+        size = self.INPUT_SIZE
+        h, w = image.shape[:2]
+        ratio = min(size / h, size / w)
+        new_h, new_w = int(h * ratio), int(w * ratio)
+        resized = cv2.resize(image, (new_w, new_h))
+        pad_h = (size - new_h) // 2
+        pad_w = (size - new_w) // 2
+        padded = np.full((size, size, 3), 114, dtype=np.uint8)
+        padded[pad_h:pad_h + new_h, pad_w:pad_w + new_w] = resized
+        
+        # RGB Conversion & 0~1 range
+        img_f = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        
+        # Apply Mean/Std normalization
+        if mode == "rgb":
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        else: # ir
+            mean = np.array([0.323, 0.323, 0.323], dtype=np.float32)
+            std = np.array([0.1281, 0.1281, 0.1281], dtype=np.float32)
+            
+        img_f = (img_f - mean) / std
+        
+        tensor = np.transpose(img_f, (2, 0, 1))[np.newaxis]
         return tensor, ratio, (pad_w, pad_h)
 
     def _postprocess(
@@ -358,6 +423,59 @@ class Detector:
             err_msg = f"[CRITICAL ERROR] Task {task_id if task_id else 'DirectCall'}: {str(e)}\n{traceback.format_exc()}"
             logger.error(err_msg)
             return []
+
+    def _postprocess_rgbir(
+        self, 
+        pred_boxes: np.ndarray, 
+        pred_scores: np.ndarray, 
+        orig_w: int, 
+        orig_h: int, 
+        ratio: float, 
+        pad: Tuple[int, int], 
+        conf_thresh: float
+    ) -> List[Detection]:
+        """Post-process for RT-DETR variant (No NMS)."""
+        if pred_boxes.ndim == 3: pred_boxes = pred_boxes[0]
+        if pred_scores.ndim == 3: pred_scores = pred_scores[0]
+        
+        detections = []
+        pad_w, pad_h = pad
+        
+        for i in range(len(pred_scores)):
+            scores = pred_scores[i]
+            cls_idx = int(np.argmax(scores))
+            conf = float(scores[cls_idx])
+            
+            if conf >= conf_thresh:
+                cx, cy, bw, bh = pred_boxes[i]
+                
+                # Inverse Normalization (to 640x640 scale)
+                # x_center = cx * 640
+                # x_min = (x_center - half_w - pad_x) / ratio
+                bx1 = int(((cx - bw / 2) * self.INPUT_SIZE - pad_w) / ratio)
+                by1 = int(((cy - bh / 2) * self.INPUT_SIZE - pad_h) / ratio)
+                bx2 = int(((cx + bw / 2) * self.INPUT_SIZE - pad_w) / ratio)
+                by2 = int(((cy + bh / 2) * self.INPUT_SIZE - pad_h) / ratio)
+                
+                # Clamp
+                bx1, by1 = max(0, bx1), max(0, by1)
+                bx2, by2 = min(orig_w, bx2), min(orig_h, by2)
+                
+                # Mapping
+                cls_name = f"Class {cls_idx}"
+                if self.label_mapping:
+                    cls_name = self.label_mapping.get(cls_idx, self.label_mapping.get(str(cls_idx), cls_name))
+                elif cls_idx < len(self.class_names):
+                    cls_name = self.class_names[cls_idx]
+
+                detections.append(Detection(
+                    box=[bx1, by1, bx2, by2],
+                    confidence=conf,
+                    class_name=cls_name
+                ))
+        
+        logger.info(f"[Detector] RGB-IR post-process success: {len(detections)} detections")
+        return detections
 
     # 鈹€鈹€ Drawing helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 

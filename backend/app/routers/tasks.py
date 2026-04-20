@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import shutil
@@ -19,12 +20,13 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.config import config
-from app.database import get_session
+from app.database import get_session, engine
 from app.dependencies import check_storage_limit, get_current_user
 from app.models.model import DetectionModel
 from app.models.result import Result
 from app.models.task import Task
 from app.models.user import User
+from app.services.notifier import notifier
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -300,22 +302,36 @@ async def execute_task(
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    if task.status not in ("pending", "paused"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot execute task in '{task.status}' status. Allowed: pending, paused",
-        )
+    # V12: Allow re-executing 'running' streams (Force Restart)
+    if task.status == "running" and task.task_type != "stream":
+        raise HTTPException(status_code=400, detail="Task is already running")
+    
+    if task.status not in ["pending", "paused", "failed", "exception", "running"]:
+        raise HTTPException(status_code=400, detail=f"Cannot execute task in '{task.status}' status. Allowed: pending, paused, failed, exception, running(streams)")
 
     from app.services.task_runner import stream_manager, task_runner
 
     if task.task_type == "stream":
-        # Stream tasks managed separately
+        # Stream tasks managed separately: Start the grabbers IMMEDIATELY (Hot Stream)
+        from app.models.model import DetectionModel
+        dm = session.get(DetectionModel, task.model_id)
+        if not dm:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        mapping = None
+        if dm.label_config:
+            try: mapping = json.loads(dm.label_config)
+            except: pass
+
+        # Immediate Success Transition (V9-Realtime)
         task.status = "running"
         task.updated_at = datetime.utcnow()
         session.add(task)
         session.commit()
-        stream_manager.mark_ready(task_id)
-        return {"message": "Stream task ready", "position": 0}
+        
+        # Start Backend Stream (Lazy Grabber)
+        stream_manager.start_stream(task.id, task.source_path, dm.file_path, mapping)
+        return {"message": "Stream execution started", "position": 0}
     else:
         # Check if already queued
         if task.status == "queued":

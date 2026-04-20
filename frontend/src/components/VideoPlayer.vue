@@ -5,7 +5,7 @@
     </div>
 
     <div v-else-if="!frameSrc" class="loading-state">
-      <a-spin tip="正在连接视频流..." />
+      <a-spin :tip="retryInfo ? `正在重试连接 (${retryInfo.attempt}/${retryInfo.max})...` : '正在连接视频流...'" />
     </div>
 
     <div v-else class="frame-container">
@@ -70,6 +70,7 @@ const frameSrc = ref('')
 const detections = ref<any[]>([])
 const status = ref('running')
 const errorMsg = ref('')
+const retryInfo = ref<{ attempt: number, max: number } | null>(null)
 
 let ws: WebSocket | null = null
 
@@ -83,6 +84,12 @@ onUnmounted(() => {
 
 function connect() {
   const token = localStorage.getItem('token')
+  
+  // V16: Reset state immediately to avoid ghost frames
+  frameSrc.value = ''
+  errorMsg.value = ''
+  retryInfo.value = null
+  
   // Fix: Include taskId in the path as required by the backend
   ws = new WebSocket(`${props.wsUrl}/${props.taskId}?token=${token}`)
 
@@ -92,8 +99,11 @@ function connect() {
       if (data.type === 'frame') {
         frameSrc.value = `data:image/jpeg;base64,${data.data}`
         detections.value = data.detections || []
+      } else if (data.type === 'retry') {
+        retryInfo.value = { attempt: data.attempt, max: data.max }
+        // V10: Clear frozen frame immediately to show retry spinner
+        frameSrc.value = ''
       } else if (data.type === 'error') {
-        // High priority error from backend
         errorMsg.value = data.message
         status.value = 'failed'
       } else if (data.type === 'status') {

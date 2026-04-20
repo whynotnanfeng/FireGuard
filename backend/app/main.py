@@ -1,6 +1,17 @@
 import asyncio
+import json
 import logging
+import os
+
+# V30: Precise 5-3 Protocol Alignment (1.0s FFMPEG timeout)
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|stimeout;1000000|probesize;32|analyzeduration;0|rtsp_flags;nobuffer|reorder_queue_size;0"
+
 from pathlib import Path
+
+# --- GLOBAL PERFORMANCE OPTIMIZATION ---
+# Using hybrid UDP+TCP + 128KB probe + zero reorder queue.
+# 'udp+tcp' allows fastest connection with robust fallback to TCP if UDP is blocked.
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp+tcp|stimeout;5000000|probesize;32|analyzeduration;0|rtsp_flags;nobuffer|reorder_queue_size;0"
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import config
 from app.database import create_db_and_tables
 from app.routers import auth, models, tasks
+from app.services.notifier import notifier
 from app.utils.logger import setup_logging
 
 # Initialize Logging
@@ -75,11 +87,27 @@ app.mount("/api/results", StaticFiles(directory=str(config.RESULTS_DIR)), name="
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
-async def startup():
+async def startup_event():
     create_db_and_tables()
-    from app.services.task_runner import task_runner
+    from app.services.task_runner import task_runner, stream_manager
     asyncio.create_task(task_runner.start())
-    logger.info("🔥 Fire Detection API started")
+    stream_manager.start_monitor()
+    logger.info("\U0001f525 Fire Detection API started")
+
+
+# ── WebSocket: Notifications ──────────────────────────────────────────────────
+
+@app.websocket("/ws/notifications")
+async def websocket_notifications(websocket: WebSocket):
+    await notifier.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive, listen for nothing or pings
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        notifier.disconnect(websocket)
+    except Exception:
+        notifier.disconnect(websocket)
 
 
 # ── WebSocket: Real-time Stream ───────────────────────────────────────────────
@@ -142,30 +170,16 @@ async def websocket_stream(
         from app.services.detector import get_detector
         from app.services.video_stream import VideoStream
         from app.services.task_runner import stream_manager
-        import json
+        stream = stream_manager.get_stream(task_id)
+        if not stream:
+            # Fallback: If for some reason Execute wasn't called or stream died
+            await websocket.send_text(json.dumps({"type": "error", "message": "Stream not initialized. Please click Execute first."}))
+            return
 
-        # --- Reference the same label matching strategy as image/video tasks ---
-        mapping = None
-        if dm and dm.label_config:
-            try:
-                mapping = json.loads(dm.label_config)
-                logger.info(f"Stream Task {task_id}: Using synced label mapping: {mapping}")
-            except Exception as e:
-                logger.warning(f"Stream Task {task_id}: Failed to parse label_config: {e}")
-
-        detector = get_detector(model_path, label_mapping=mapping)
-        stream = VideoStream(source, detector)
-
-        # Sync stream pause state
-        if stream_manager.is_paused(task_id):
-            stream.pause()
-        
-        # --- FAST CONNECTION: Avoid double initialization blocking ---
-        # We start the stream.run loop immediately so Websocket activates instantly.
-        # Continuous run
+        # Continuous run using the pre-heated stream
         await stream.run(websocket)
 
-        # After run finishes, if it stopped due to a new internal error (e.g. 60s timeout)
+        # After run finishes, if it stopped due to internal error (e.g. max retries)
         if stream._error_msg:
              with Session(engine) as session:
                 db_task = session.get(Task, task_id)
@@ -191,6 +205,10 @@ async def websocket_stream(
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
+
+@app.get("/")
+def read_root():
+    return {"message": "Fire Detection API is online. Visit /api/docs for documentation."}
 
 @app.get("/api/health")
 def health():

@@ -189,6 +189,20 @@ async function submit() {
              message.warning('请输入资源地址')
              return
          }
+         
+         // Scheme Validation (V6)
+         const url = form.source_url.toLowerCase().trim();
+         if (form.task_type === 'stream') {
+             if (!url.startsWith('rtsp://')) {
+                 message.error('实时视频流任务地址必须以 rtsp:// 开头');
+                 return;
+             }
+         } else {
+             if (url.startsWith('rtsp://')) {
+                 message.error('图片或视频检测任务不支持 rtsp:// 地址，请使用 HTTP 链接或上传文件');
+                 return;
+             }
+         }
     }
 
     const fd = new FormData()
