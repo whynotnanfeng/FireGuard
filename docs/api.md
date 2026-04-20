@@ -1,93 +1,105 @@
-# API 文档 (火灾监测系统)
+# API 文档 (FireGuard v1.2.0)
 
 ## 基础信息
 
 - **Base URL**: `http://localhost:8000/api`
-- **认证方式**: JWT Bearer Token (在 Header 中携带 `Authorization: Bearer {token}`)
-- **核心状态**: 
-  - `pending`: 等待执行
-  - `running`: 任务执行中
-  - `completed`: 任务已圆满完成
-  - `failed`: 执行中出现异常
+- **认证方式**: JWT Bearer Token (Header: `Authorization: Bearer {token}`)
+
+### 统一响应格式 (ApiResponse)
+遵循项目 `api-design` 规范，所有成功响应均采用以下包裹格式：
+```json
+{
+  "data": { ... }
+}
+```
 
 ---
 
 ## 1. 模型管理 (Models)
 
 ### 获取模型列表
-`GET /models`
-返回当前用户上传的所有模型及其配置。
-
-### 上传模型
-`POST /models` (multipart/form-data)
-- `name`: 模型名称 (必填)
-- `input_types`: 支持的通道类型，如 `["rgb"]` (必填)
-- `file`: 模型文件 (.pt / .onnx) (必填)
-- `label_config`: 初始标签映射 (可选 JSON 字符串)
-
-### 更新模型配置（含标签映射）
-`PUT /models/{id}`
-**重点**: 用于更新模型名称、描述以及核心的 `label_config`。
+- **Method**: `GET /models`
+- **Success Status**: `200 OK`
+- **Response**:
 ```json
 {
-  "name": "更新后的名称",
-  "label_config": {
-    "0": "smoke",
-    "1": "fire"
-  }
+  "data": [
+    { "id": "uuid", "name": "YOLOv8-Small", "label_config": { "0": "fire" } }
+  ]
 }
 ```
+
+### 上传模型
+- **Method**: `POST /models`
+- **Success Status**: `201 Created`
+- **Request (form-data)**: `name`, `file`, `label_config`
+
+### 更新模型
+- **Method**: `PUT /models/{id}`
+- **Success Status**: `200 OK`
 
 ---
 
 ## 2. 任务管理 (Tasks)
 
 ### 创建检测任务
-`POST /tasks` (multipart/form-data)
-- `name`: 任务显示名称
-- `task_type`: `image` | `video` | `stream`
-- `model_id`: 关联的模型唯一标识
-- `source_type`: `upload` (文件上传) | `url` (网络地址)
-- `rgb_files`: 原始影像文件 (多文件支持)
+- **Method**: `POST /tasks`
+- **Success Status**: `201 Created`
+- **Request (form-data)**: `name`, `task_type`, `model_id`, `rgb_files`
 
 ### 执行任务
-`POST /tasks/{task_id}/execute`
-将任务推入后台处理队列。
+- **Method**: `POST /tasks/{id}/execute`
+- **Success Status**: `202 Accepted`
+- **Description**: 任务进入异步处理队列。
 
-### 获取结果
-`GET /tasks/{task_id}/result`
-根据任务类型返回不同的结果载体：
-- **图片/视频**: 返回带标注的媒体 URL 与结构化数据。
-- **流媒体**: 返回 WebSocket 地址 `ws://.../ws/stream/{task_id}`。
-
----
-
-## 3. 实时消息 (WebSocket)
-
-### 实时流渲染数据帧
-连接: `WS /ws/stream/{task_id}?token={token}`
-服务器将以约 30FPS 的速率推送以下格式：
+### 获取任务状态与结果
+- **Method**: `GET /tasks/{id}`
+- **Success Status**: `200 OK`
+- **Response**:
 ```json
 {
-  "type": "frame",
-  "data": "base64_encoded_image",
-  "detections": [
-    {
-      "box": [100, 200, 300, 400],
-      "confidence": 0.98,
-      "class": "fire"
-    }
-  ]
+  "data": {
+    "id": "uuid",
+    "status": "running",
+    "result_url": "/api/tasks/uuid/result"
+  }
 }
 ```
 
 ---
 
-## 错误响应规范
+## 3. 错误响应规范
 
-| 状态码 | 业务背景 |
-|---|---|
-| 401 | Token 无效或过期，请重新登录 |
-| 403 | 非法操作他人的任务数据 |
-| 409 | 冲突操作（如试图删除正在被任务引用的模型） |
-| 422 | 表单校验未通过 |
+所有错误响应均遵循以下标准格式：
+```json
+{
+  "error": {
+    "code": "error_code_string",
+    "message": "Human readable message",
+    "details": []
+  }
+}
+```
+
+| 状态码 | 错误码 (Code) | 描述 |
+|---|---|---|
+| 401 | `unauthorized` | Token 无效或过期 |
+| 403 | `forbidden` | 权限不足（操作他人资源） |
+| 404 | `not_found` | 资源不存在 |
+| 409 | `conflict` | 状态冲突（如模型正在被使用） |
+| 422 | `validation_error` | 输入参数校验失败 |
+
+---
+
+## 4. 实时消息 (WebSocket)
+
+### 视频流渲染
+- **URL**: `WS /ws/stream/{task_id}?token={token}`
+- **Message Format**:
+```json
+{
+  "type": "frame",
+  "data": "base64_string",
+  "detections": [{ "box": [x1, y1, x2, y2], "class": "fire" }]
+}
+```
