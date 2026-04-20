@@ -1,5 +1,5 @@
 <template>
-  <div class="video-player">
+  <div class="video-player" role="region" aria-label="视频播放器">
     <div v-if="errorMsg" class="error-msg">
       <WarningOutlined /> {{ errorMsg }}
     </div>
@@ -9,7 +9,7 @@
     </div>
 
     <div v-else class="frame-container">
-      <img :src="frameSrc" class="video-frame" />
+      <img :src="frameSrc" class="video-frame" role="img" aria-label="实时视频流" />
       
       <!-- Overlays for detections -->
       <div 
@@ -35,13 +35,14 @@
           type="primary" 
           shape="circle"
           @click="togglePause"
+          :aria-label="status === 'running' ? '暂停视频' : '恢复视频'"
         >
           <template #icon>
             <PauseCircleOutlined v-if="status === 'running'" />
             <PlayCircleOutlined v-else />
           </template>
         </a-button>
-        <a-button danger shape="circle" @click="stop">
+        <a-button danger shape="circle" @click="stop" aria-label="停止播放">
           <template #icon><CloseOutlined /></template>
         </a-button>
       </div>
@@ -59,6 +60,17 @@ import {
   CloseOutlined
 } from '@ant-design/icons-vue'
 
+interface Detection {
+  box: [number, number, number, number]
+  class: string
+  confidence: number
+}
+
+interface RetryInfo {
+  attempt: number
+  max: number
+}
+
 const props = defineProps<{
   taskId: string
   wsUrl: string
@@ -67,10 +79,10 @@ const props = defineProps<{
 const emit = defineEmits(['close', 'status-change'])
 
 const frameSrc = ref('')
-const detections = ref<any[]>([])
+const detections = ref<Detection[]>([])
 const status = ref('running')
 const errorMsg = ref('')
-const retryInfo = ref<{ attempt: number, max: number } | null>(null)
+const retryInfo = ref<RetryInfo | null>(null)
 
 let ws: WebSocket | null = null
 
@@ -99,6 +111,7 @@ function connect() {
       if (data.type === 'frame') {
         frameSrc.value = `data:image/jpeg;base64,${data.data}`
         detections.value = data.detections || []
+        retryInfo.value = null
       } else if (data.type === 'retry') {
         retryInfo.value = { attempt: data.attempt, max: data.max }
         // V10: Clear frozen frame immediately to show retry spinner
@@ -108,6 +121,9 @@ function connect() {
         status.value = 'failed'
       } else if (data.type === 'status') {
         status.value = data.status
+        if (data.status === 'exception' && data.message) {
+          errorMsg.value = data.message
+        }
         emit('status-change', data.status)
       }
     } catch (e) {
@@ -120,6 +136,8 @@ function connect() {
     if (!errorMsg.value) {
        if (status.value !== 'ended' && status.value !== 'paused') {
           errorMsg.value = '视频流连接已终止 (超时或源异常)'
+          status.value = 'exception'
+          emit('status-change', 'exception')
        }
     }
   }

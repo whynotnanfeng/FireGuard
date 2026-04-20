@@ -33,3 +33,16 @@ simulator/data/
 simulator/uploads/
 testdata/
 
+# AI Agent Tooling (Internal system data)
+skills/
+CLAUDE.md
+skills-lock.json
+.agents/
+.trae/
+.kiro/
+.claude/
+.antigravity/
+
+# Local Test Caches
+.pytest_cache/
+

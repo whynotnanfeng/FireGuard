@@ -38,45 +38,42 @@ class VideoStream:
         self._grabbers_started = False
         self._start_time = time.time() # V31: Absolute session start
         self._last_frame_time = self._start_time
+        self._last_broadcast_status: Optional[str] = None
+        self._last_broadcast_msg: Optional[str] = None
 
     def _active_broadcast(self, status: str, msg: str = ""):
         """Safe active broadcast from background thread to WebSocket and DB (V24)."""
+        if not self.loop: return
+        
         try:
             from app.services.notifier import notifier
-            from app.database import engine
-            from app.models.task import Task
-            from sqlmodel import Session
-            
             now = time.time()
             elapsed = now - self._start_time 
             
-            # V33 Physical Shield: 5s Silence for retries
-            final_status = status
-            final_msg = msg
-            if elapsed < 5.0:
-                final_status = "running"
-                final_msg = "正在连接..."
-
-            # thread-safe call into the event loop
-            try:
-                self.loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(notifier.broadcast_status(self.task_id, final_status, final_msg))
-                )
-            except Exception as e:
-                logger.error(f"WS Broadcast error: {e}")
+            # V46: Delegate WS filtering to Notifier layer
+            # This call always triggers, but Notifier only sends if content changed
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(notifier.broadcast_status(self.task_id, status, msg))
+            )
             
-            # Save to DB on major transitions
-            if final_status in ["exception", "completed"] or elapsed % 3 < 0.1:
+            # Save to DB on major transitions or heartbeat
+            terminal_statuses = ["exception", "completed", "ended", "failed"]
+            if status in terminal_statuses or (elapsed % 3.0 < 0.1):
+                from app.database import engine
+                from app.models.task import Task
+                from sqlmodel import Session
                 try:
                     with Session(engine) as session:
                         task = session.get(Task, self.task_id)
                         if task:
-                            task.status = final_status
-                            task.status_description = final_msg
+                            task.status = status
+                            if msg:
+                                task.error_msg = msg
                             session.add(task)
                             session.commit()
+                            logger.info(f"[DB Sync] Task {self.task_id} status={status}")
                 except Exception as e:
-                    logger.error(f"Error updating task status to DB: {e}")
+                    logger.error(f"Failed to sync status to DB: {e}")
         except Exception as e:
             logger.error(f"[Stream] Error in active broadcast: {e}")
 
@@ -84,8 +81,9 @@ class VideoStream:
         """V33 Background Sentinel: Ensures 'Connecting' visibility while grabber is blocked."""
         from app.services.notifier import notifier
         logger.info(f"[Sentinel] Started for task {self.task_id}")
-        for i in range(10): # 10 ticks * 0.5s = 5s
-            if self._stopped:
+        for i in range(3): # 3 ticks * 2s = 6s
+            if self._stopped or self._ret:
+                logger.info(f"[Sentinel] Early exit for task {self.task_id} (ret={self._ret})")
                 break
             # Force the handshake message via threadsafe call
             try:
@@ -93,7 +91,7 @@ class VideoStream:
                     lambda: asyncio.create_task(notifier.broadcast_status(self.task_id, "running", "正在连接..."))
                 )
             except: pass
-            time.sleep(0.5)
+            time.sleep(2.0)
         logger.info(f"[Sentinel] Finished for task {self.task_id}")
 
     def start_grabbers(self) -> None:
@@ -185,84 +183,58 @@ class VideoStream:
                 
                 last_action_time = now # Record the start of this cycle
 
-                # V32 State Machine
-                if is_sudden_drop:
-                    if retry_count == 0: retry_count = 1
-                    else: retry_count += 1
-                else:
-                    if session_elapsed > INITIAL_GRACE:
-                        if retry_count == 0: retry_count = 1
-                        else: retry_count += 1
-                    else:
-                        retry_count = 0 
-
-                # Broadcaster Override (V32)
+                # V32 State Machine: Only increment public retry count after initial grace
+                # But internal reconnection happens immediately.
+                if session_elapsed > INITIAL_GRACE:
+                    retry_count += 1
+                
                 display_status = "正在连接..."
                 display_count = 0
-                
-                if session_elapsed >= INITIAL_GRACE:
-                    if retry_count > 0:
-                        display_status = f"正在重试连接 ({retry_count}/{self._max_retries})..."
-                        display_count = retry_count
+                if retry_count > 0:
+                    display_status = f"正在重试连接 ({retry_count}/{self._max_retries})..."
+                    display_count = retry_count
                 
                 with self._lock:
                     self._retry_counts[idx] = display_count
-                    self._ret = False
+                    # We only set _ret to False if we are truly failing after the initial grace
+                    if session_elapsed > INITIAL_GRACE:
+                        self._ret = False
                 
                 self._active_broadcast("running", display_status)
 
                 # Termination checks
                 if retry_count > self._max_retries:
-                    self._active_broadcast("exception", "已达重试上限，请检查视频源")
+                    self._error_msg = "已达重试上限，请检查视频源"
+                    self._active_broadcast("exception", self._error_msg)
                     self._stopped = True; break
                 if session_elapsed > MAX_RECONNECT_SECONDS:
-                    self._active_broadcast("exception", "连接超时，请确认模拟流状态")
+                    self._error_msg = "连接超时，请确认模拟流状态"
+                    self._active_broadcast("exception", self._error_msg)
                     self._stopped = True; break
 
                 # Attempt capture
                 if cap is not None: cap.release()
                 cap = cv2.VideoCapture(source_url, cv2.CAP_FFMPEG)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                last_action_time = now
                 continue
 
-            # Phase 2: Frame Reading & State Interception
+            # Phase 2: Frame Reading
             ret, frame = cap.read()
             if not ret:
-                # Failure logic
-                if fresh_frame_count >= STABILITY_THRESHOLD:
-                    is_sudden_drop = True
-                else:
-                    is_sudden_drop = False
-                
                 cap.release()
                 cap = None
-                fresh_frame_count = 0
                 continue
 
-            # Successful read - INTERCEPTOR LOGIC
-            fresh_frame_count += 1
-            is_sudden_drop = False
+            # Successful read
+            if not self._ret or retry_count > 0:
+                retry_count = 0
+                self._active_broadcast("running", "")
             
-            # V32: Use "正在连接" until stable AND session grace has passed
-            if session_elapsed < INITIAL_GRACE or fresh_frame_count < STABILITY_THRESHOLD:
-                self._active_broadcast("running", "正在连接...")
-                display_count = 0
-            else:
-                # Fully stable
-                if retry_count > 0 or self._error_msg:
-                    retry_count = 0; self._error_msg = ""
-                    self._active_broadcast("running", "")
-                display_count = 0
-
             with self._lock:
                 self._latest_frames[idx] = frame
                 self._ret = True
-                self._retry_counts[idx] = display_count
-
-            with self._lock:
-                self._latest_frames[idx] = frame
-                self._ret = True
-                self._retry_counts[idx] = display_count
+                self._retry_counts[idx] = 0
                 self._last_frame_time = now
 
         if cap is not None:
@@ -284,8 +256,12 @@ class VideoStream:
 
                 loop_start = time.time()
 
-                # V9 Watchdog: If no frame for 1.5s, force retry UI to bypass OpenCV block
-                is_lagging = (time.time() - self._last_frame_time) > 1.5
+                # V9 Watchdog: If no frame for 1.5s, force retry UI
+                # V42: Grace period (5s) only applies if we haven't successfully read ANY frame yet.
+                lag = time.time() - self._last_frame_time
+                is_lagging = lag > 1.5
+                if not self._ret:
+                    is_lagging = is_lagging and (time.time() - self._start_time) > 5.0
                 
                 # Broadcast retry status to client if any source is reconnecting or lagging
                 max_current_retry = 0
@@ -367,10 +343,34 @@ class VideoStream:
         except Exception as e:
             logger.error(f"VideoStream execution error: {e}")
         finally:
-            # IMPORTANT: Do NOT call self.stop() here. 
-            # We want the background grabbers to keep running even if 
-            # the viewer disconnects, to support Hot-Start for the next view.
-            pass
+            # V41: Disconnection Fallback. If task is still 'running' in DB, force it to 'ended' or 'exception'
+            try:
+                from app.database import engine
+                from app.models.task import Task
+                from sqlmodel import Session
+                with Session(engine) as session:
+                    task = session.get(Task, self.task_id)
+                    if task and task.status == "running":
+                        # If frame grabber stopped with error, use 'exception'
+                        if self._stopped and self._error_msg:
+                            task.status = "exception"
+                            task.error_msg = self._error_msg
+                        else:
+                            # If WS closed but grabber is fine, we don't necessarily want to 'stop' the task
+                            # however, the user says "status did not update".
+                            # In this system, if the viewer closes, the detection task usually continues?
+                            # Actually, TaskRunner manages the lifecycle. VideoStream is just the view.
+                            # But if it's an 'exception' termination (stop() or grabber error), it should be updated.
+                            pass
+                        session.add(task)
+                        session.commit()
+            except Exception as e:
+                logger.error(f"Failed fallback DB sync: {e}")
+
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 

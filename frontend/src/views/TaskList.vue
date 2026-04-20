@@ -147,12 +147,25 @@ function formatDate(ds: string) {
   return new Date(ds).toLocaleString()
 }
 
+let debounceTimer: any = null
 async function loadData() {
-  await taskStore.fetchTasks({
-    skip: (page.value - 1) * limit.value,
-    limit: limit.value,
-    status: filters.status || undefined
-  })
+  // Clear any pending requests
+  if (debounceTimer) clearTimeout(debounceTimer)
+  
+  // Schedule a new request after 500ms of quiet
+  debounceTimer = setTimeout(async () => {
+    try {
+      await taskStore.fetchTasks({
+        skip: (page.value - 1) * limit.value,
+        limit: limit.value,
+        status: filters.status || undefined
+      })
+    } catch (e) {
+      console.error('Failed to reload task list', e)
+    } finally {
+      debounceTimer = null
+    }
+  }, 500)
 }
 
 let notificationWs: WebSocket | null = null

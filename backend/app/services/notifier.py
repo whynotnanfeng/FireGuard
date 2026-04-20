@@ -11,6 +11,7 @@ class Notifier:
     def __init__(self):
         # Set of active notification WebSockets
         self._active_connections: Set[WebSocket] = set()
+        self._last_states: Dict[str, str] = {} # task_id -> "status:message"
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -23,9 +24,17 @@ class Notifier:
             logger.info(f"Notification client disconnected. Remaining: {len(self._active_connections)}")
 
     async def broadcast_status(self, task_id: str, status: str, message: str = ""):
-        """Broadcast status change to all connected clients."""
+        """Broadcast status change to all connected clients (Filtered)."""
         if not self._active_connections:
             return
+
+        # V45: Global State Wall - Only broadcast if CONTENT truly changes
+        state_key = f"{status}:{message}"
+        if self._last_states.get(task_id) == state_key:
+            return
+        
+        self._last_states[task_id] = state_key
+        logger.info(f"[Notifier] Broadcasting update for {task_id}: {status} ({message})")
 
         payload = json.dumps({
             "type": "task_status_update",

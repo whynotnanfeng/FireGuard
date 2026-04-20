@@ -47,4 +47,10 @@ cd frontend && npm run test
 - [通用测试规范](.claude/rules/common/testing.md)
 - [安全审查清单](.claude/rules/common/security.md)
 - [Python 编码规范](.claude/rules/python/coding-style.md)
-- [Vue/TypeScript 开发规范](.claude/rules/typescript/coding-style.md)
+## 6. 沟通与交互准则 (Communication & Interaction)
+- **中文优先**: 所有沟通、方案说明、状态报告及反馈必须优先使用**中文**。
+- **高效展示**: 
+  - 方案展示应遵循 `背景 -> 方案 -> 影响 -> 下一步` 的高效结构。
+  - 优先使用图表（Mermaid 等）和结构化列表展示复杂逻辑。
+  - 交付物需具备“高级感”与“美感”，设计风格需符合现代审美（如深色模式、精细间距、微动态效果）。
+- **简洁直达**: 避免冗余的客套话。对于技术决策，直接给出最优解及理由（Pro/Con），不确定的地方提出明确的问题。
