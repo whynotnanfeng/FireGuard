@@ -1,11 +1,11 @@
-import asyncio
-import json
-import logging
 import os
-
 # V5.0: FFmpeg容错优化 - TCP传输 + 完整帧保障
 # 移除 low_delay：避免半解码帧导致的水平撕裂
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000|probesize;1000000|analyzeduration;1000000|fflags;+genpts+discardcorrupt"
+
+import asyncio
+import json
+import logging
 
 from pathlib import Path
 
@@ -50,7 +50,7 @@ logger = logging.getLogger("app")
 app = FastAPI(
     title="火灾目标检测系统",
     description="Fire Detection Platform API",
-    version="1.0.0",
+    version="1.3.1",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
@@ -101,8 +101,10 @@ config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/api/results", StaticFiles(directory=str(config.RESULTS_DIR)), name="results")
 
 # --- RT Storage Mounting ---
+# 新架构：DirectHLSWriter 生成的 m3u8/ts 文件通过静态文件服务直接提供
+# 前端访问路径: /storage/{task_id}/stream_rgb.m3u8
 config.VIDEO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/api/storage", NoCacheStaticFiles(directory=str(config.VIDEO_STORAGE_DIR)), name="storage")
+app.mount("/storage", NoCacheStaticFiles(directory=str(config.VIDEO_STORAGE_DIR)), name="storage")
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 

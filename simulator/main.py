@@ -288,8 +288,11 @@ async def upload_video(file: UploadFile = File(...), device_name: str = Form("æœ
 def list_videos():
     videos = []
     meta = get_metadata()
+    active_streams = stream_manager.get_active_streams()
+    active_file_ids = {Path(s["video_path"]).stem for s in active_streams}
+    
     for f in UPLOADS_DIR.iterdir():
-        if f.is_file():
+        if f.is_file() and f.stem not in active_file_ids:
             file_meta = meta.get(f.stem, {})
             videos.append({
                 "file_id": f.stem,

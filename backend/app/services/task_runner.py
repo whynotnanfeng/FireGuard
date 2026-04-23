@@ -110,7 +110,7 @@ class StreamManager:
             
             await asyncio.sleep(5)
 
-    def start_stream(self, task_id: str, source: str, model_path: str, mapping: Optional[dict]) -> "VideoStream":
+    def start_stream(self, task_id: str, source: str, model_path: str, mapping: Optional[dict], is_resume: bool = False) -> "VideoStream":
         """V12: 冷启动 - 始终创建新流实例（由调用方负责先stop旧流）"""
         from app.services.video_stream import VideoStream
         from app.services.detector import get_detector
@@ -141,6 +141,7 @@ class StreamManager:
 
         # 创建并启动新流
         new_stream = VideoStream(task_id, source, detector, token, mapping)
+        new_stream._is_resuming = is_resume
         new_stream.detection_config = detection_config # Inject config
         new_stream.start_grabbers()
 

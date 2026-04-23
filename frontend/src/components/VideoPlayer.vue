@@ -2,21 +2,7 @@
   <div class="video-player-container" role="region" aria-label="视频播放器">
     <div class="video-player">
       <div v-if="showOverlay" class="overlay">
-        <template v-if="streamState === 'connecting'">
-          <div class="state-icon connecting-pulse"></div>
-          <div class="state-label">正在连接视频源...</div>
-        </template>
-        <template v-else-if="streamState === 'retry'">
-          <div class="state-icon retry-spin"></div>
-          <div class="state-label">正在重试连接 ({{ retryAttempt }}/{{ retryMax }})</div>
-        </template>
-        <template v-else-if="streamState === 'loading'">
-          <div class="state-icon loading-bar-wrap">
-            <div class="loading-bar"></div>
-          </div>
-          <div class="state-label">加载中...</div>
-        </template>
-        <template v-else-if="streamState === 'exception'">
+        <template v-if="streamState === 'exception'">
           <div class="state-icon exception-icon">&#9888;</div>
           <div class="state-label">连接中断</div>
           <div class="state-sub">请检查网络或查看历史录像</div>
@@ -34,19 +20,36 @@
           :class="{ 'playback-video': playbackMode }"
           @timeupdate="onTimeUpdate"
           @ended="handleVideoEnded"
-          @play="videoPaused = false"
-          @pause="videoPaused = true"
-          @error="onVideoError"
+          @playing="onVideoPlaying"
+          @pause="onVideoPause"
           @waiting="onVideoWaiting"
-          @stalled="onVideoStalled"
+          @error="onVideoError"
         ></video>
 
         <canvas
-          v-show="streamState === 'running' || playbackMode"
+          v-if="showDetectionData"
           ref="overlayCanvasRef"
           class="video-frame detection-canvas"
           style="position: absolute; top: 0; left: 0; pointer-events: none; z-index: 5;"
         ></canvas>
+
+        <!-- Local Video Loading Overlay -->
+        <div v-if="showVideoOverlay" class="video-overlay-inner">
+          <template v-if="streamState === 'connecting'">
+            <div class="state-icon connecting-pulse"></div>
+            <div class="state-label">正在连接视频源...</div>
+          </template>
+          <template v-else-if="streamState === 'retry'">
+            <div class="state-icon retry-spin"></div>
+            <div class="state-label">正在重试 ({{ retryAttempt }}/{{ retryMax }})</div>
+          </template>
+          <template v-else-if="streamState === 'loading'">
+            <div class="state-icon loading-bar-wrap">
+              <div class="loading-bar"></div>
+            </div>
+            <div class="state-label">画面加载中...</div>
+          </template>
+        </div>
 
         <div class="controls" v-if="canControl">
           <div class="mode-tag" :class="{ 'is-live': !playbackMode }">
@@ -81,13 +84,25 @@
                 <template #icon><RollbackOutlined /></template>
               </a-button>
             </a-tooltip>
+
+            <a-tooltip :title="currentChannel === 'rgb' ? '切换到红外视角' : '切换到可见光视角'">
+              <a-button
+                v-show="isDualStream"
+                shape="circle"
+                @click="toggleChannel"
+                class="rollback-btn"
+                style="margin-left: 12px;"
+              >
+                <template #icon><SwapOutlined /></template>
+              </a-button>
+            </a-tooltip>
           </div>
         </div>
       </div>
 
       <div v-if="shouldShowTimeline" class="history-seekbar-container">
         <div class="seekbar-label" style="color: #eee; font-weight: 500; font-variant-numeric: tabular-nums;">
-          {{ formatDuration(currentGlobalTime) }} / {{ formatDuration(totalDuration) }}
+          {{ displayCurrentTimeStr }} / {{ displayMaxTimeStr }}
         </div>
         <div
           class="seekbar-wrap"
@@ -100,9 +115,9 @@
             {{ hoverTimeAbs }}
           </div>
           <a-slider
-            v-model:value="currentGlobalTime"
-            :max="totalDuration"
-            :tip-formatter="formatDuration"
+            :value="sliderValue"
+            :max="100"
+            :tip-formatter="tipFormatter"
             @change="handleGlobalSeek"
             @afterChange="isUserSeeking = false"
           />
@@ -110,7 +125,7 @@
       </div>
     </div>
 
-    <div class="detection-records-panel">
+    <div class="detection-records-panel" v-if="showRecordsPanel">
       <div class="panel-header">
         <h3>检测记录</h3>
         <a-button size="small" @click="refreshRecords" :loading="loadingRecords">
@@ -163,6 +178,7 @@ import {
   HistoryOutlined,
   RollbackOutlined,
   ThunderboltOutlined,
+  SwapOutlined,
 } from '@ant-design/icons-vue'
 import { Empty, message } from 'ant-design-vue'
 
@@ -193,9 +209,59 @@ let rafId: number | null = null
 let connectionTimeout: any = null
 
 const playbackMode = ref(false)
-let hlsInstance: Hls | null = null
-let liveHlsInstance: Hls | null = null
-const liveVideoReady = ref(false)
+let hls: Hls | null = null;
+const isVideoActuallyPlaying = ref(false); 
+const showDetectionData = computed(() => {
+  // 必须同时满足：业务上处于 running 且 物理屏幕上已出画面
+  return streamState.value === 'running' && isVideoActuallyPlaying.value;
+});
+
+const showRecordsPanel = computed(() => {
+  // 侧边记录栏只要不是异常状态，就应该保持显示，实现分层解耦
+  return !['exception'].includes(streamState.value);
+});
+
+const isVideoPaused = ref(false);
+
+const showVideoOverlay = computed(() => {
+  if (streamState.value === 'exception') return false;
+  // 如果手动暂停了，直接不显示遮罩，让画面可见
+  if (isVideoPaused.value) return false;
+  
+  // 恢复之前较稳定的逻辑：仅在明确的加载/连接/重试状态下显示遮罩
+  // 避免“出帧检测”逻辑过于死板导致的永久黑屏
+  const loadingStates: StreamState[] = ['connecting', 'retry', 'loading', 'recovering'];
+  return !isVideoActuallyPlaying.value && loadingStates.includes(streamState.value);
+});
+
+// Live Timeline Lock
+const isLiveMode = ref(true); 
+const frozenMaxTime = ref(0); 
+
+const sliderValue = computed(() => {
+  if (isLiveMode.value) return 100;
+  const max = frozenMaxTime.value || totalDuration.value;
+  return max > 0 ? (currentGlobalTime.value / max) * 100 : 0;
+});
+
+const displayCurrentTimeStr = computed(() => {
+  if (isLiveMode.value) {
+    return formatDuration(totalDuration.value); 
+  }
+  return formatDuration(currentGlobalTime.value); 
+});
+
+const displayMaxTimeStr = computed(() => {
+  if (isLiveMode.value) {
+    return formatDuration(totalDuration.value);
+  }
+  return formatDuration(frozenMaxTime.value || totalDuration.value); 
+});
+
+const currentGlobalAbsTime = ref<number>(0); 
+const currentFragProgramDateTime = ref<number>(0);
+const currentFragVideoTime = ref<number>(0);
+const firstSessionStartTime = ref<number | null>(null); 
 
 const currentGlobalTime = ref(0)
 const totalDuration = ref(0)
@@ -206,7 +272,13 @@ const seekbarWrapRef = ref<HTMLElement | null>(null)
 const showHoverTooltip = ref(false)
 const hoverX = ref(0)
 const hoverTimeAbs = ref('')
-const taskRealStartTime = ref<number | null>(null)
+
+// Dual-channel support
+const currentChannel = ref<'rgb' | 'ir'>('rgb')
+const currentTask = computed(() => taskStore.tasks.find(t => t.id === props.taskId))
+const isDualStream = computed(() => {
+  return currentTask.value?.input_types?.includes('ir') || false
+})
 
 const records = ref<DetectionRecord[]>([])
 const loadingRecords = ref(false)
@@ -214,8 +286,6 @@ const loadingHistory = ref(false)
 const currentPage = ref(1)
 const pageSize = 20
 let recordsInterval: number | null = null
-let historyInterval: number | null = null
-let liveProgressTimer: number | null = null
 
 const currentDetectionConfig = ref<any>(null)
 
@@ -248,12 +318,43 @@ function onVideoError(e: any) {
   })
 }
 
+function onVideoPlaying() {
+  isVideoActuallyPlaying.value = true;
+  streamState.value = 'running'; 
+  isVideoPaused.value = false;
+  if (!rafId) {
+    renderLoop();
+  }
+}
+
+function onVideoPause() {
+  isVideoActuallyPlaying.value = false;
+  isVideoPaused.value = true;
+  if (rafId) {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+}
+
 function onVideoWaiting() {
+  isVideoActuallyPlaying.value = false;
+  streamState.value = 'loading'; 
   sendDebugLog('VIDEO_WAITING', { msg: 'Buffer empty, waiting...' })
 }
 
 function onVideoStalled() {
   sendDebugLog('VIDEO_STALLED', { msg: 'Network stalled, download stopped' })
+}
+
+// ========== Phase 3: 检测数据缓冲池 (Glass Overlay) ==========
+// 本地数据缓冲池，暂存 WebSocket 或历史 API 传来的检测记录
+const detectionBuffer = ref<Array<{ timestamp: number; boxes: any[]; is_history?: boolean }>>([])
+
+// 只保留最近 5 秒的数据（按 30fps 计算约 150 条），防止内存泄漏
+function pruneDetectionBuffer() {
+  if (detectionBuffer.value.length > 150) {
+    detectionBuffer.value = detectionBuffer.value.slice(-150)
+  }
 }
 
 const lastDetections = ref<any[]>([])
@@ -288,8 +389,7 @@ const drawDetections = (detections: any[]) => {
   if (!ctx) return
 
   if (canvas.width !== media.clientWidth || canvas.height !== media.clientHeight) {
-    canvas.width = media.clientWidth
-    canvas.height = media.clientHeight
+    syncDisplaySize()
   }
   if (canvas.width === 0 || canvas.height === 0) return
 
@@ -351,10 +451,8 @@ const clearCanvas = () => {
 }
 
 const showOverlay = computed(() => {
-  if (playbackMode.value) return false
-  if (liveVideoReady.value) return false
-  return streamState.value !== 'running'
-})
+  return streamState.value === 'exception';
+});
 
 const shouldShowTimeline = computed(() =>
   ['running', 'connecting', 'retry', 'loading', 'exception', 'paused_end'].includes(streamState.value)
@@ -364,14 +462,9 @@ const canControl = computed(() => {
   return streamState.value !== 'exception' || playbackMode.value
 })
 
-const videoPaused = ref(false)
-
 const isActuallyPlaying = computed(() => {
-  if (!playbackMode.value) {
-    return !isFrozen.value
-  } else {
-    return !videoPaused.value
-  }
+  // UI 按钮状态应直接反映视频底层的暂停/播放状态
+  return !isVideoPaused.value;
 })
 
 const paginatedRecords = computed(() => {
@@ -381,7 +474,6 @@ const paginatedRecords = computed(() => {
 
 onMounted(async () => {
   isActive = true
-  fetchTaskStartTime()
   sendDebugLog('COMPONENT_MOUNTED')
 
   try {
@@ -403,19 +495,15 @@ onMounted(async () => {
       })
 
       await loadHistory()
-      initVodHls()
     } else {
       connect()
-      startHistorySync()
-      initLiveHls()
-      startLiveProgressTimer()
     }
+    
+    initPlayer()
   } catch (e) {
     console.error('Failed to load initial config', e)
     connect()
-    startHistorySync()
-    initLiveHls()
-    startLiveProgressTimer()
+    initPlayer()
   }
 
   if (videoPlayerRef.value) {
@@ -430,9 +518,6 @@ onUnmounted(() => {
   try {
     isActive = false
 
-    stopHistorySync()
-    stopLiveProgressTimer()
-
     if (resizeObserver) {
       resizeObserver.disconnect()
       resizeObserver = null
@@ -445,7 +530,12 @@ onUnmounted(() => {
 
     forceDisconnect()
 
-    destroyAllHls()
+    destroyPlayer()
+    
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
 
     if (videoPlayerRef.value) {
       videoPlayerRef.value.pause()
@@ -464,48 +554,32 @@ onUnmounted(() => {
 
 watch(playbackMode, (isPlayback) => {
   if (isPlayback) {
-    stopLiveProgressTimer()
     tasksApi.getDetectionRecords(props.taskId, { limit: 1000 }).then(res => {
       records.value = res.records || []
     }).catch(e => console.warn(e))
 
     loadHistory()
-    destroyLiveHls()
-    liveVideoReady.value = false
-    initVodHls()
-  } else {
-    destroyVodHls()
-    initLiveHls()
-    startLiveProgressTimer()
   }
+  initPlayer()
 })
 
 watch(() => props.taskId, (newId) => {
   if (newId) {
     forceDisconnect()
-    stopHistorySync()
-    stopLiveProgressTimer()
     isFrozen.value = false
-    liveVideoReady.value = false
     playbackMode.value = false
-    destroyAllHls()
+    destroyPlayer()
     connect()
     loadHistory()
-    startHistorySync()
-    initLiveHls()
-    startLiveProgressTimer()
+    initPlayer()
   }
 })
 
-const currentTask = computed(() => taskStore.tasks.find(t => t.id === props.taskId))
 watch(() => currentTask.value?.status, (status) => {
   if (status === 'running' && (streamState.value === 'paused_end' || streamState.value === 'exception')) {
     console.log('[Auto-Sync] Task is running again. Reconnecting...')
     connect()
-    if (!liveHlsInstance) {
-      initLiveHls()
-      startLiveProgressTimer()
-    }
+    initPlayer()
   }
 })
 
@@ -559,8 +633,34 @@ function connect() {
           break
 
         case 'record_event':
-          if (data.record && !playbackMode.value) {
+          // 仅在视频正常播放且为实时模式时，才将新记录推送到实时列表，避免黑屏期数据堆积
+          if (data.record && !playbackMode.value && isVideoActuallyPlaying.value) {
             records.value = [data.record, ...records.value].slice(0, 1000)
+          }
+          break
+
+        case 'detection':
+          // 新架构：接收 AI 推理的实时检测框数据（含绝对时间戳），推入缓冲池
+          if (data.payload && data.payload.boxes) {
+            detectionBuffer.value.push({
+              timestamp: data.payload.timestamp,
+              boxes: data.payload.boxes,
+              is_history: data.payload.is_history ?? false,
+            })
+            pruneDetectionBuffer()
+
+            // 同时更新右侧检测记录列表（保持同步）
+            const record = data.payload.boxes[0]
+            if (record && !playbackMode.value && isVideoActuallyPlaying.value) {
+              records.value.unshift({
+                id: `ws-${Date.now()}`,
+                class_name: record.label || 'unknown',
+                confidence: record.conf || 0,
+                detected_at: new Date(data.payload.timestamp).toISOString(),
+                box: [record.x, record.y, record.x + record.w, record.y + record.h],
+              } as DetectionRecord)
+              if (records.value.length > 1000) records.value.pop()
+            }
           }
           break
 
@@ -589,14 +689,6 @@ function connect() {
           errorMsg.value = ''
           retryAttempt.value = 0
           wsReconnectCount.value = 0
-          if (!liveVideoReady.value && !playbackMode.value) {
-            if (!liveHlsInstance) {
-              initLiveHls()
-              startLiveProgressTimer()
-            } else {
-              liveHlsInstance.startLoad()
-            }
-          }
           break
 
         case 'retry':
@@ -681,147 +773,95 @@ function connect() {
   }
 }
 
-function initLiveHls() {
-  if (!videoPlayerRef.value) return
+function initPlayer() {
+  if (!videoPlayerRef.value) return;
 
-  destroyLiveHls()
+  destroyPlayer();
 
-  const liveUrl = `${tasksApi.getLiveM3u8Url(props.taskId)}?_=${Date.now()}`
+  // 新架构：HLS 文件通过静态文件服务直接访问
+  const streamUrl = `/storage/${props.taskId}/stream_${currentChannel.value}.m3u8`;
+
+  // 历史模式初始化时设为 loading，实时模式设为 connecting
+  streamState.value = playbackMode.value ? 'loading' : 'connecting';
 
   if (Hls.isSupported()) {
-    liveHlsInstance = new Hls({
+    // 新架构：Mediamtx 提供标准 HLS 流，简化错误重试逻辑
+    hls = new Hls({
       enableWorker: true,
-      lowLatencyMode: true,
-      backBufferLength: 90,
-      liveBackBufferLength: 90,
-      liveSyncDurationCount: 1,
-      liveMaxLatencyDurationCount: 3,
       liveDurationInfinity: true,
+      backBufferLength: 900,
       maxBufferLength: 30,
-      maxMaxBufferLength: 600,
-      maxBufferHole: 0.5,
-      highBufferWatchdogPeriod: 2,
-    })
+      manifestLoadingMaxRetry: 3,
+      manifestLoadingRetryDelay: 500,
+      levelLoadingMaxRetry: 3,
+      initialLiveManifestSize: 1,
+    });
 
-    liveHlsInstance.loadSource(liveUrl)
-    liveHlsInstance.attachMedia(videoPlayerRef.value)
+    hls.loadSource(streamUrl);
+    hls.attachMedia(videoPlayerRef.value);
 
-    liveHlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
-      sendDebugLog('LIVE_HLS_READY')
-      liveVideoReady.value = true
-      if (videoPlayerRef.value) {
-        videoPlayerRef.value.muted = true
-        videoPlayerRef.value.play().catch(() => {})
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      sendDebugLog('HLS_MANIFEST_PARSED');
+      if (!videoPlayerRef.value) return;
+
+      const taskStatus = currentTask.value?.status;
+      const liveSyncPos = hls?.liveSyncPosition;
+      const totalDur = hls?.levels[0]?.details?.totalduration || videoPlayerRef.value.duration;
+
+      if (taskStatus === 'running') {
+        // ========== Phase 4: 【执行中】默认进实时 ==========
+        isLiveMode.value = true;
+        playbackMode.value = false;
+        videoPlayerRef.value.currentTime = liveSyncPos || 0;
+        videoPlayerRef.value.play().catch(() => {});
+      } else {
+        // ========== Phase 4: 【已停止】强制进历史，定格总时间，从 0 开始播 ==========
+        isLiveMode.value = false;
+        playbackMode.value = true;
+        frozenMaxTime.value = totalDur;
+        videoPlayerRef.value.currentTime = 0;
+        videoPlayerRef.value.play().catch(e => {
+          console.warn("历史回放自动播放被拦截", e);
+          isVideoPaused.value = true;
+        });
+
+        // 发起 API 请求，一次性获取整段历史录像的 JSON 框数据
+        fetchHistoricalRecords(0, frozenMaxTime.value);
       }
-    })
+    });
 
-    liveHlsInstance.on(Hls.Events.ERROR, (event, data) => {
-      sendDebugLog('LIVE_HLS_ERROR', {
-        errorType: data.type,
-        errorDetail: data.details,
-        fatal: data.fatal,
-      })
+    hls.on(Hls.Events.FRAG_CHANGED, (event, data) => {
+      if (data.frag.programDateTime) {
+        currentGlobalAbsTime.value = data.frag.programDateTime;
+        currentFragProgramDateTime.value = data.frag.programDateTime;
+        currentFragVideoTime.value = data.frag.start;
+        
+        // 记录流的绝对起始参考点
+        if (firstSessionStartTime.value === null) {
+          firstSessionStartTime.value = data.frag.programDateTime - (data.frag.start * 1000);
+        }
+      }
+    });
+
+    // 简化错误处理：Mediamtx 提供的流极其标准，不需要复杂的重连逻辑
+    hls.on(Hls.Events.ERROR, (event, data) => {
       if (data.fatal) {
-        switch (data.type) {
-          case Hls.ErrorTypes.NETWORK_ERROR:
-            setTimeout(() => {
-              if (liveHlsInstance && !playbackMode.value) {
-                liveHlsInstance.startLoad()
-              }
-            }, 2000)
-            break
-          case Hls.ErrorTypes.MEDIA_ERROR:
-            liveHlsInstance?.recoverMediaError()
-            break
-          default:
-            destroyLiveHls()
-            break
-        }
+        console.warn('[HLS] Fatal error:', data.type, data.details);
+        destroyPlayer();
       }
-    })
+    });
   } else if (videoPlayerRef.value.canPlayType('application/vnd.apple.mpegurl')) {
-    videoPlayerRef.value.src = liveUrl
-    liveVideoReady.value = true
+    videoPlayerRef.value.src = streamUrl;
+    videoPlayerRef.value.play().catch(() => {});
   }
 }
 
-function initVodHls() {
-  if (!videoPlayerRef.value) return
-
-  destroyVodHls()
-
-  const vodUrl = `${tasksApi.getMergedM3u8Url(props.taskId)}?mode=vod&_=${Date.now()}`
-
-  if (Hls.isSupported()) {
-    hlsInstance = new Hls({
-      enableWorker: true,
-      backBufferLength: 90,
-    })
-
-    hlsInstance.loadSource(vodUrl)
-    hlsInstance.attachMedia(videoPlayerRef.value)
-
-    hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
-      sendDebugLog('VOD_HLS_READY')
-      if (videoPlayerRef.value) {
-        if (pendingSeekTime !== null) {
-          videoPlayerRef.value.currentTime = pendingSeekTime
-          pendingSeekTime = null
-        } else if (!isUserSeeking.value) {
-          if (currentTask.value?.status === 'running') {
-            hlsInstance?.on(Hls.Events.LEVEL_LOADED, () => {
-              if (videoPlayerRef.value && pendingSeekTime === null && !isUserSeeking.value) {
-                const d = videoPlayerRef.value.duration
-                if (isFinite(d) && d > 0) {
-                  videoPlayerRef.value.currentTime = Math.max(0, d - 0.1)
-                }
-              }
-            }, { once: true })
-          }
-        }
-
-        videoPlayerRef.value.play().catch(() => {})
-      }
-    })
-
-    hlsInstance.on(Hls.Events.ERROR, (event, data) => {
-      if (data.fatal) {
-        switch (data.type) {
-          case Hls.ErrorTypes.NETWORK_ERROR:
-            hlsInstance?.startLoad()
-            break
-          case Hls.ErrorTypes.MEDIA_ERROR:
-            hlsInstance?.recoverMediaError()
-            break
-          default:
-            destroyVodHls()
-            break
-        }
-      }
-    })
-  } else if (videoPlayerRef.value.canPlayType('application/vnd.apple.mpegurl')) {
-    videoPlayerRef.value.src = vodUrl
+function destroyPlayer() {
+  if (hls) {
+    hls.destroy();
+    hls = null;
   }
-}
-
-function destroyLiveHls() {
-  if (liveHlsInstance) {
-    liveHlsInstance.destroy()
-    liveHlsInstance = null
-  }
-  liveVideoReady.value = false
-}
-
-function destroyVodHls() {
-  if (hlsInstance) {
-    hlsInstance.destroy()
-    hlsInstance = null
-  }
-}
-
-function destroyAllHls() {
-  destroyLiveHls()
-  destroyVodHls()
+  isVideoActuallyPlaying.value = false;
 }
 
 async function refreshRecords() {
@@ -851,8 +891,8 @@ async function loadHistory() {
         totalDuration.value = estimatedDuration
       }
 
-      if (merged.first_session_start_time && !taskRealStartTime.value) {
-        taskRealStartTime.value = new Date(merged.first_session_start_time).getTime()
+      if (merged.first_session_start_time) {
+        firstSessionStartTime.value = new Date(merged.first_session_start_time).getTime();
       }
 
       if (!playbackMode.value && records.value.length === 0) {
@@ -874,217 +914,306 @@ async function loadHistory() {
   }
 }
 
-async function fetchTaskStartTime() {
-  try {
-    const task = await tasksApi.get(props.taskId)
-    if (task.first_session_start_time) {
-      taskRealStartTime.value = new Date(task.first_session_start_time).getTime()
-      return
-    }
-  } catch (e) {
-    console.warn("Failed to fetch task start time from task API", e)
-  }
+// fetchTaskStartTime is deprecated as we use programDateTime
 
-  try {
-    const res = await tasksApi.getDetectionRecords(props.taskId, {
-      limit: 1,
-      skip: 0,
-      order: 'asc'
-    })
-    if (res.records && res.records.length > 0) {
-      taskRealStartTime.value = new Date(res.records[0].detected_at).getTime()
-    }
-  } catch (e) {
-    console.warn("Failed to fetch task start time from records", e)
-  }
-}
+// ========== Phase 3: 核心渲染引擎 (requestAnimationFrame) ==========
+// 放弃依赖 WebSocket 的触发，改为根据视频当前的物理进度主动去缓冲池里"捞"框
+function renderLoop() {
+  if (!isActive || !videoPlayerRef.value || !overlayCanvasRef.value) return;
 
-function syncDetectionsToTime(currentTime: number) {
-  if (records.value.length === 0) {
-    clearCanvas()
-    return
-  }
+  const video = videoPlayerRef.value;
+  const canvas = overlayCanvasRef.value;
 
-  const oldestRecord = records.value[records.value.length - 1]
-  const taskStartTime = new Date(oldestRecord.detected_at).getTime()
-  const currentAbsTime = taskStartTime + Math.floor(currentTime * 1000)
+  // 同步 Canvas 尺寸
+  syncDisplaySize();
 
-  const currentDetections = records.value.filter(rec => {
-    const recTime = new Date(rec.detected_at).getTime()
-    return Math.abs(recTime - currentAbsTime) < 1500
-  }).map(rec => ({
-    box: rec.box,
-    class_name: rec.class_name,
-    confidence: rec.confidence
-  }))
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
 
-  syncDisplaySize()
-  if (currentDetections.length > 0) {
-    drawDetections(currentDetections)
+  // 1. 清空画布
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // 2. 获取视频当前正在播放画面的"绝对时间" (毫秒)
+  // 优先使用 HLS.js 提供的 playingDate，回退到基于 frag 时间的计算
+  let currentVideoAbsTime: number;
+  if (hls?.playingDate) {
+    currentVideoAbsTime = hls.playingDate.getTime();
+  } else if (currentFragProgramDateTime.value > 0) {
+    const timeOffsetMs = (video.currentTime - currentFragVideoTime.value) * 1000;
+    currentVideoAbsTime = currentFragProgramDateTime.value + timeOffsetMs;
   } else {
-    clearCanvas()
+    currentVideoAbsTime = Date.now();
   }
+
+  // 3. 去缓冲池里，找与视频当前时间最接近的那一条记录（允许前后 500ms 误差）
+  let closestRecord: { timestamp: number; boxes: any[] } | null = null;
+  let minDiff = Infinity;
+
+  for (const record of detectionBuffer.value) {
+    const diff = Math.abs(record.timestamp - currentVideoAbsTime);
+    if (diff < 500 && diff < minDiff) {
+      minDiff = diff;
+      closestRecord = record;
+    }
+  }
+
+  // 4. 画框！
+  if (closestRecord && closestRecord.boxes.length > 0) {
+    const naturalW = video.videoWidth || canvas.width;
+    const naturalH = video.videoHeight || canvas.height;
+
+    const imgAspect = naturalW / naturalH;
+    const canvasAspect = canvas.width / canvas.height;
+
+    let renderW: number, renderH: number, offsetX: number, offsetY: number;
+
+    if (imgAspect > canvasAspect) {
+      renderW = canvas.width;
+      renderH = canvas.width / imgAspect;
+      offsetX = 0;
+      offsetY = (canvas.height - renderH) / 2;
+    } else {
+      renderH = canvas.height;
+      renderW = canvas.height * imgAspect;
+      offsetX = (canvas.width - renderW) / 2;
+      offsetY = 0;
+    }
+
+    const scaleX = renderW / naturalW;
+    const scaleY = renderH / naturalH;
+
+    closestRecord.boxes.forEach((box: any) => {
+      const x = offsetX + box.x * scaleX;
+      const y = offsetY + box.y * scaleY;
+      const w = box.w * scaleX;
+      const h = box.h * scaleY;
+
+      ctx.strokeStyle = '#ff4d4f';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, w, h);
+
+      const label = `${box.label || 'unknown'} ${Math.round((box.conf || 0) * 100)}%`;
+      ctx.font = '12px Inter, sans-serif';
+      const labelWidth = ctx.measureText(label).width;
+      ctx.fillStyle = 'rgba(255, 77, 79, 0.85)';
+      ctx.fillRect(x, Math.max(0, y - 20), labelWidth + 10, 20);
+
+      ctx.fillStyle = 'white';
+      ctx.fillText(label, x + 5, Math.max(14, y - 6));
+    });
+  }
+
+  // 保持高达 60FPS 的丝滑渲染循环
+  rafId = requestAnimationFrame(renderLoop);
 }
 
 function onTimeUpdate(e: Event) {
-  const video = e.target as HTMLVideoElement
-
-  if (playbackMode.value) {
-    if (!isNaN(video.duration) && isFinite(video.duration)) {
-      totalDuration.value = video.duration
+  const video = e.target as HTMLVideoElement;
+  
+  // 🚨 强制拦截：如果是历史模式，且播放时间已经达到或超过定格的最大时间
+  // 减去 0.5 秒的缓冲余量，防止 HLS 越界卡死
+  if (!isLiveMode.value && frozenMaxTime.value > 0) {
+    if (video.currentTime >= frozenMaxTime.value - 0.5) {
+      video.pause();
+      return; 
     }
-    if (!isUserSeeking.value) {
-      currentGlobalTime.value = video.currentTime
+  }
+
+  // 核心修复：如果是无穷大或者 NaN，说明 HLS 还没准备好 DVR 窗口
+  if (isNaN(video.duration) || !isFinite(video.duration)) {
+    // 尝试从 hls 实例获取真实的缓冲总时长 (Level details)
+    const currentLevel = hls?.currentLevel ?? -1;
+    const levelDetails = (currentLevel >= 0) ? hls?.levels?.[currentLevel]?.details : null;
+    
+    if (levelDetails) {
+      totalDuration.value = levelDetails.totalduration;
+    } else {
+       return; // 获取不到就先 return，不更新 0
     }
   } else {
-    if (taskRealStartTime.value) {
-      const elapsed = (Date.now() - taskRealStartTime.value) / 1000
-      totalDuration.value = elapsed
-      if (!isUserSeeking.value) {
-        currentGlobalTime.value = elapsed
-      }
-    }
+    totalDuration.value = video.duration;
   }
 
-  if (!isUserSeeking.value && records.value.length > 0) {
-    syncDetectionsToTime(video.currentTime)
+  if (!isUserSeeking.value) {
+    currentGlobalTime.value = video.currentTime;
   }
+}
+
+function toggleChannel() {
+  if (!hls || !videoPlayerRef.value) return;
+
+  // 记录切换瞬间的状态
+  const timeToRestore = videoPlayerRef.value.currentTime;
+  const isPaused = videoPlayerRef.value.paused;
+
+  // 切换通道状态
+  currentChannel.value = currentChannel.value === 'rgb' ? 'ir' : 'rgb';
+  
+  // 生成新的 URL (根据 tasks.py 中的新路由)
+  const newStreamUrl = `/storage/${props.taskId}/stream_${currentChannel.value}.m3u8`;
+
+  // 直接加载新流
+  hls.loadSource(newStreamUrl);
+
+  // 监听新流解析完成，瞬间恢复时间
+  hls.once(Hls.Events.MANIFEST_PARSED, () => {
+    if (videoPlayerRef.value) {
+      videoPlayerRef.value.currentTime = timeToRestore;
+      if (!isPaused) {
+        videoPlayerRef.value.play().catch(() => {});
+      }
+    }
+  });
+  
+  message.success(`已切换至 ${currentChannel.value === 'rgb' ? '可见光' : '红外'} 画面`);
+  sendDebugLog('CHANNEL_SWAP', { channel: currentChannel.value, time: timeToRestore });
 }
 
 function handleSeekBarHover(e: MouseEvent) {
-  if (!seekbarWrapRef.value || totalDuration.value <= 0) return
+  if (!seekbarWrapRef.value || totalDuration.value <= 0) return;
 
-  const rect = seekbarWrapRef.value.getBoundingClientRect()
-  const x = e.clientX - rect.left
-  const percent = Math.max(0, Math.min(1, x / rect.width))
-  const hoverSeconds = percent * totalDuration.value
+  const rect = seekbarWrapRef.value.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const percent = Math.max(0, Math.min(1, x / rect.width));
+  
+  // 核心修复：直接使用总时长百分比计算相对秒数
+  const hoverSeconds = percent * (frozenMaxTime.value || totalDuration.value);
 
-  hoverX.value = x
-  showHoverTooltip.value = true
-
-  if (taskRealStartTime.value) {
-    const absTime = new Date(taskRealStartTime.value + hoverSeconds * 1000)
-    hoverTimeAbs.value = absTime.toLocaleTimeString('zh-CN', {
-      hour: '2-digit', minute: '2-digit', second: '2-digit'
-    })
-  } else {
-    hoverTimeAbs.value = formatDuration(hoverSeconds)
-  }
+  hoverX.value = x;
+  showHoverTooltip.value = true;
+  
+  // 必须使用 formatDuration (格式化秒数)，绝对不能传入 Epoch 时间戳！
+  hoverTimeAbs.value = formatDuration(hoverSeconds); 
 }
 
 watch(records, () => {
-  if (videoPlayerRef.value && !isNaN(videoPlayerRef.value.currentTime)) {
-    syncDetectionsToTime(videoPlayerRef.value.currentTime)
-  }
+  // Handled by renderLoop
 }, { deep: true })
 
-async function handleGlobalSeek(targetSeconds: number) {
-  isUserSeeking.value = true
-  currentGlobalTime.value = targetSeconds
-  sendDebugLog('SEEK_CHANGE', { targetTime: targetSeconds })
+async function fetchHistoricalRecords(startSec: number, endSec: number) {
+  if (!props.taskId) return
+  try {
+    // 核心修复：根据绝对起始时间，将相对秒数转换为绝对时间戳
+    const baseTs = firstSessionStartTime.value || (Date.now() - totalDuration.value * 1000);
+    const absStart = baseTs + startSec * 1000;
+    const absEnd = baseTs + endSec * 1000;
 
-  syncDetectionsToTime(targetSeconds)
+    const res = await tasksApi.getDetectionRecords(props.taskId, {
+      start_time: new Date(absStart).toISOString(),
+      end_time: new Date(absEnd).toISOString(),
+      limit: 5000,
+    })
 
-  if (!playbackMode.value) {
-    pendingSeekTime = targetSeconds
-    playbackMode.value = true
-  } else {
-    const v = videoPlayerRef.value
-    if (v) {
-      v.currentTime = targetSeconds
-      if (v.paused) v.play().catch(() => {})
-    }
+    // 将后端的历史数据转换为缓冲池格式
+    const historicalData = (res.records || []).map((rec: DetectionRecord) => ({
+      timestamp: new Date(rec.detected_at).getTime(),
+      boxes: rec.box ? [{
+        x: rec.box[0],
+        y: rec.box[1],
+        w: rec.box[2] - rec.box[0],
+        h: rec.box[3] - rec.box[1],
+        conf: rec.confidence,
+        label: rec.class_name,
+      }] : [],
+      is_history: true,
+    }))
+
+    // 合并到缓冲池，去重（基于 timestamp）
+    const existingTimestamps = new Set(detectionBuffer.value.map(d => d.timestamp))
+    const newData = historicalData.filter((d: any) => !existingTimestamps.has(d.timestamp))
+    detectionBuffer.value.push(...newData)
+    pruneDetectionBuffer()
+
+    sendDebugLog('FETCH_HISTORY_RECORDS', { count: newData.length, range: [startSec, endSec] })
+  } catch (e) {
+    console.warn('[History Records] Failed to fetch:', e)
   }
 }
 
-function handleUnifiedPlayPause() {
-  if (!playbackMode.value) {
-    toggleFreeze()
-  } else if (videoPlayerRef.value) {
-    if (videoPlayerRef.value.paused) {
-      if (videoPlayerRef.value.currentTime >= videoPlayerRef.value.duration - 0.5) {
-        videoPlayerRef.value.currentTime = 0
-      }
-      videoPlayerRef.value.play().catch(e => {
-        console.error("Playback failed:", e)
-        message.error("播放失败")
-      })
-      videoPaused.value = false
-    } else {
-      videoPlayerRef.value.pause()
-      videoPaused.value = true
+function handleGlobalSeek(targetPercent: number) {
+  if (isNaN(targetPercent) || targetPercent < 0) return;
+
+  // 1. 如果是从实时第一次拖拽，立刻定格世界线
+  if (isLiveMode.value) {
+    isLiveMode.value = false;
+    playbackMode.value = true;
+    frozenMaxTime.value = totalDuration.value; // 定格 HLS 的总时长
+  }
+
+  // 2. 计算目标秒数
+  const targetSeconds = (targetPercent / 100) * (frozenMaxTime.value || totalDuration.value);
+  isUserSeeking.value = true;
+  sendDebugLog('SEEK_CHANGE', { targetTime: targetSeconds });
+
+  const video = videoPlayerRef.value;
+  if (video) {
+    video.currentTime = targetSeconds;
+    if (video.paused) {
+      video.play().catch(() => {});
     }
+  }
+
+  // 3. 关键：如果是拖拽，必须去数据库拉取这附近的历史记录，装进 detectionBuffer！
+  fetchHistoricalRecords(Math.max(0, targetSeconds - 30), targetSeconds + 30);
+}
+
+function handleUnifiedPlayPause() {
+  if (!videoPlayerRef.value) return;
+
+  if (videoPlayerRef.value.paused) {
+    // 恢复播放
+    if (playbackMode.value && videoPlayerRef.value.currentTime >= videoPlayerRef.value.duration - 0.5) {
+      videoPlayerRef.value.currentTime = 0;
+    }
+    videoPlayerRef.value.play().catch(e => {
+      console.error("Playback failed:", e);
+      message.error("播放失败");
+    });
+    // @playing 事件会同步更新 isVideoPaused.value = false
+  } else {
+    // 暂停播放
+    videoPlayerRef.value.pause();
+    // @pause 事件会同步更新 isVideoPaused.value = true
   }
 }
 
 function jumpToLive() {
-  const task = currentTask.value
-  if (task && (task.status === 'pending' || task.status === 'paused')) {
-    message.warning("请先执行任务连接视频源！")
-    return
+  const task = currentTask.value;
+  if (task && task.status !== 'running') {
+    message.warning("任务已停止，请先执行任务连接视频源！");
+    return;
   }
 
-  playbackMode.value = false
-  isFrozen.value = false
-  sendDebugLog('JUMP_TO_LIVE')
+  // 解除历史锁定，切回直播模式
+  isLiveMode.value = true;
+  playbackMode.value = false;
+  isUserSeeking.value = false;
+  sendDebugLog('JUMP_TO_LIVE');
 
-  clearCanvas()
-  initLiveHls()
-  startLiveProgressTimer()
-  connect()
-}
-
-function startHistorySync() {
-  stopHistorySync()
-
-  const syncFunc = () => {
-    if (!isActive) return
-    if (!isUserSeeking.value) {
-      loadHistory()
+  if (hls && videoPlayerRef.value) {
+    const targetLiveTime = hls.liveSyncPosition || videoPlayerRef.value.duration;
+    videoPlayerRef.value.currentTime = targetLiveTime;
+    
+    if (videoPlayerRef.value.paused) {
+      videoPlayerRef.value.play().catch(() => {});
     }
-
-    if (!playbackMode.value) {
-      tasksApi.getDetectionRecords(props.taskId, { limit: 1000 })
-        .then(res => {
-          if (res.records && res.records.length > records.value.length) {
-            records.value = res.records
-          }
-        })
-        .catch(() => {})
-    }
-
-    const nextInterval = (!playbackMode.value) ? 1500 : 10000
-    historyInterval = window.setTimeout(syncFunc, nextInterval)
-  }
-
-  historyInterval = window.setTimeout(syncFunc, 500)
-}
-
-function startLiveProgressTimer() {
-  stopLiveProgressTimer()
-
-  const tick = () => {
-    if (!isActive || playbackMode.value) return
-    if (taskRealStartTime.value && !isUserSeeking.value) {
-      const elapsed = (Date.now() - taskRealStartTime.value) / 1000
-      totalDuration.value = elapsed
-      currentGlobalTime.value = elapsed
-    }
-    liveProgressTimer = window.setTimeout(tick, 500)
-  }
-
-  liveProgressTimer = window.setTimeout(tick, 200)
-}
-
-function stopLiveProgressTimer() {
-  if (liveProgressTimer) {
-    clearTimeout(liveProgressTimer)
-    liveProgressTimer = null
   }
 }
+
+// Deprecated methods removed
 
 function handleVideoEnded() {
+  if (videoPlayerRef.value) {
+    videoPlayerRef.value.pause();
+  }
+  isVideoPaused.value = true;
+  streamState.value = 'paused_end'; 
+  message.info("已播放至历史记录最末端");
   sendDebugLog('VIDEO_ENDED')
+}
+
+function tipFormatter(val: number) {
+  return formatDuration((val / 100) * (frozenMaxTime.value || totalDuration.value));
 }
 
 function formatDuration(seconds: number): string {
@@ -1120,8 +1249,7 @@ async function handleResumeTask() {
   try {
     await tasksApi.execute(props.taskId)
     connect()
-    initLiveHls()
-    startLiveProgressTimer()
+    initPlayer()
     message.success('任务已重新启动')
   } catch (e) {
     message.error('启动失败')
@@ -1140,10 +1268,6 @@ function stopHistorySync() {
     historyController.abort()
     historyController = null
   }
-  if (historyInterval) {
-    clearTimeout(historyInterval)
-    historyInterval = null
-  }
 }
 
 function formatTime(isoString: string): string {
@@ -1153,6 +1277,15 @@ function formatTime(isoString: string): string {
     minute: '2-digit',
     second: '2-digit'
   })
+}
+
+function formatTimeFromTs(ts: number): string {
+  const date = new Date(ts);
+  return date.toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
 }
 </script>
 
@@ -1190,6 +1323,7 @@ function formatTime(isoString: string): string {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  background-color: #000000 !important; /* 强制视频标签在无画面时为纯黑，杜绝白闪 */
 }
 
 .controls {
@@ -1220,14 +1354,29 @@ function formatTime(isoString: string): string {
 .overlay {
   position: absolute;
   inset: 0;
-  z-index: 10;
+  z-index: 100; /* Exception overlay should be on top of everything */
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: rgba(10, 10, 20, 0.85);
-  backdrop-filter: blur(2px);
+  background: rgba(10, 10, 20, 0.95);
+  backdrop-filter: blur(10px);
+}
+
+.video-overlay-inner {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(12px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .state-label {
@@ -1290,18 +1439,19 @@ function formatTime(isoString: string): string {
 }
 
 .history-seekbar-container {
-  padding: 12px 20px;
-  background: rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(10px);
+  padding: 14px 24px;
+  background: linear-gradient(to top, rgba(0,0,0,0.8) 0%, rgba(0,0,0,0.4) 100%);
+  backdrop-filter: blur(20px);
   display: flex;
   align-items: center;
-  gap: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  gap: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
   z-index: 30;
+  box-shadow: 0 -10px 30px rgba(0,0,0,0.5);
 }
 
 .seekbar-label {

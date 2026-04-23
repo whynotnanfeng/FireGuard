@@ -2,6 +2,33 @@
 
 All notable changes to the FireGuard project will be documented in this file.
 
+## [v1.3.1] - 2026-04-23
+
+### Added
+- **Responsive Filter Bar**:
+  - TaskList & ModelList: First row fixed display (core filters), advanced filters collapsible
+  - Filter labels with consistent typography (14px, primary color, font-weight 500)
+  - Reset button and "More Filters" toggle naturally positioned after filter types
+- **Frontend Pagination**:
+  - Quick page jump support with total count display
+  - Auto-backfill on row deletion (previous page items fill the gap)
+- **Text Overflow Handling**:
+  - Long text columns automatically truncate with ellipsis (`...`)
+  - Hover to view full content via Ant Design Vue `ellipsis` prop
+  - Fixed column widths to prevent horizontal overflow
+- **Description Field**:
+  - Added `description` column to TaskList (between model and status)
+  - Added description keyword filter in advanced filters
+  - TaskCreate already supported description input
+
+### Changed
+- **Documentation Structure**:
+  - `getting_started.md`: Separated "Environment Preparation", "Install Dependencies", and "Start Services" into distinct sections
+  - Simulator section no longer includes `pip install` commands (no extra dependencies needed)
+- **Column Width Optimization**:
+  - TaskList: All columns now have fixed widths with `ellipsis: true` for text-heavy fields
+  - ModelList: Model name and description columns now have fixed widths with overflow handling
+
 ## [v1.2.5] - 2026-04-23
 
 ### Added

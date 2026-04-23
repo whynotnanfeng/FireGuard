@@ -69,7 +69,7 @@ export const tasksApi = {
   updateDetectionConfig: (id: string, config: { detection_config: any }): Promise<{ message: string }> =>
     request.put(`/tasks/${id}/detection-config`, config),
 
-  getDetectionRecords: (id: string, params?: { limit?: number; skip?: number; order?: string }): Promise<{ records: DetectionRecord[] }> =>
+  getDetectionRecords: (id: string, params?: { limit?: number; skip?: number; order?: string; start_time?: string; end_time?: string }): Promise<{ records: DetectionRecord[] }> =>
     request.get(`/tasks/${id}/detection-records`, { params }),
 
   delete: (id: string): Promise<{ message: string }> =>

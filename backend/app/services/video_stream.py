@@ -3,13 +3,14 @@ import json
 import logging
 import time
 import threading
+import queue
 from collections import deque
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import os
 
 # Force TCP transport for RTSP streams BEFORE OpenCV/FFmpeg loads
 # This must be set before importing cv2 to take effect
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|threads;1"
 
 import cv2
 import numpy as np
@@ -23,18 +24,22 @@ logger = logging.getLogger(__name__)
 
 DETECTION_CONF_FLOOR = 0.25
 
+# Global memory queue dictionary for inference thread -> WebSocket coroutine communication
+# Format: {"task_id": queue.Queue(maxsize=100)}
+task_message_queues: Dict[str, queue.Queue] = {}
+
 
 class VideoStream:
     """
-    Unified HLS VideoStream.
+    AI Analysis Worker with zero-copy HLS recording.
 
-    Video display is handled entirely by HLS (frontend <video> + hls.js).
-    This class is responsible for:
-    1. Grabbing frames from RTSP/camera → writing to HLS via storage_manager
-    2. Running inference → saving detection records to DB
-    3. Pushing status updates and detection events via WebSocket (no frames)
+    Architecture:
+    1. DirectHLSWriter (ffmpeg -c:v copy) handles video recording independently
+    2. This class only grabs frames for AI inference
+    3. Detection results are pushed to task_message_queues for WebSocket streaming
+    4. Status updates broadcast via notifier
 
-    States: connecting → [retry×5] → loading → running / exception
+    States: connecting -> [retryx5] -> loading -> running / exception
     """
 
     MSG_CONNECTING = "connecting"
@@ -48,7 +53,14 @@ class VideoStream:
     RETRY_INTERVAL = 3.0
     MAX_RETRIES = 5
 
-    def __init__(self, task_id: str, source: str, detector: Detector, token: object, label_mapping: Optional[dict] = None):
+    def __init__(
+        self,
+        task_id: str,
+        source: str,
+        detector: Detector,
+        token: object,
+        label_mapping: Optional[dict] = None,
+    ):
         self.task_id = task_id
         self.source = source
         self.sources = source.split(";") if ";" in source else [source]
@@ -65,6 +77,8 @@ class VideoStream:
         self._grabbers_started = False
         self._session_start_time: float = 0.0
         self._last_frame_time: float = 0.0
+        self._preload_resolution()
+        self._latest_results: List[Detection] = []
         self.label_mapping = label_mapping or {}
         self.detection_config: Optional[dict] = None
         self._record_event_buffer = deque(maxlen=100)
@@ -72,19 +86,25 @@ class VideoStream:
         self._last_valid_results: List[Detection] = []
         self.natural_width: Optional[int] = None
         self.natural_height: Optional[int] = None
-        self._preload_resolution()
+        self._is_resuming = False
+
+        # Initialize message queue for this task
+        task_message_queues[task_id] = queue.Queue(maxsize=100)
 
     def _preload_resolution(self):
         try:
             from app.database import engine
             from app.models.task import Task
             from sqlmodel import Session
+
             with Session(engine) as session:
                 task = session.get(Task, self.task_id)
                 if task and task.resolution_width and task.resolution_height:
                     self.natural_width = task.resolution_width
                     self.natural_height = task.resolution_height
-                    logger.info(f"[VideoStream] Pre-loaded resolution: {self.natural_width}x{self.natural_height}")
+                    logger.info(
+                        f"[VideoStream] Pre-loaded resolution: {self.natural_width}x{self.natural_height}"
+                    )
         except Exception as e:
             logger.error(f"Failed to preload resolution: {e}")
 
@@ -93,6 +113,7 @@ class VideoStream:
             from app.database import engine
             from app.models.task import Task
             from sqlmodel import Session
+
             with Session(engine) as session:
                 task = session.get(Task, self.task_id)
                 if task:
@@ -101,7 +122,7 @@ class VideoStream:
                         task.error_msg = msg
                     session.add(task)
                     session.commit()
-                    logger.info(f"[DB] Task {self.task_id} → {status}")
+                    logger.info(f"[DB] Task {self.task_id} -> {status}")
         except Exception as e:
             logger.error(f"[DB] Failed to set status: {e}")
 
@@ -110,6 +131,7 @@ class VideoStream:
             return
         try:
             from app.services.notifier import notifier
+
             self.loop.call_soon_threadsafe(
                 lambda: asyncio.create_task(
                     notifier.broadcast_status(self.task_id, status, msg)
@@ -118,7 +140,7 @@ class VideoStream:
         except Exception as e:
             logger.error(f"[WS Broadcast] Error: {e}")
 
-    def _save_detection_records_sync(self, detections: List[Detection]):
+    def _save_detection_records_sync(self, detections: List[Detection], timestamp_ms: int):
         from app.database import engine
         from app.models.task import Task
         from app.models.detection_record import DetectionRecord
@@ -136,7 +158,7 @@ class VideoStream:
                         class_name=d.class_name,
                         confidence=d.confidence,
                         box=json.dumps(d.box),
-                        detected_at=now_beijing()
+                        detected_at=now_beijing(),
                     )
                     session.add(record)
 
@@ -150,23 +172,43 @@ class VideoStream:
                 ).all()
 
                 for r in recent_records:
-                    self._record_event_buffer.append({
-                        "id": r.id,
-                        "class_name": r.class_name,
-                        "confidence": float(r.confidence),
-                        "box": json.loads(r.box) if isinstance(r.box, str) else r.box,
-                        "detected_at": r.detected_at.isoformat()
-                    })
-                logger.debug(f"[DB Sync] Buffered {len(recent_records)} record_events for WS push")
+                    self._record_event_buffer.append(
+                        {
+                            "id": r.id,
+                            "class_name": r.class_name,
+                            "confidence": float(r.confidence),
+                            "box": json.loads(r.box) if isinstance(r.box, str) else r.box,
+                            "detected_at": r.detected_at.isoformat(),
+                        }
+                    )
+                logger.debug(
+                    f"[DB Sync] Buffered {len(recent_records)} record_events for WS push"
+                )
 
             except Exception as e:
                 logger.error(f"[DB Sync] Failed to save detections: {e}", exc_info=True)
+
+    def _push_to_message_queue(self, payload: dict):
+        """Push detection payload to the global memory queue for WebSocket consumers."""
+        q = task_message_queues.get(self.task_id)
+        if not q:
+            return
+        if q.full():
+            try:
+                q.get_nowait()  # Drop oldest if full
+            except queue.Empty:
+                pass
+        try:
+            q.put_nowait(payload)
+        except queue.Full:
+            pass
 
     def _mark_has_history(self):
         try:
             from app.database import engine
             from app.models.task import Task
             from sqlmodel import Session
+
             with Session(engine) as session:
                 task = session.get(Task, self.task_id)
                 if task and not task.has_history:
@@ -186,6 +228,7 @@ class VideoStream:
             from app.database import engine
             from app.models.task import Task
             from sqlmodel import Session
+
             with Session(engine) as session:
                 task = session.get(Task, self.task_id)
                 if task:
@@ -207,7 +250,11 @@ class VideoStream:
         self._retry_count = 0
         self._cap_opened = False
 
+        # Start DirectHLSWriter for each source (zero-copy recording)
         for idx, url in enumerate(self.sources):
+            channel = "rgb" if idx == 0 else "ir"
+            storage_manager.start_recording(self.task_id, url, channel=channel)
+
             t = threading.Thread(target=self._frame_grabber, args=(url, idx), daemon=True)
             t.start()
 
@@ -221,8 +268,15 @@ class VideoStream:
         if self._stop_event.is_set():
             return
         self._stop_event.set()
+        self._is_resuming = True
+
         storage_manager.stop_recording(self.task_id)
         self.detector = None
+
+        # Clean up message queue
+        if self.task_id in task_message_queues:
+            del task_message_queues[self.task_id]
+
         logger.info(f"[VideoStream] Terminal Stop initiated for task {self.task_id}")
 
     def _frame_grabber(self, source_url: str, idx: int):
@@ -236,8 +290,9 @@ class VideoStream:
 
         while not self._stop_event.is_set():
             from app.services.task_runner import stream_manager
+
             if not stream_manager.is_active(self.task_id, self.token):
-                logger.warning(f"[VideoStream] Identity check failed. Terminating.")
+                logger.warning("[VideoStream] Identity check failed. Terminating.")
                 break
 
             now = time.time()
@@ -263,10 +318,11 @@ class VideoStream:
                     self._broadcast_ws("connecting", "正在连接...")
 
                 try:
-                    cap = cv2.VideoCapture(source_url)
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|threads;1"
+                    cap = cv2.VideoCapture(source_url, cv2.CAP_FFMPEG)
                     if cap.isOpened():
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 5)
-                        logger.info(f"[VideoStream] OpenCV opened source: {source_url}")
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        logger.info(f"[VideoStream] OpenCV opened source (TCP+CAP_FFMPEG): {source_url}")
                         self._cap_opened = True
                         self._retry_count = 0
                         consecutive_corrupt = 0
@@ -279,8 +335,9 @@ class VideoStream:
             try:
                 ret, img = cap.read()
                 if not ret:
-                    logger.warning(f"[VideoStream] Stream read failed, reconnecting...")
-                    if cap: cap.release()
+                    logger.warning("[VideoStream] Stream read failed, reconnecting...")
+                    if cap:
+                        cap.release()
                     cap = None
                     self._cap_opened = False
                     continue
@@ -291,8 +348,11 @@ class VideoStream:
                 if self._is_corrupted_frame(img):
                     consecutive_corrupt += 1
                     if consecutive_corrupt >= max_consecutive_corrupt:
-                        logger.warning(f"[VideoStream] {consecutive_corrupt} consecutive corrupt frames, reconnecting...")
-                        if cap: cap.release()
+                        logger.warning(
+                            f"[VideoStream] {consecutive_corrupt} consecutive corrupt frames, reconnecting..."
+                        )
+                        if cap:
+                            cap.release()
                         cap = None
                         self._cap_opened = False
                         consecutive_corrupt = 0
@@ -313,13 +373,10 @@ class VideoStream:
                 if session_elapsed < self.INITIAL_GRACE:
                     self._mark_has_history()
 
-                writer = storage_manager.get_writer(self.task_id, img)
-                if writer:
-                    writer.write(img)
-
             except Exception as e:
                 logger.warning(f"[VideoStream] Grabber exception: {e}")
-                if cap: cap.release()
+                if cap:
+                    cap.release()
                 cap = None
                 self._cap_opened = False
 
@@ -368,6 +425,12 @@ class VideoStream:
         last_detect_time = 0
         from app.services.task_runner import stream_manager
 
+        is_multimodal = (
+            hasattr(self.detector, "is_rgbir")
+            and self.detector.is_rgbir
+            and len(self.sources) >= 2
+        )
+
         while not self._stop_event.is_set():
             if not stream_manager.is_active(self.task_id, self.token):
                 break
@@ -382,16 +445,33 @@ class VideoStream:
                     time.sleep(0.01)
                     continue
 
-            frame = None
+            input_data = None
+            frame_rgb = None
+            frame_ir = None
+
             with self._lock:
                 if self._latest_frames[0] is not None:
-                    frame = self._latest_frames[0].copy()
+                    frame_rgb = self._latest_frames[0].copy()
+                if is_multimodal and len(self._latest_frames) > 1 and self._latest_frames[1] is not None:
+                    frame_ir = self._latest_frames[1].copy()
 
-            if frame is not None and not self._stop_event.is_set():
+            if frame_rgb is not None:
+                if is_multimodal and frame_ir is not None:
+                    input_data = [frame_rgb, frame_ir]
+                else:
+                    input_data = frame_rgb
+
+            if input_data is not None and not self._stop_event.is_set():
                 try:
                     detector = self.detector
                     if detector and not self._stop_event.is_set():
-                        detections = detector.detect(frame, conf=DETECTION_CONF_FLOOR, label_mapping=self.label_mapping)
+                        current_abs_time = int(time.time() * 1000)
+
+                        detections = detector.detect(
+                            input_data,
+                            conf=DETECTION_CONF_FLOOR,
+                            label_mapping=self.label_mapping,
+                        )
 
                         if self._stop_event.is_set():
                             break
@@ -405,7 +485,26 @@ class VideoStream:
                                 self._last_valid_results = filtered
 
                         if filtered and not self._stop_event.is_set():
-                            self._save_detection_records_sync(filtered)
+                            self._save_detection_records_sync(filtered, current_abs_time)
+
+                            # Push to memory queue for real-time WebSocket streaming
+                            payload = {
+                                "task_id": self.task_id,
+                                "timestamp": current_abs_time,
+                                "boxes": [
+                                    {
+                                        "x": float(d.box[0]),
+                                        "y": float(d.box[1]),
+                                        "w": float(d.box[2] - d.box[0]),
+                                        "h": float(d.box[3] - d.box[1]),
+                                        "conf": float(d.confidence),
+                                        "label": d.class_name,
+                                    }
+                                    for d in filtered
+                                ],
+                                "is_history": False,
+                            }
+                            self._push_to_message_queue(payload)
 
                         last_detect_time = now
                 except Exception as e:
@@ -420,13 +519,11 @@ class VideoStream:
         """
         Unified WebSocket run loop.
 
-        No longer sends JPEG frames. Only sends:
+        Sends:
         - Status updates (connecting, loading, running, retry, error)
         - Detection record events (from DB buffer)
+        - Detection payloads (from memory queue with box coordinates + timestamp)
         - Heartbeats
-        - HLS stream ready signal
-
-        Video display is handled entirely by HLS on the frontend.
         """
         heartbeat_interval = 1.0
         last_heartbeat = time.time()
@@ -435,6 +532,7 @@ class VideoStream:
             from app.database import engine
             from app.models.detection_record import DetectionRecord
             from sqlmodel import Session, select
+
             with Session(engine) as session:
                 recent = session.exec(
                     select(DetectionRecord)
@@ -450,9 +548,10 @@ class VideoStream:
                             "class_name": r.class_name,
                             "confidence": float(r.confidence),
                             "box": json.loads(r.box),
-                            "detected_at": r.detected_at.isoformat()
-                        } for r in recent
-                    ]
+                            "detected_at": r.detected_at.isoformat(),
+                        }
+                        for r in recent
+                    ],
                 }
                 await websocket.send_text(json.dumps(snapshot))
                 logger.info(f"[VideoStream] Snapshot sent for {self.task_id} ({len(recent)} records)")
@@ -465,15 +564,25 @@ class VideoStream:
 
                 now = time.time()
 
+                # 1. Send buffered DB record events
                 while self._record_event_buffer:
                     event_data = self._record_event_buffer.popleft()
                     try:
-                        await websocket.send_text(json.dumps({
-                            "type": "record_event",
-                            "record": event_data
-                        }))
+                        await websocket.send_text(
+                            json.dumps({"type": "record_event", "record": event_data})
+                        )
                     except Exception:
                         break
+
+                # 2. Send real-time detection payloads from memory queue
+                q = task_message_queues.get(self.task_id)
+                if q:
+                    try:
+                        while not q.empty():
+                            payload = q.get_nowait()
+                            await websocket.send_text(json.dumps({"type": "detection", "payload": payload}))
+                    except Exception:
+                        pass
 
                 has_frame = False
                 with self._lock:
@@ -506,21 +615,22 @@ class VideoStream:
                 if now - last_heartbeat >= heartbeat_interval:
                     last_heartbeat = now
                     try:
-                        await websocket.send_text(json.dumps({
-                            "type": self.MSG_RUNNING,
-                            "hls_url": f"/api/tasks/{self.task_id}/stream.m3u8",
-                        }))
+                        await websocket.send_text(
+                            json.dumps({
+                                "type": self.MSG_RUNNING,
+                                "hls_url": f"/storage/{self.task_id}/stream_rgb.m3u8",
+                            })
+                        )
                     except Exception:
                         break
 
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.05)
 
             if self._error_msg:
                 try:
-                    await websocket.send_text(json.dumps({
-                        "type": self.MSG_ERROR,
-                        "message": self._error_msg
-                    }))
+                    await websocket.send_text(
+                        json.dumps({"type": self.MSG_ERROR, "message": self._error_msg})
+                    )
                 except Exception:
                     pass
 
@@ -532,10 +642,17 @@ class VideoStream:
                 from app.models.task import Task
                 from sqlmodel import Session
                 from app.services.task_runner import stream_manager
+
                 with Session(engine) as session:
                     task = session.get(Task, self.task_id)
                     is_current = stream_manager.get_stream(self.task_id) is self
-                    if task and task.status == "running" and self._stop_event.is_set() and self._error_msg and is_current:
+                    if (
+                        task
+                        and task.status == "running"
+                        and self._stop_event.is_set()
+                        and self._error_msg
+                        and is_current
+                    ):
                         task.status = "exception"
                         task.error_msg = self._error_msg
                         session.add(task)
@@ -557,7 +674,7 @@ class VideoStream:
                 self.stop()
             elif action == "update_config":
                 self.detection_config = data.get("config")
-                logger.info(f"[VideoStream] Detection config updated from UI")
+                logger.info("[VideoStream] Detection config updated from UI")
         except (asyncio.TimeoutError, Exception):
             pass
 
@@ -587,7 +704,7 @@ class VideoStream:
         filtered = []
         for det in detections:
             class_name = str(det.class_name).lower()
-            class_id = str(getattr(det, 'class_id', ""))
+            class_id = str(getattr(det, "class_id", ""))
             confidence = det.confidence
 
             cat_config = selected_by_name.get(class_name) or selected_by_id.get(class_id)

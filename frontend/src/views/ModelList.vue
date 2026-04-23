@@ -1,55 +1,152 @@
 <template>
   <div class="model-list-page fade-in">
     <div class="toolbar">
+      <div class="toolbar-left">
+        <span class="filter-label">模型名称</span>
+        <a-input-search
+          v-model:value="filters.search"
+          placeholder="搜索..."
+          class="filter-item search-input"
+          allow-clear
+          @search="applyFilters"
+          @change="onSearchChange"
+        />
+        
+        <span class="filter-label">格式</span>
+        <a-select 
+          v-model:value="filters.format" 
+          placeholder="全部" 
+          allow-clear 
+          class="filter-item"
+          @change="applyFilters" 
+        >
+          <a-select-option value="onnx">ONNX</a-select-option>
+        </a-select>
+        
+        <span class="filter-label">输入类型</span>
+        <a-select 
+          v-model:value="filters.input_type" 
+          placeholder="全部" 
+          allow-clear 
+          class="filter-item"
+          @change="applyFilters" 
+        >
+          <a-select-option value="rgb">RGB</a-select-option>
+          <a-select-option value="ir">IR</a-select-option>
+          <a-select-option value="rgb,ir">RGB + IR</a-select-option>
+        </a-select>
+
+        <a-button class="filter-item reset-btn" @click="resetFilters">
+           <template #icon><ReloadOutlined /></template>
+           重置
+        </a-button>
+
+        <a-button 
+          type="link" 
+          class="expand-toggle"
+          @click="filtersExpanded = !filtersExpanded"
+        >
+          <template #icon>
+            <DownOutlined v-if="!filtersExpanded" />
+            <UpOutlined v-else />
+          </template>
+          {{ filtersExpanded ? '收起' : '更多筛选' }}
+        </a-button>
+      </div>
+      
       <a-button type="primary" @click="showCreate = true">
         <template #icon><CloudUploadOutlined /></template>
         上传模型
       </a-button>
     </div>
 
-    <a-table 
-       :loading="loading" 
-       :dataSource="models" 
-       :columns="columns"
-       rowKey="id"
-       :pagination="false"
-       class="model-table"
-    >
-      <template #bodyCell="{ column, record }">
-        <template v-if="column.key === 'format'">
-          <a-tag>{{ record.format }}</a-tag>
-        </template>
-        
-        <template v-if="column.key === 'input_types'">
-          <a-tag v-for="t in record.input_types" :key="t" style="margin-right:4px">
-            {{ t.toUpperCase() }}
-          </a-tag>
-        </template>
-        
-        <template v-if="column.key === 'status'">
-          <a-tag :color="record.status === 'completed' ? 'success' : 'warning'">
-             {{ record.status === 'completed' ? '可用' : '处理中' }}
-          </a-tag>
-        </template>
+    <div v-show="filtersExpanded" class="advanced-filters">
+      <span class="filter-label">状态</span>
+      <a-select 
+        v-model:value="filters.status" 
+        placeholder="全部" 
+        allow-clear 
+        class="filter-item"
+        @change="applyFilters" 
+      >
+        <a-select-option value="completed">可用</a-select-option>
+        <a-select-option value="processing">处理中</a-select-option>
+      </a-select>
 
-        <template v-if="column.key === 'created_at'">
-           {{ formatDate(record.created_at) }}
-        </template>
+      <span class="filter-label">描述</span>
+      <a-input
+        v-model:value="filters.description"
+        placeholder="关键词..."
+        class="filter-item desc-input"
+        allow-clear
+        @change="applyFilters"
+      />
 
-        <template v-if="column.key === 'action'">
-          <a-space>
-            <a-button 
-               type="link" 
-               :disabled="record.status !== 'completed'"
-               @click="openEditLabels(record)"
-            >编辑标签</a-button>
-            <a-popconfirm title="确定删除该模型吗？" @confirm="handleDelete(record.id)">
-                 <a-button type="link" danger :disabled="record.status !== 'completed'">删除</a-button>
-            </a-popconfirm>
-          </a-space>
+      <span class="filter-label">创建时间</span>
+      <a-range-picker
+        v-model:value="filters.dateRange"
+        class="filter-item date-picker"
+        @change="applyFilters"
+      />
+    </div>
+
+    <div class="table-wrapper">
+      <a-table 
+         :loading="loading" 
+         :dataSource="pagedModels" 
+         :columns="columns"
+         rowKey="id"
+         :pagination="false"
+         class="model-table"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'format'">
+            <a-tag>{{ record.format }}</a-tag>
+          </template>
+          
+          <template v-if="column.key === 'input_types'">
+            <a-tag v-for="t in record.input_types" :key="t" style="margin-right:4px">
+              {{ t.toUpperCase() }}
+            </a-tag>
+          </template>
+          
+          <template v-if="column.key === 'status'">
+            <a-tag :color="record.status === 'completed' ? 'success' : 'warning'">
+               {{ record.status === 'completed' ? '可用' : '处理中' }}
+            </a-tag>
+          </template>
+
+          <template v-if="column.key === 'created_at'">
+             {{ formatDate(record.created_at) }}
+          </template>
+
+          <template v-if="column.key === 'action'">
+            <a-space>
+              <a-button 
+                 type="link" 
+                 :disabled="record.status !== 'completed'"
+                 @click="openEditLabels(record)"
+              >编辑标签</a-button>
+              <a-popconfirm title="确定删除该模型吗？" @confirm="handleDelete(record.id)">
+                   <a-button type="link" danger :disabled="record.status !== 'completed'">删除</a-button>
+              </a-popconfirm>
+            </a-space>
+          </template>
         </template>
-      </template>
-    </a-table>
+      </a-table>
+
+      <div class="pagination-wrap" v-if="totalFiltered > 0">
+        <span class="pagination-info">共 {{ totalFiltered }} 条</span>
+        <a-pagination
+          v-model:current="page"
+          v-model:pageSize="pageSize"
+          :total="totalFiltered"
+          show-less-items
+          show-quick-jumper
+          @change="onPageChange"
+        />
+      </div>
+    </div>
 
     <!-- Upload Modal -->
     <a-modal 
@@ -116,11 +213,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { modelsApi, type DetectionModel } from '@/api/models'
 import { message, Modal } from 'ant-design-vue'
-import { CloudUploadOutlined } from '@ant-design/icons-vue'
+import { CloudUploadOutlined, ReloadOutlined, DownOutlined, UpOutlined } from '@ant-design/icons-vue'
 import LabelMappingEditor from '@/components/LabelMappingEditor.vue'
+import dayjs, { type Dayjs } from 'dayjs'
 
 const models = ref<DetectionModel[]>([])
 const loading = ref(false)
@@ -145,6 +243,85 @@ const editingModel = ref<DetectionModel | null>(null)
 const editLabelConfig = ref<Record<string, string> | null>(null)
 const updatingLabels = ref(false)
 
+// Filters
+const filters = reactive({
+  search: '',
+  format: undefined as string | undefined,
+  input_type: undefined as string | undefined,
+  status: undefined as string | undefined,
+  description: '',
+  dateRange: undefined as [Dayjs, Dayjs] | undefined
+})
+
+const filtersExpanded = ref(false)
+
+const page = ref(1)
+const pageSize = ref(10)
+
+const filteredModels = computed(() => {
+  return models.value.filter(m => {
+    if (filters.search && !m.name.toLowerCase().includes(filters.search.toLowerCase())) {
+      return false
+    }
+    if (filters.format && m.format !== filters.format) {
+      return false
+    }
+    if (filters.status && m.status !== filters.status) {
+      return false
+    }
+    if (filters.input_type) {
+      const types = m.input_types || []
+      if (filters.input_type === 'rgb,ir') {
+        if (!types.includes('rgb') || !types.includes('ir')) return false
+      } else if (!types.includes(filters.input_type)) {
+        return false
+      }
+    }
+    if (filters.description && !m.description.toLowerCase().includes(filters.description.toLowerCase())) {
+      return false
+    }
+    if (filters.dateRange && filters.dateRange.length === 2) {
+      const created = new Date(m.created_at).getTime()
+      const start = filters.dateRange[0].startOf('day').valueOf()
+      const end = filters.dateRange[1].endOf('day').valueOf()
+      if (created < start || created > end) {
+        return false
+      }
+    }
+    return true
+  })
+})
+
+const totalFiltered = computed(() => filteredModels.value.length)
+
+const pagedModels = computed(() => {
+  const start = (page.value - 1) * pageSize.value
+  const end = start + pageSize.value
+  return filteredModels.value.slice(start, end)
+})
+
+function onPageChange() {
+  // pagination component handles page/pageSize updates, computed recalculates
+}
+
+function applyFilters() {
+  page.value = 1
+}
+
+function onSearchChange() {
+  page.value = 1
+}
+
+function resetFilters() {
+  filters.search = ''
+  filters.format = undefined
+  filters.input_type = undefined
+  filters.status = undefined
+  filters.description = ''
+  filters.dateRange = undefined
+  page.value = 1
+}
+
 const rules = {
   name: [{ required: true, message: '请输入模型名称' }],
   input_types: [{ required: true, type: 'array', min: 1, message: '请选择至少一种输入类型' }]
@@ -168,10 +345,10 @@ watch(showCreate, (val) => {
 })
 
 const columns = [
-  { title: '模型名称', dataIndex: 'name', key: 'name', width: 200 },
+  { title: '模型名称', dataIndex: 'name', key: 'name', width: 200, ellipsis: true },
   { title: '格式', key: 'format', width: 100 },
   { title: '支持输入类型', key: 'input_types', width: 150 },
-  { title: '描述', dataIndex: 'description', key: 'description', ellipsis: true },
+  { title: '描述', dataIndex: 'description', key: 'description', width: 150, ellipsis: true },
   { title: '状态', key: 'status', width: 100 },
   { title: '创建时间', key: 'created_at', width: 180 },
   { title: '操作', key: 'action', width: 200, fixed: 'right' }
@@ -192,7 +369,9 @@ async function loadData() {
   }
 }
 
-onMounted(() => loadData())
+onMounted(() => {
+  loadData()
+})
 
 async function handleDelete(id: string) {
   try {
@@ -318,20 +497,88 @@ async function saveLabelUpdate() {
 .model-list-page {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
+  height: calc(100vh - 120px);
 }
 .toolbar {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
   background: var(--bg-card);
-  padding: 16px;
+  padding: 12px 16px;
   border-radius: 8px;
   border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+.toolbar-left {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex: 1;
+}
+.filter-label {
+  font-size: 14px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  font-weight: 500;
+}
+.filter-item {
+  min-width: 120px;
+}
+.search-input {
+  width: 200px;
+}
+.reset-btn {
+}
+.expand-toggle {
+  padding: 0 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.expand-toggle:hover {
+  color: var(--primary-blue);
+}
+.advanced-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+.desc-input {
+  width: 180px;
+}
+.date-picker {
+  width: 260px;
+}
+.table-wrapper {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 .model-table {
   background: var(--bg-card);
   border-radius: 8px;
   box-shadow: var(--shadow-card);
+  flex: 1;
+}
+.pagination-wrap {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+  flex-shrink: 0;
+}
+.pagination-info {
+  font-size: 13px;
+  color: var(--text-secondary);
 }
 .upload-zone {
     width: 100%;

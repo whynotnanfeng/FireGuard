@@ -186,7 +186,7 @@
 
 ## 6. 模拟器 API (Simulator)
 
-模拟器服务独立运行于 `http://localhost:8082`，用于仿真 RTSP 视频流推送，支持画质评估与转码控制。
+模拟器服务独立运行于 `http://localhost:8001`，用于仿真 RTSP 视频流推送，支持全维度参数自定义与画质评估。
 
 ### 6.1 视频上传
 
@@ -202,6 +202,7 @@
 
 - **Method**: `GET /videos`
 - **Success Status**: `200 OK`
+- **Description**: 返回所有未推流的视频文件列表（正在推流的视频自动过滤）。
 - **Response**:
 ```json
 [
@@ -214,17 +215,12 @@
     "codec": "h264",
     "profile": "High",
     "fps": 30.0,
-    "duration": 348.4,
-    "file_size": 52428800,
     "bit_rate": 1200000,
-    "format": "mp4",
-    "bpp": 0.12,
     "grade": {
       "level": "GRADE_GOOD",
       "label": "高清画质",
       "color": "success",
-      "max_transcode_level": 4,
-      "description": "高清画质，支持全量转码选项（含超清）"
+      "description": "高清画质，支持全量转码选项"
     }
   }
 ]
@@ -244,19 +240,30 @@
 {
   "file_id": "abc123",
   "stream_path": "cam_abc1",
-  "codec": "medium",
+  "vcodec": "copy",
+  "acodec": "copy",
+  "resolution": "original",
+  "fps": 0,
+  "bitrate": "original",
+  "crf": 23,
+  "preset": "medium",
   "transport": "tcp"
 }
 ```
-- **codec 参数说明**:
+- **参数说明**:
 
-| 值 | 含义 | 编码方式 |
-|---|---|---|
-| `copy` | 原编码转发 | 零重新编码，100% 无损 |
-| `low` | 流畅 (省流) | H.264 CRF 28, Fast, 720P 上限 |
-| `medium` | 标准 (推荐) | H.264 CRF 23, Medium, 1080P 上限 |
-| `high` | 高清 (精细) | H.264 CRF 18, Slow, 1440P 上限 |
-| `ultra` | 超清 (无损级) | H.264 CRF 12, VerySlow, 原始分辨率 |
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `file_id` | string | 必填 | 视频文件 ID |
+| `stream_path` | string | 必填 | RTSP 推流路径 |
+| `vcodec` | string | `"copy"` | 视频编码：`copy`, `libx264`, `libx265` |
+| `acodec` | string | `"copy"` | 音频编码：`copy`, `aac`, `none` |
+| `resolution` | string | `"original"` | 分辨率：`original`, `3840x2160`, `1920x1080`, `1280x720` 等 |
+| `fps` | float | `0` | 帧率：`0` 为原始帧率 |
+| `bitrate` | string | `"original"` | 码率：`original`, `8000k`, `4000k`, `1000k`, `500k` 等 |
+| `crf` | int | `23` | CRF 质量值（仅转码时有效） |
+| `preset` | string | `"medium"` | 编码预设：`ultrafast`, `faster`, `medium`, `slow` |
+| `transport` | string | `"tcp"` | 传输协议：`tcp`, `udp` |
 
 - **Success Status**: `200 OK`
 - **Response**:
@@ -267,7 +274,13 @@
   "rtsp_url": "rtsp://127.0.0.1:8554/cam_abc1",
   "stream_path": "cam_abc1",
   "pid": 12345,
-  "codec": "medium",
+  "vcodec": "copy",
+  "acodec": "copy",
+  "resolution": "original",
+  "fps": 0,
+  "bitrate": "original",
+  "crf": 23,
+  "preset": "medium",
   "transport": "tcp",
   "device_name": "正门主摄"
 }

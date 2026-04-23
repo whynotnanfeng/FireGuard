@@ -97,20 +97,24 @@ def test_videostream_mapping_propagation():
     
     # We mock out the loop and dependencies
     with patch("app.services.task_runner.stream_manager.is_active", return_value=True), \
-         patch("time.time", side_effect=[100, 100]), \
+         patch("time.time", side_effect=[100, 100, 100, 100]), \
          patch("time.sleep"):
-        
+
         # We manually trigger the detection block logic
         # or we just call _grab_and_detect and make it stop immediately
-        vs._stopped = False
+        vs._stop_event.clear()
+        call_count = 0
         def stop_after_one(*args, **kwargs):
-            vs._stopped = True
-            return [] # mock detections
-        
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1:
+                vs._stop_event.set()
+            return []  # mock detections
+
         mock_det.detect.side_effect = stop_after_one
-        
+
         vs._grab_and_detect()
-        
+
         # Verify mapping was passed to detect
         args, kwargs = mock_det.detect.call_args
         assert kwargs["label_mapping"] == mapping

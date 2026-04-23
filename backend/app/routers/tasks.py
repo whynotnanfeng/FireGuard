@@ -542,6 +542,8 @@ def get_detection_records(
     skip: int = 0,
     limit: int = 500,
     order: str = "desc", # "desc" | "asc"
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -551,6 +553,20 @@ def get_detection_records(
 
     query = select(DetectionRecord).where(DetectionRecord.task_id == task_id)
     
+    if start_time:
+        try:
+            dt_start = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+            query = query.where(DetectionRecord.detected_at >= dt_start)
+        except ValueError:
+            pass
+            
+    if end_time:
+        try:
+            dt_end = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+            query = query.where(DetectionRecord.detected_at <= dt_end)
+        except ValueError:
+            pass
+
     if order == "asc":
         query = query.order_by(DetectionRecord.detected_at.asc())
     else:
@@ -617,34 +633,9 @@ async def download_all(
 
 
 # ── Historical Video API ───────────────────────────────────────────────────
-
-@router.get("/{task_id}/stream.m3u8")
-def get_merged_m3u8(
-    task_id: str,
-    mode: str = "live",
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    task = session.get(Task, task_id)
-    if not task or task.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    force_vod = mode == "vod"
-    content = storage_manager.generate_merged_m3u8(task_id, force_vod=force_vod)
-    if not content:
-        if force_vod:
-            raise HTTPException(status_code=404, detail="No video data available")
-        content = "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"
-
-    return Response(
-        content=content,
-        media_type="application/vnd.apple.mpegurl",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Access-Control-Allow-Origin": "*",
-        },
-    )
-
+# 新架构下，HLS 视频流由 DirectHLSWriter (ffmpeg -c:v copy) 直接生成
+# 前端通过 /storage/{task_id}/stream_rgb.m3u8 直接访问静态文件
+# 不再需要通过 FastAPI 代理路由转发
 
 @router.get("/{task_id}/videos")
 def get_task_videos(

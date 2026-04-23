@@ -2,7 +2,14 @@
 
 本列表记录了系统已完成的功能点以及后续待开发的优先级建议。
 
-## ✅ 已完成 (v1.2.5)
+## ✅ 已完成 (v1.3.1)
+
+### 响应式筛选栏与列表优化 (v1.3.1)
+- [x] **响应式筛选栏**：任务管理与模型库第一行固定核心筛选，高级筛选折叠展开
+- [x] **筛选标签统一**：14px 字体、主色、font-weight 500，重置与更多筛选自然排列
+- [x] **前端分页增强**：总条数显示 + 快速跳转，删除后自动补位
+- [x] **文本溢出处理**：长文本列固定宽度 + ellipsis，操作列固定右侧防溢出
+- [x] **描述字段补充**：任务列表新增描述列与筛选，后端 API 完整支持
 
 ### 双 URL HLS 架构与 Session 录制 (v1.2.5)
 - [x] **Session 录制管理**: StorageManager 支持 session-based 录制，每次启动/停止创建独立 session 目录。
@@ -105,15 +112,7 @@
 
 ## ⚠️ 已知问题 (v1.2.5)
 
-### 需要修复
-- [ ] **RTSP 模拟流启动失败**: `ModuleNotFoundError: No module named 'simulator'`
-  - 原因：`simulator/main.py` 使用相对导入 `from simulator.manager import StreamManager`
-  - 临时方案：从项目根目录运行 `python -m simulator.main`（未验证）
-  - 建议方案：修改 `simulator/main.py` 改为 `from manager import StreamManager`
-
-
 ### 需要优化
 - [ ] **多并发推理支持**: 目前为异步串行队列，需支持多 Worker 负载均衡。
-- [ ] **置信度配置一致性**: 前端使用百分比 (0-100)，后端存储小数 (0-1)。
 - [ ] **模拟器启动脚本**: 简化 RTSP 模拟服务启动流程。
 - [ ] **HLS 直播延迟优化**: 当前直播延迟约 3-6 秒，可考虑 LL-HLS 进一步降低延迟。

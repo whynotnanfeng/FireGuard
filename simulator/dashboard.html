@@ -1,195 +1,484 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
-    <title>FireGuard Stream Simulator PRO</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FireGuard Stream Simulator PRO v2</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    
     <style>
         :root {
-            --primary: #1677ff;
-            --success: #52c41a;
-            --warning: #faad14;
-            --error: #ff4d4f;
-            --processing: #1677ff;
-            --bg: #f5f5f5;
-            --card-bg: #ffffff;
-            --border: #f0f0f0;
-            --text: rgba(0,0,0,0.88);
-            --text-secondary: rgba(0,0,0,0.45);
-            --text-tertiary: rgba(0,0,0,0.25);
-        }
-        * { box-sizing: border-box; }
-        body {
-            background: var(--bg);
-            padding: 24px;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            color: var(--text);
-            font-size: 14px;
-            line-height: 1.5714;
-        }
-        .page-header {
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-            border-radius: 12px;
-            padding: 24px 32px;
-            margin-bottom: 24px;
-            color: white;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .page-header h2 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.5px; }
-        .card {
-            background: var(--card-bg);
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            margin-bottom: 24px;
-            overflow: hidden;
-        }
-        .card-header {
-            padding: 16px 24px;
-            border-bottom: 1px solid var(--border);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: #fafafa;
-        }
-        .card-header h5 { margin: 0; font-size: 16px; font-weight: 600; }
-        .card-body { padding: 24px; }
-        .btn-primary { background: var(--primary); border-color: var(--primary); border-radius: 6px; padding: 8px 16px; }
-        .btn-success { background: var(--success); border-color: var(--success); border-radius: 6px; }
-        .form-control, .form-select { border-radius: 6px; border: 1px solid #d9d9d9; padding: 6px 12px; font-size: 14px; }
-        .table thead th {
-            background: #fafafa;
-            border-bottom: 1px solid var(--border);
-            font-weight: 600;
-            font-size: 13px;
-            color: var(--text-secondary);
-            padding: 12px 16px;
-        }
-        .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
-        .meta-item { background: #fafafa; border-radius: 6px; padding: 8px 10px; text-align: center; }
-        .meta-item .label { font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; margin-bottom: 2px; }
-        .meta-item .value { font-size: 14px; font-weight: 600; color: var(--text); }
-        .grade-badge { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; }
-        .grade-badge.error { background: #fff2f0; color: var(--error); border: 1px solid #ffccc7; }
-        .grade-badge.warning { background: #fffbe6; color: #d48806; border: 1px solid #ffe58f; }
-        .grade-badge.success { background: #f6ffed; color: var(--success); border: 1px solid #b7eb8f; }
-        .grade-badge.processing { background: #e6f4ff; color: var(--primary); border: 1px solid #91caff; }
-        .rtsp-code { background: #f5f5f5; border: 1px solid #d9d9d9; border-radius: 6px; padding: 4px 8px; font-family: monospace; font-size: 12px; }
-        
-        /* 优化后的配置面板 */
-        .config-panel {
-            background: #fcfcfc;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 16px;
-        }
-        .config-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 12px;
-        }
-        .config-label {
-            font-size: 11px;
-            color: var(--text-secondary);
-            margin-bottom: 4px;
-            display: flex;
-            justify-content: space-between;
-        }
-        .original-hint {
-            color: var(--primary);
-            font-weight: 500;
+            /* Light Theme Tokens */
+            --primary-hue: 220;
+            --primary: oklch(60% 0.18 var(--primary-hue));
+            --primary-muted: oklch(60% 0.18 var(--primary-hue) / 0.1);
+            --bg: oklch(98% 0.01 var(--primary-hue));
+            --surface: oklch(100% 0 0);
+            --surface-secondary: oklch(96% 0.01 var(--primary-hue));
+            --border: oklch(0% 0 0 / 0.08);
+            --text: oklch(25% 0.02 var(--primary-hue));
+            --text-secondary: oklch(50% 0.02 var(--primary-hue));
+            --text-tertiary: oklch(70% 0.01 var(--primary-hue));
+            
+            --success: oklch(65% 0.15 150);
+            --warning: oklch(75% 0.15 80);
+            --error: oklch(60% 0.18 25);
+            
+            --radius-lg: 16px;
+            --radius-md: 12px;
+            --radius-sm: 8px;
+            --transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            --shadow: 0 4px 20px -4px oklch(0% 0 0 / 0.05), 0 2px 8px -2px oklch(0% 0 0 / 0.03);
         }
 
-        /* Loading Overlay */
-        #loadingOverlay {
-            position: fixed;
-            top: 0;
-            left: 0;
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            background-color: var(--bg);
+            background-image: 
+                radial-gradient(at 0% 0%, oklch(90% 0.05 var(--primary-hue) / 0.3) 0px, transparent 50%),
+                radial-gradient(at 100% 0%, oklch(92% 0.05 150 / 0.2) 0px, transparent 50%);
+            color: var(--text);
+            font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+            font-size: 14px;
+            line-height: 1.6;
+            min-height: 100vh;
+            padding: 32px 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* --- Header --- */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            padding: 0 4px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .logo-box {
+            width: 44px;
+            height: 44px;
+            background: var(--primary);
+            border-radius: var(--radius-md);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+            color: white;
+            box-shadow: 0 8px 16px var(--primary-muted);
+        }
+
+        .brand h1 {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .system-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: var(--surface);
+            padding: 6px 14px;
+            border-radius: 100px;
+            border: 1px solid var(--border);
+            font-size: 13px;
+            font-weight: 600;
+            box-shadow: var(--shadow);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--success);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.4); opacity: 0.6; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        /* --- Cards --- */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow);
+            margin-bottom: 32px;
+            overflow: hidden;
+        }
+
+        /* --- Upload --- */
+        .upload-card {
+            padding: 24px;
+            display: grid;
+            grid-template-columns: 1.2fr 1fr auto;
+            gap: 20px;
+            align-items: end;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .form-group label {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .input-wrapper {
+            position: relative;
+        }
+
+        /* 仅针对普通输入框内的图标 */
+        .input-wrapper > i:not(.custom-file-upload i) {
+            position: absolute;
+            left: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-tertiary);
+            pointer-events: none;
+        }
+
+        input[type="text"], input[type="file"], select {
             width: 100%;
-            height: 100%;
-            background: rgba(255, 255, 255, 0.8);
-            backdrop-filter: blur(4px);
-            z-index: 9999;
+            background: var(--surface-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px 10px 38px;
+            color: var(--text);
+            font-family: inherit;
+            font-size: 14px;
+            transition: var(--transition);
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--primary);
+            background: var(--surface);
+            box-shadow: 0 0 0 4px var(--primary-muted);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 10px 24px;
+            border-radius: var(--radius-sm);
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition);
+            border: 1px solid transparent;
+            font-family: inherit;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 4px 12px var(--primary-muted);
+        }
+
+        /* --- Grid & Cards --- */
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            padding: 0 4px;
+        }
+
+        .section-header h2 {
+            font-size: 18px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .badge {
+            background: var(--primary-muted);
+            color: var(--primary);
+            padding: 2px 10px;
+            border-radius: 100px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .library-grid, .streams-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
+            gap: 24px;
+            margin-bottom: 48px;
+        }
+
+        .video-card, .stream-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            box-shadow: var(--shadow);
+            transition: var(--transition);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .video-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 30px -10px oklch(0% 0 0 / 0.1);
+        }
+
+        .custom-file-upload {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 18px;
+            background: var(--surface-secondary);
+            border: 2px dashed var(--border);
+            border-radius: var(--radius-sm);
+            transition: var(--transition);
+            color: var(--text-secondary);
+            font-weight: 600;
+            min-height: 44px;
+        }
+
+        .custom-file-upload:hover {
+            border-color: var(--primary);
+            background: oklch(from var(--primary) l c h / 0.05);
+            color: var(--primary);
+        }
+
+        .custom-file-upload i {
+            font-size: 20px;
+            color: var(--primary);
+            opacity: 0.8;
+            /* 强制重置可能受影响的绝对定位 */
+            position: static !important;
+            transform: none !important;
+        }
+
+        #fileNameDisplay {
+            font-size: 13px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 260px;
+        }
+
+        .card-header-v {
+            padding: 18px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: oklch(99% 0 0);
+        }
+
+        .grade-tag {
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .grade-tag.success { background: oklch(90% 0.1 150 / 0.3); color: var(--success); border: 1px solid oklch(var(--success) / 0.2); }
+        .grade-tag.warning { background: oklch(95% 0.1 80 / 0.3); color: var(--warning); border: 1px solid oklch(var(--warning) / 0.2); }
+        .grade-tag.error { background: oklch(90% 0.1 25 / 0.3); color: var(--error); border: 1px solid oklch(var(--error) / 0.2); }
+        .grade-tag.processing { background: var(--primary-muted); color: var(--primary); border: 1px solid oklch(var(--primary) / 0.2); }
+
+        .card-body-v {
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .meta-grid-v {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+            background: var(--surface-secondary);
+            padding: 12px;
+            border-radius: var(--radius-sm);
+        }
+
+        .meta-item-v { text-align: center; }
+        .meta-label { font-size: 9px; color: var(--text-tertiary); text-transform: uppercase; font-weight: 700; margin-bottom: 2px; }
+        .meta-val { font-size: 13px; font-weight: 600; }
+
+        .config-panel-v {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .config-row-v {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .field-v label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .field-v .hint { color: var(--primary); font-size: 10px; font-weight: 700; }
+
+        .card-actions-v {
+            padding: 16px 20px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 12px;
+            background: oklch(99% 0 0);
+        }
+
+        /* --- Stream Specific --- */
+        .stream-card { position: relative; border-left: 4px solid var(--success); padding: 20px; }
+        .stream-header { display: flex; justify-content: space-between; margin-bottom: 12px; }
+        .rtsp-box {
+            background: var(--surface-secondary);
+            padding: 10px 14px;
+            border-radius: var(--radius-sm);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            color: var(--primary);
+            border: 1px solid var(--border);
+            margin-bottom: 12px;
+        }
+        .tag-pool { display: flex; flex-wrap: wrap; gap: 6px; }
+        .tag-item {
+            background: oklch(0% 0 0 / 0.04);
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        /* --- Overlay --- */
+        .overlay {
+            position: fixed;
+            inset: 0;
+            background: oklch(100% 0 0 / 0.8);
+            backdrop-filter: blur(8px);
             display: none;
             flex-direction: column;
-            justify-content: center;
             align-items: center;
-            transition: all 0.3s;
+            justify-content: center;
+            z-index: 2000;
         }
-        .spinner-grow { width: 3rem; height: 3rem; color: var(--primary); }
-        .loading-text { margin-top: 16px; font-weight: 600; color: var(--text); }
+        .spinner {
+            width: 36px; height: 36px;
+            border: 3px solid var(--primary-muted);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 12px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @media (max-width: 900px) {
+            .upload-card { grid-template-columns: 1fr; }
+            .library-grid, .streams-grid { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
-    <div id="loadingOverlay">
-        <div class="spinner-grow" role="status"></div>
-        <div class="loading-text" id="loadingText">处理中...</div>
+    <div class="overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div id="loadingText" style="font-weight: 600; color: var(--text-secondary);">处理中...</div>
     </div>
 
-    <div class="container" style="max-width: 1300px;">
-        <div class="page-header">
-            <div><h2>FireGuard 流模拟控制台</h2></div>
-            <div id="connectionStatus"><i class="bi bi-cpu-fill me-2"></i>系统在线</div>
-        </div>
-        
-        <div class="card shadow-sm">
-            <div class="card-body">
-                <div class="row align-items-center g-3">
-                    <div class="col-md-4">
-                        <label class="form-label fw-bold">设备名称</label>
-                        <input type="text" class="form-control" id="deviceName" placeholder="例如：正门主摄">
-                    </div>
-                    <div class="col-md-5">
-                        <label class="form-label fw-bold">视频源文件</label>
-                        <input type="file" class="form-control" id="fileInput" accept="video/*">
-                    </div>
-                    <div class="col-md-3 mt-md-4">
-                        <button class="btn btn-primary w-100" id="uploadBtn" onclick="upload()">
-                            <i class="bi bi-cloud-upload me-2"></i>上传并解析
-                        </button>
-                    </div>
+    <div class="container">
+        <header>
+            <div class="brand">
+                <div class="logo-box"><i class="bi bi-broadcast"></i></div>
+                <div>
+                    <h1>FireGuard Stream Simulator</h1>
+                    <p style="font-size: 11px; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">高性能流媒体仿真控制台</p>
                 </div>
             </div>
+            <div class="system-status">
+                <div class="status-dot"></div>
+                系统就绪 · <span id="clock">00:00:00</span>
+            </div>
+        </header>
+
+        <!-- Upload -->
+        <div class="card upload-card">
+            <div class="form-group">
+                <label>设备标识</label>
+                <div class="input-wrapper">
+                    <i class="bi bi-display"></i>
+                    <input type="text" id="deviceName" placeholder="例如：1号仓库主摄">
+                </div>
+            </div>
+            <div class="form-group" style="flex: 1;">
+                <label>视频源文件</label>
+                <div class="upload-area-wrapper">
+                    <label for="fileInput" class="custom-file-upload">
+                        <i class="bi bi-cloud-arrow-up-fill"></i>
+                        <span id="fileNameDisplay">点击选择或拖拽视频文件...</span>
+                    </label>
+                    <input type="file" id="fileInput" accept="video/*" style="display:none;" onchange="updateFileName(this)">
+                </div>
+            </div>
+            <button class="btn btn-primary" onclick="upload()">
+                <i class="bi bi-plus-lg"></i> 上传源文件
+            </button>
         </div>
 
-        <div class="card shadow-sm">
-            <div class="card-header">
-                <h5><i class="bi bi-collection-play me-2"></i>视频库 & 自定义推流</h5>
-            </div>
-            <div class="table-responsive">
-                <table class="table align-middle">
-                    <thead>
-                        <tr>
-                            <th style="width:15%">源设备</th>
-                            <th style="width:20%">画质规格</th>
-                            <th style="width:55%">自定义推流参数 (默认原配置)</th>
-                            <th class="text-end" style="width:10%">操作</th>
-                        </tr>
-                    </thead>
-                    <tbody id="videoLibrary"></tbody>
-                </table>
-            </div>
+        <!-- Active Streams (Priority Status) -->
+        <div class="section-header">
+            <h2><i class="bi bi-activity"></i> 活动推流状态 <span class="badge" id="activeCount">0</span></h2>
         </div>
+        <div class="streams-grid" id="activeStreams"></div>
 
-        <div class="card shadow-sm">
-            <div class="card-header">
-                <h5><i class="bi bi-broadcast me-2"></i>活动流状态</h5>
-                <span class="badge bg-primary" id="activeCount">0</span>
-            </div>
-            <div class="table-responsive">
-                <table class="table align-middle">
-                    <thead>
-                        <tr>
-                            <th style="width:20%">源设备</th>
-                            <th style="width:60%">RTSP 地址</th>
-                            <th class="text-end" style="width:20%">操作</th>
-                        </tr>
-                    </thead>
-                    <tbody id="activeStreams"></tbody>
-                </table>
-            </div>
+        <!-- Video Library -->
+        <div class="section-header">
+            <h2><i class="bi bi-collection-play"></i> 视频资源库</h2>
         </div>
+        <div class="library-grid" id="videoLibrary"></div>
     </div>
 
     <script>
@@ -215,11 +504,9 @@
                 const videos = await vRes.json();
                 const streams = await sRes.json();
 
-                // 检查是否有输入框或下拉框处于激活状态
                 const activeEl = document.activeElement;
                 const isInteracting = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'SELECT');
 
-                // 数据对比，避免无谓的刷新
                 const videoDataStr = JSON.stringify(videos);
                 const streamDataStr = JSON.stringify(streams);
                 
@@ -228,152 +515,163 @@
 
                 document.getElementById('activeCount').innerText = streams.length;
                 
-                // 只有在数据变化且用户没在操作时才更新 DOM
                 if (streamsChanged && (!isInteracting || !document.getElementById('activeStreams').contains(activeEl))) {
-                    document.getElementById('activeStreams').innerHTML = streams.map(s => `
-                        <tr>
-                            <td>
-                                <strong>${s.device_name || '未知'}</strong>
-                                <div class="text-muted small">${s.video_path.split(/[\\/]/).pop()}</div>
-                            </td>
-                            <td>
-                                <div class="d-flex align-items-center">
-                                    <code class="rtsp-code flex-grow-1">${s.rtsp_url}</code>
-                                    <button class="btn btn-sm btn-link text-muted p-0 ms-2" title="复制地址" onclick="copyUrl('${s.rtsp_url}', this)">
-                                        <i class="bi bi-clipboard"></i>
-                                    </button>
+                    const streamsHtml = streams.map(s => `
+                        <div class="stream-card">
+                            <div class="stream-header">
+                                <div>
+                                    <h3 style="font-size: 16px; font-weight: 700;">${s.device_name || '未知设备'}</h3>
+                                    <p style="font-size: 12px; color: var(--text-secondary);">${s.video_path.split(/[\\/]/).pop()}</p>
                                 </div>
-                                <div class="small text-muted mt-2 d-flex flex-wrap gap-2">
-                                    <span class="badge bg-light text-dark border"><i class="bi bi-film me-1"></i>${s.vcodec}</span>
-                                    <span class="badge bg-light text-dark border"><i class="bi bi-volume-up me-1"></i>${s.acodec}</span>
-                                    <span class="badge bg-light text-dark border"><i class="bi bi-aspect-ratio me-1"></i>${s.resolution}</span>
-                                    <span class="badge bg-light text-dark border"><i class="bi bi-speedometer2 me-1"></i>${s.fps > 0 ? s.fps + 'fps' : 'Original'}</span>
-                                    <span class="badge bg-light text-dark border"><i class="bi bi-lightning-charge me-1"></i>${s.bitrate}</span>
-                                    <span class="badge bg-light text-dark border"><i class="bi bi-gear me-1"></i>${s.preset || '-'}</span>
-                                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle"><i class="bi bi-hdd-network me-1"></i>${s.transport.toUpperCase()}</span>
-                                </div>
-                            </td>
-                            <td class="text-end">
-                                <button class="btn btn-sm btn-outline-danger" onclick="stopStream('${s.id}', this)">
-                                    <i class="bi bi-stop-circle me-1"></i>停止
+                                <button class="btn" style="background: oklch(90% 0.1 25 / 0.2); color: var(--error); padding: 4px 12px; font-size: 12px;" onclick="stopStream('${s.id}', this)">
+                                    <i class="bi bi-stop-fill"></i> 停止
                                 </button>
-                            </td>
-                        </tr>
-                    `).join('') || '<tr><td colspan="3" class="text-center text-muted py-4">暂无活动推流</td></tr>';
+                            </div>
+                            <div class="rtsp-box">
+                                <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.rtsp_url}</span>
+                                <i class="bi bi-copy" style="cursor:pointer;" onclick="copyUrl('${s.rtsp_url}', this)"></i>
+                            </div>
+                            <div class="tag-pool">
+                                <div class="tag-item"><i class="bi bi-camera-reels"></i> ${s.vcodec}</div>
+                                <div class="tag-item"><i class="bi bi-soundwave"></i> ${s.acodec}</div>
+                                <div class="tag-item"><i class="bi bi-aspect-ratio"></i> ${s.resolution}</div>
+                                <div class="tag-item"><i class="bi bi-speedometer2"></i> ${s.fps > 0 ? s.fps + 'fps' : '原帧率'}</div>
+                                <div class="tag-item"><i class="bi bi-lightning"></i> ${s.bitrate}</div>
+                                <div class="tag-item"><i class="bi bi-cpu"></i> ${s.preset}</div>
+                                <div class="tag-item" style="color: var(--primary); font-weight: 700;">${s.transport.toUpperCase()}</div>
+                            </div>
+                        </div>
+                    `).join('');
+                    document.getElementById('activeStreams').innerHTML = streamsHtml || '<div class="empty-zone" style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-tertiary);">暂无活动推流</div>';
                     lastStreamData = streamDataStr;
                 }
 
                 if (videosChanged && (!isInteracting || !document.getElementById('videoLibrary').contains(activeEl))) {
-                    document.getElementById('videoLibrary').innerHTML = videos.filter(v => {
-                        return !streams.some(s => s.video_path.includes(v.file_id));
-                    }).map(v => {
-                        return `
-                            <tr>
-                                <td>
-                                    <strong>${v.device_name}</strong>
-                                    <div class="text-muted small">${v.filename}</div>
-                                    <div class="mt-2">
-                                        <span class="grade-badge ${v.grade?.color || 'processing'}">${v.grade?.label || '未知'}</span>
+                    const libraryHtml = videos.map(v => `
+                        <div class="video-card">
+                            <div class="card-header-v">
+                                <div>
+                                    <h3 style="font-size: 15px; font-weight: 700;">${v.device_name}</h3>
+                                    <p style="font-size: 11px; color: var(--text-tertiary);">${v.filename}</p>
+                                </div>
+                                <span class="grade-tag ${v.grade?.color || 'processing'}">${v.grade?.label || '解析中'}</span>
+                            </div>
+                            <div class="card-body-v">
+                                <div class="meta-grid-v">
+                                    <div class="meta-item-v"><div class="meta-label">分辨率</div><div class="meta-val">${v.width}x${v.height}</div></div>
+                                    <div class="meta-item-v"><div class="meta-label">编码</div><div class="meta-val">${v.codec}</div></div>
+                                    <div class="meta-item-v"><div class="meta-label">帧率</div><div class="meta-val">${v.fps || '-'}</div></div>
+                                    <div class="meta-item-v"><div class="meta-label">码率</div><div class="meta-val">${formatBitrate(v.bit_rate)}</div></div>
+                                </div>
+                                
+                                <div class="config-panel-v">
+                                    <div class="field-v">
+                                        <label>自定义推流路径 <span class="hint">rtsp://ip/</span></label>
+                                        <input type="text" id="path_${v.file_id}" value="cam_${v.file_id.slice(0,4)}">
                                     </div>
-                                </td>
-                                <td>
-                                    <div class="meta-grid">
-                                        <div class="meta-item"><div class="label">分辨率</div><div class="value">${v.width}x${v.height}</div></div>
-                                        <div class="meta-item"><div class="label">编码</div><div class="value">${v.codec}</div></div>
-                                        <div class="meta-item"><div class="label">帧率</div><div class="value">${v.fps || '-'}</div></div>
-                                        <div class="meta-item"><div class="label">码率</div><div class="value">${formatBitrate(v.bit_rate)}</div></div>
-                                    </div>
-                                </td>
-                                <td>
-                                    <div class="config-panel">
-                                        <div class="input-group input-group-sm mb-3">
-                                            <span class="input-group-text bg-light text-muted">推流路径 /</span>
-                                            <input type="text" class="form-control" id="path_${v.file_id}" value="cam_${v.file_id.slice(0,4)}">
-                                            <span class="input-group-text bg-light text-muted">传输协议</span>
-                                            <select class="form-select" id="transport_${v.file_id}" style="max-width:100px;">
-                                                <option value="tcp">TCP</option>
+                                    <div class="config-row-v">
+                                        <div class="field-v">
+                                            <label>传输协议</label>
+                                            <select id="transport_${v.file_id}">
+                                                <option value="tcp" selected>TCP</option>
                                                 <option value="udp">UDP</option>
                                             </select>
                                         </div>
-                                        <div class="config-grid">
-                                            <div>
-                                                <div class="config-label">视频编码 <span class="original-hint">原:${v.codec}</span></div>
-                                                <select class="form-select form-select-sm" id="vcodec_${v.file_id}">
-                                                    <option value="copy" selected>Original (Copy)</option>
-                                                    <option value="libx264">H.264 (libx264)</option>
-                                                    <option value="libx265">H.265 (libx265)</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <div class="config-label">音频编码 <span class="original-hint">原:自动</span></div>
-                                                <select class="form-select form-select-sm" id="acodec_${v.file_id}">
-                                                    <option value="copy" selected>Original (Copy)</option>
-                                                    <option value="aac">AAC</option>
-                                                    <option value="none">无音频 (None)</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <div class="config-label">分辨率 <span class="original-hint">原:${v.width}x${v.height}</span></div>
-                                                <select class="form-select form-select-sm" id="res_${v.file_id}">
-                                                    <option value="original" selected>Original</option>
-                                                    <option value="3840x2160">3840x2160 (4K)</option>
-                                                    <option value="2560x1440">2560x1440 (2K)</option>
-                                                    <option value="1920x1080">1920x1080 (1080P)</option>
-                                                    <option value="1280x720">1280x720 (720P)</option>
-                                                    <option value="854x480">854x480 (480P)</option>
-                                                    <option value="640x360">640x360 (360P)</option>
-                                                    <option value="426x240">426x240 (240P)</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <div class="config-label">帧率 (FPS) <span class="original-hint">原:${v.fps || '-'}</span></div>
-                                                <select class="form-select form-select-sm" id="fps_${v.file_id}">
-                                                    <option value="0" selected>Original</option>
-                                                    <option value="60">60 FPS</option>
-                                                    <option value="30">30 FPS</option>
-                                                    <option value="25">25 FPS</option>
-                                                    <option value="15">15 FPS</option>
-                                                    <option value="10">10 FPS</option>
-                                                    <option value="5">5 FPS</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <div class="config-label">视频码率 <span class="original-hint">原:${formatBitrate(v.bit_rate)}</span></div>
-                                                <select class="form-select form-select-sm" id="bitrate_${v.file_id}">
-                                                    <option value="original" selected>Original</option>
-                                                    <option value="8000k">8 Mbps</option>
-                                                    <option value="4000k">4 Mbps</option>
-                                                    <option value="1000k">1 Mbps</option>
-                                                    <option value="500k">500 Kbps</option>
-                                                    <option value="200k">200 Kbps</option>
-                                                    <option value="100k">100 Kbps</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <div class="config-label">编码预设 <span class="original-hint">速度 vs 质量</span></div>
-                                                <select class="form-select form-select-sm" id="preset_${v.file_id}">
-                                                    <option value="ultrafast">极速 (Ultrafast)</option>
-                                                    <option value="faster">较快 (Faster)</option>
-                                                    <option value="medium" selected>均衡 (Medium)</option>
-                                                    <option value="slow">质量 (Slow)</option>
-                                                </select>
-                                            </div>
+                                        <div class="field-v">
+                                            <label>视频编码 <span class="hint">原:${v.codec}</span></label>
+                                            <select id="vcodec_${v.file_id}">
+                                                <option value="copy" selected>Original (Copy)</option>
+                                                <option value="libx264">H.264 (libx264)</option>
+                                                <option value="libx265">H.265 (libx265)</option>
+                                            </select>
                                         </div>
-                                        <input type="hidden" id="crf_${v.file_id}" value="23">
                                     </div>
-                                </td>
-                                <td class="text-end">
-                                    <button class="btn btn-success btn-sm w-100 mb-2 py-2" onclick="startStream(this, '${v.file_id}')">
-                                        <i class="bi bi-play-fill me-1"></i>启动模拟
-                                    </button>
-                                    <button class="btn btn-link btn-sm text-danger w-100" onclick="deleteVideo('${v.file_id}')">删除源文件</button>
-                                </td>
-                            </tr>
-                        `;
-                    }).join('') || '<tr><td colspan="4" class="text-center text-muted py-5">视频库为空，请先上传视频源</td></tr>';
+                                    <div class="config-row-v">
+                                        <div class="field-v">
+                                            <label>音频编码</label>
+                                            <select id="acodec_${v.file_id}">
+                                                <option value="copy" selected>Original (Copy)</option>
+                                                <option value="aac">AAC</option>
+                                                <option value="none">无音频 (None)</option>
+                                            </select>
+                                        </div>
+                                        <div class="field-v">
+                                            <label>分辨率 <span class="hint">原:${v.width}x${v.height}</span></label>
+                                            <select id="res_${v.file_id}">
+                                                <option value="original" selected>Original</option>
+                                                <option value="3840x2160">3840x2160 (4K)</option>
+                                                <option value="2560x1440">2560x1440 (2K)</option>
+                                                <option value="1920x1080">1920x1080 (1080P)</option>
+                                                <option value="1280x720">1280x720 (720P)</option>
+                                                <option value="854x480">854x480 (480P)</option>
+                                                <option value="640x360">640x360 (360P)</option>
+                                                <option value="426x240">426x240 (240P)</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="config-row-v">
+                                        <div class="field-v">
+                                            <label>帧率 (FPS) <span class="hint">原:${v.fps || '-'}</span></label>
+                                            <select id="fps_${v.file_id}">
+                                                <option value="0" selected>Original</option>
+                                                <option value="60">60 FPS</option>
+                                                <option value="30">30 FPS</option>
+                                                <option value="25">25 FPS</option>
+                                                <option value="15">15 FPS</option>
+                                                <option value="10">10 FPS</option>
+                                                <option value="5">5 FPS</option>
+                                            </select>
+                                        </div>
+                                        <div class="field-v">
+                                            <label>视频码率 <span class="hint">原:${formatBitrate(v.bit_rate)}</span></label>
+                                            <select id="bitrate_${v.file_id}">
+                                                <option value="original" selected>Original</option>
+                                                <option value="8000k">8 Mbps</option>
+                                                <option value="4000k">4 Mbps</option>
+                                                <option value="1000k">1 Mbps</option>
+                                                <option value="500k">500 Kbps</option>
+                                                <option value="200k">200 Kbps</option>
+                                                <option value="100k">100 Kbps</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="field-v">
+                                        <label>编码预设 <span class="hint">速度 vs 质量</span></label>
+                                        <select id="preset_${v.file_id}">
+                                            <option value="ultrafast">极速 (Ultrafast)</option>
+                                            <option value="faster">较快 (Faster)</option>
+                                            <option value="medium" selected>均衡 (Medium)</option>
+                                            <option value="slow">质量 (Slow)</option>
+                                        </select>
+                                    </div>
+                                    <input type="hidden" id="crf_${v.file_id}" value="23">
+                                </div>
+                            </div>
+                            <div class="card-actions-v">
+                                <button class="btn btn-primary" style="flex:1" onclick="startStream(this, '${v.file_id}')">
+                                    <i class="bi bi-play-fill"></i> 启动模拟
+                                </button>
+                                <button class="btn" style="border: 1px solid var(--border); color: var(--text-secondary);" onclick="deleteVideo('${v.file_id}')">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+                    `).join('');
+                    document.getElementById('videoLibrary').innerHTML = libraryHtml || '<div class="empty-zone" style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-tertiary);">视频库为空</div>';
                     lastVideoData = videoDataStr;
                 }
             } catch(e) { console.error(e); }
+        }
+
+        function updateFileName(input) {
+            const display = document.getElementById('fileNameDisplay');
+            if (input.files && input.files[0]) {
+                display.innerText = input.files[0].name;
+                display.style.color = 'var(--text)';
+            } else {
+                display.innerText = '选择或拖拽视频文件...';
+                display.style.color = 'var(--text-tertiary)';
+            }
         }
 
         async function upload() {
@@ -381,33 +679,24 @@
             const deviceInput = document.getElementById('deviceName');
             const file = fileInput.files[0];
             if(!file) return;
-
-            showLoading('正在上传并解析视频元数据...');
-            
+            showLoading('正在上传并解析视频...');
             const fd = new FormData();
             fd.append('file', file);
             fd.append('device_name', deviceInput.value || '未命名设备');
-            
             try {
                 const res = await fetch('/videos/upload', { method: 'POST', body: fd });
                 if (res.ok) {
-                    // 清空表单
                     fileInput.value = '';
                     deviceInput.value = '';
+                    updateFileName(fileInput);
                 }
-            } catch (e) {
-                alert('上传失败: ' + e.message);
-            } finally {
-                hideLoading();
-                refresh();
-            }
+            } catch (e) { alert('上传失败: ' + e.message); } finally { hideLoading(); refresh(); }
         }
 
         async function startStream(btn, fileId) {
             const originalHtml = btn.innerHTML;
             btn.disabled = true;
             btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>初始化...';
-
             let params = {
                 file_id: fileId,
                 stream_path: document.getElementById('path_' + fileId).value,
@@ -420,64 +709,45 @@
                 crf: parseInt(document.getElementById('crf_' + fileId).value),
                 preset: document.getElementById('preset_' + fileId).value
             };
-
             try {
-                const res = await fetch('/streams/start', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(params)
-                });
-                if (!res.ok) {
-                    const err = await res.json();
-                    alert('启动失败: ' + (err.detail || '未知错误'));
-                }
-            } catch (e) {
-                alert('网络错误');
-            } finally {
-                btn.disabled = false;
-                btn.innerHTML = originalHtml;
-                refresh();
-            }
+                const res = await fetch('/streams/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(params) });
+                if (!res.ok) { const err = await res.json(); alert('启动失败: ' + (err.detail || '未知错误')); }
+            } catch (e) { alert('网络错误'); } finally { btn.disabled = false; btn.innerHTML = originalHtml; refresh(); }
         }
 
         async function stopStream(id, btn) {
-            const originalHtml = btn.innerHTML;
             btn.disabled = true;
-            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>停止中...';
-            
             await fetch('/streams/' + id, { method: 'DELETE' });
             refresh();
         }
 
         async function deleteVideo(id) { 
-            if(confirm('确定从服务器永久删除该视频源？')) { 
-                showLoading('正在删除...');
+            if(confirm('确定永久删除该视频源？')) { 
+                showLoading('移除中...');
                 await fetch('/videos/' + id, { method: 'DELETE' }); 
                 hideLoading();
                 refresh(); 
             } 
         }
         
-        async function copyUrl(url, btn) {
+        async function copyUrl(url, icon) {
             try {
                 await navigator.clipboard.writeText(url);
-                const originalHtml = btn.innerHTML;
-                btn.innerHTML = '<i class="bi bi-check-lg text-success"></i>';
-                btn.classList.add('btn-light');
-                setTimeout(() => {
-                    btn.innerHTML = originalHtml;
-                    btn.classList.remove('btn-light');
-                }, 2000);
-            } catch (err) {
-                console.error('Failed to copy: ', err);
-            }
+                icon.className = 'bi bi-check2 text-success';
+                setTimeout(() => { icon.className = 'bi bi-copy'; }, 2000);
+            } catch (err) { console.error(err); }
+        }
+
+        function updateClock() {
+            document.getElementById('clock').innerText = new Date().toLocaleTimeString('zh-CN', { hour12: false });
         }
 
         async function init() {
             refresh();
             setInterval(refresh, 8000);
+            setInterval(updateClock, 1000);
+            updateClock();
         }
-
         init();
     </script>
 </body>

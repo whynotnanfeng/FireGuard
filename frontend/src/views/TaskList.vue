@@ -1,22 +1,37 @@
 <template>
   <div class="task-list-page fade-in">
     <div class="toolbar">
-      <div class="filter-group">
+      <div class="toolbar-left">
+        <span class="filter-label">任务名称</span>
         <a-input-search
           v-model:value="filters.search"
-          placeholder="搜索任务名称..."
-          style="width: 280px"
+          placeholder="搜索..."
+          class="filter-item search-input"
           allow-clear
-          @search="loadData"
+          @search="applyFilters"
           @change="onSearchChange"
         />
         
+        <span class="filter-label">类型</span>
+        <a-select 
+          v-model:value="filters.task_type" 
+          placeholder="全部" 
+          allow-clear 
+          class="filter-item"
+          @change="applyFilters" 
+        >
+          <a-select-option value="image">图片</a-select-option>
+          <a-select-option value="video">视频</a-select-option>
+          <a-select-option value="stream">流媒体</a-select-option>
+        </a-select>
+        
+        <span class="filter-label">状态</span>
         <a-select 
           v-model:value="filters.status" 
-          placeholder="全部状态" 
+          placeholder="全部" 
           allow-clear 
-          @change="loadData" 
-          style="width: 140px"
+          class="filter-item"
+          @change="applyFilters" 
         >
           <a-select-option value="creating">创建中</a-select-option>
           <a-select-option value="pending">待执行</a-select-option>
@@ -26,10 +41,22 @@
           <a-select-option value="completed">已完成</a-select-option>
           <a-select-option value="failed">失败</a-select-option>
         </a-select>
-        
-        <a-button @click="loadData">
+
+        <a-button class="filter-item reset-btn" @click="resetFilters">
            <template #icon><ReloadOutlined /></template>
-           刷新
+           重置
+        </a-button>
+
+        <a-button 
+          type="link" 
+          class="expand-toggle"
+          @click="filtersExpanded = !filtersExpanded"
+        >
+          <template #icon>
+            <DownOutlined v-if="!filtersExpanded" />
+            <UpOutlined v-else />
+          </template>
+          {{ filtersExpanded ? '收起' : '更多筛选' }}
         </a-button>
       </div>
       
@@ -39,73 +66,104 @@
       </a-button>
     </div>
 
-    <a-table 
-       :loading="taskStore.loading" 
-       :dataSource="taskStore.tasks" 
-       :columns="columns"
-       :pagination="false"
-       rowKey="id"
-       class="task-table"
-    >
-      <template #bodyCell="{ column, record }">
-        <template v-if="column.key === 'task_type'">
-           <span class="type-badge">{{ typeMap[record.task_type] || record.task_type }}</span>
-        </template>
-        
-        <template v-if="column.key === 'status'">
-           <TaskStatus :status="record.status" />
-        </template>
+    <div v-show="filtersExpanded" class="advanced-filters">
+      <span class="filter-label">模型</span>
+      <a-select 
+        v-model:value="filters.model_id" 
+        placeholder="全部" 
+        allow-clear 
+        class="filter-item"
+        @change="applyFilters" 
+      >
+        <a-select-option v-for="m in modelOptions" :key="m.id" :value="m.id">
+          {{ m.name }}
+        </a-select-option>
+      </a-select>
 
-        <template v-if="column.key === 'created_at'">
-           {{ formatDate(record.created_at) }}
-        </template>
-
-        <template v-if="column.key === 'action'">
-          <a-space>
-            <!-- 查看按钮：running时可查；或曾执行成功(has_history)时可查历史 -->
-            <a-button 
-               type="link"
-               :disabled="!canView(record)"
-               @click="handleViewResult(record)"
-            >查看</a-button>
-
-            <!-- 执行按钮：仅 pending/exception/failed 可执行（not running） -->
-            <a-button 
-               type="link" 
-               :disabled="!canExecute(record)"
-               @click="handleExecute(record)"
-            >执行</a-button>
-            
-            <!-- 停止按钮：仅 running 的 stream 任务 -->
-            <a-button 
-               type="link"
-               :disabled="record.status !== 'running' || record.task_type !== 'stream'"
-               @click="handleStop(record)"
-            >停止</a-button>
-
-            <!-- 配置按钮：仅 pending 状态（未运行） -->
-            <a-button 
-               type="link"
-               :disabled="record.status !== 'pending'"
-               @click="handleConfig(record)"
-            >配置</a-button>
-            
-            <a-popconfirm title="确定删除该任务吗？" @confirm="handleDelete(record.id)">
-               <a-button type="link" danger>删除</a-button>
-            </a-popconfirm>
-          </a-space>
-        </template>
-      </template>
-    </a-table>
-
-    <div class="pagination-wrap" v-if="taskStore.total > 0">
-      <a-pagination
-        v-model:current="page"
-        v-model:pageSize="limit"
-        :total="taskStore.total"
-        show-less-items
-        @change="loadData"
+      <span class="filter-label">描述</span>
+      <a-input
+        v-model:value="filters.description"
+        placeholder="关键词..."
+        class="filter-item desc-input"
+        allow-clear
+        @change="applyFilters"
       />
+
+      <span class="filter-label">创建时间</span>
+      <a-range-picker
+        v-model:value="filters.dateRange"
+        class="filter-item date-picker"
+        @change="applyFilters"
+      />
+    </div>
+
+    <div class="table-wrapper">
+      <a-table 
+         :loading="taskStore.loading" 
+         :dataSource="pagedTasks" 
+         :columns="columns"
+         :pagination="false"
+         rowKey="id"
+         class="task-table"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'task_type'">
+             <span class="type-badge">{{ typeMap[record.task_type] || record.task_type }}</span>
+          </template>
+          
+          <template v-if="column.key === 'status'">
+             <TaskStatus :status="record.status" />
+          </template>
+
+          <template v-if="column.key === 'created_at'">
+             {{ formatDate(record.created_at) }}
+          </template>
+
+          <template v-if="column.key === 'action'">
+            <a-space>
+              <a-button 
+                 type="link"
+                 :disabled="!canView(record)"
+                 @click="handleViewResult(record)"
+              >查看</a-button>
+
+              <a-button 
+                 type="link" 
+                 :disabled="!canExecute(record)"
+                 @click="handleExecute(record)"
+              >执行</a-button>
+              
+              <a-button 
+                 type="link"
+                 :disabled="record.status !== 'running' || record.task_type !== 'stream'"
+                 @click="handleStop(record)"
+              >停止</a-button>
+
+              <a-button 
+                 type="link"
+                 :disabled="record.status !== 'pending'"
+                 @click="handleConfig(record)"
+              >配置</a-button>
+              
+              <a-popconfirm title="确定删除该任务吗？" @confirm="handleDelete(record.id)">
+                 <a-button type="link" danger>删除</a-button>
+              </a-popconfirm>
+            </a-space>
+          </template>
+        </template>
+      </a-table>
+
+      <div class="pagination-wrap" v-if="totalFiltered > 0">
+        <span class="pagination-info">共 {{ totalFiltered }} 条</span>
+        <a-pagination
+          v-model:current="page"
+          v-model:pageSize="pageSize"
+          :total="totalFiltered"
+          show-less-items
+          show-quick-jumper
+          @change="onPageChange"
+        />
+      </div>
     </div>
 
     <!-- Modals -->
@@ -143,25 +201,33 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useTaskStore } from '@/stores/task'
 import { tasksApi } from '@/api/tasks'
+import { modelsApi } from '@/api/models'
 import TaskStatus from '@/components/TaskStatus.vue'
 import TaskCreate from './TaskCreate.vue'
 import DetectionConfig from '@/components/DetectionConfig.vue'
 import ResultViewer from '@/components/ResultViewer.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import { message } from 'ant-design-vue'
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, ReloadOutlined, DownOutlined, UpOutlined } from '@ant-design/icons-vue'
+import dayjs, { type Dayjs } from 'dayjs'
 
 const taskStore = useTaskStore()
 
 const page = ref(1)
-const limit = ref(10)
+const pageSize = ref(10)
 const filters = reactive({ 
-  status: null,
-  search: ''
+  status: undefined as string | undefined,
+  task_type: undefined as string | undefined,
+  model_id: undefined as string | undefined,
+  description: '',
+  search: '',
+  dateRange: undefined as [Dayjs, Dayjs] | undefined
 })
+
+const filtersExpanded = ref(false)
 
 const showCreate = ref(false)
 const showConfig = ref(false)
@@ -170,10 +236,6 @@ const showResult = ref(false)
 const currentResultRow = ref<any>(null)
 const renderReady = ref(false)
 
-// V1.4.20: Immediate Unmount Strategy
-// When showResult becomes false, we kill renderReady IMMEDIATELY.
-// This triggers v-if unmount of VideoPlayer BEFORE the modal animation finishes, 
-// ensuring WebSocket/Canvas processing stops and frees the main thread for mask removal.
 watch(showResult, (val) => {
   if (!val) renderReady.value = false
 })
@@ -181,12 +243,13 @@ watch(showResult, (val) => {
 const typeMap: any = { image: '图片', video: '视频', stream: '流媒体' }
 
 const columns = [
-  { title: '任务名称', dataIndex: 'name', key: 'name' },
-  { title: '类型', key: 'task_type', width: 100 },
-  { title: '模型', dataIndex: 'model_name', key: 'model_name' },
-  { title: '状态', key: 'status', width: 120 },
-  { title: '创建时间', key: 'created_at', width: 180 },
-  { title: '操作', key: 'action', width: 260, fixed: 'right' }
+  { title: '任务名称', dataIndex: 'name', key: 'name', width: 180, ellipsis: true },
+  { title: '类型', key: 'task_type', width: 90 },
+  { title: '模型', dataIndex: 'model_name', key: 'model_name', width: 160, ellipsis: true },
+  { title: '描述', dataIndex: 'description', key: 'description', width: 150, ellipsis: true },
+  { title: '状态', key: 'status', width: 100 },
+  { title: '创建时间', key: 'created_at', width: 170 },
+  { title: '操作', key: 'action', width: 240, fixed: 'right' }
 ]
 
 function formatDate(ds: string) {
@@ -194,11 +257,6 @@ function formatDate(ds: string) {
   return new Date(ds).toLocaleString()
 }
 
-/**
- * V12: 查看按钮控制
- * - stream任务: running时可看实时流；has_history=true时可看历史记录（即使已暂停）
- * - 非stream任务: 仅 completed 可查看
- */
 function canView(record: any): boolean {
   if (record.task_type === 'stream') {
     return record.status === 'running' || record.has_history === true
@@ -206,25 +264,89 @@ function canView(record: any): boolean {
   return record.status === 'completed'
 }
 
-/**
- * V12: 执行按钮控制
- * - 仅 pending/exception/failed 可执行（running 时不允许重复执行）
- */
 function canExecute(record: any): boolean {
   return ['pending', 'exception', 'failed'].includes(record.status)
 }
 
+const filteredTasks = computed(() => {
+  return taskStore.tasks.filter(t => {
+    if (filters.search && !t.name.toLowerCase().includes(filters.search.toLowerCase())) {
+      return false
+    }
+    if (filters.status && t.status !== filters.status) {
+      return false
+    }
+    if (filters.task_type && t.task_type !== filters.task_type) {
+      return false
+    }
+    if (filters.model_id && t.model_id !== filters.model_id) {
+      return false
+    }
+    if (filters.description && !t.description.toLowerCase().includes(filters.description.toLowerCase())) {
+      return false
+    }
+    if (filters.dateRange && filters.dateRange.length === 2) {
+      const created = new Date(t.created_at).getTime()
+      const start = filters.dateRange[0].startOf('day').valueOf()
+      const end = filters.dateRange[1].endOf('day').valueOf()
+      if (created < start || created > end) {
+        return false
+      }
+    }
+    return true
+  })
+})
+
+const totalFiltered = computed(() => filteredTasks.value.length)
+
+const pagedTasks = computed(() => {
+  const start = (page.value - 1) * pageSize.value
+  const end = start + pageSize.value
+  return filteredTasks.value.slice(start, end)
+})
+
+function onPageChange() {
+  // pagination component handles page/pageSize updates
+}
+
+function applyFilters() {
+  page.value = 1
+}
+
+function onSearchChange() {
+  page.value = 1
+}
+
+function resetFilters() {
+  filters.search = ''
+  filters.status = undefined
+  filters.task_type = undefined
+  filters.model_id = undefined
+  filters.description = ''
+  filters.dateRange = undefined
+  page.value = 1
+}
+
+const modelOptions = ref<any[]>([])
+
+async function loadModelOptions() {
+  try {
+    const res = await modelsApi.list({ limit: 100 })
+    modelOptions.value = res.items
+  } catch (e) {
+    console.error('Failed to load model options', e)
+  }
+}
+
 let debounceTimer: any = null
 async function loadData() {
-  // Clear any pending requests
   if (debounceTimer) clearTimeout(debounceTimer)
   
-  // Schedule a new request after 300ms of quiet
   debounceTimer = setTimeout(async () => {
     try {
       await taskStore.fetchTasks({
-        skip: (page.value - 1) * limit.value,
-        limit: limit.value,
+        skip: (page.value - 1) * pageSize.value,
+        limit: pageSize.value,
         status: filters.status || undefined,
         search: filters.search || undefined
       })
@@ -236,20 +358,14 @@ async function loadData() {
   }, 300)
 }
 
-function onSearchChange() {
-  // Reset to first page on search
-  page.value = 1
-  loadData()
-}
-
 let notificationWs: WebSocket | null = null
 let pollTimer: any = null
 
 onMounted(() => {
   loadData()
+  loadModelOptions()
   startNotifications()
   
-  // V18: Defensive polling heartbeat for final consistency
   pollTimer = setInterval(() => {
     console.log('[Poll Heartbeat] Syncing task status...')
     loadData()
@@ -277,7 +393,6 @@ function startNotifications() {
     }
     
     notificationWs.onclose = () => {
-        // Retry connection after 5 seconds if lost
         setTimeout(() => {
             if (!notificationWs || notificationWs.readyState === WebSocket.CLOSED) {
                 startNotifications()
@@ -332,7 +447,6 @@ async function handleDelete(id: string) {
 }
 
 async function handleViewResult(row: any) {
-  // V1.4.15: Two-stage activation to ensure Modal frame is ready before components mount
   currentResultRow.value = row
   showResult.value = true
   await nextTick()
@@ -354,27 +468,103 @@ function handleConfig(row: any) {
 .task-list-page {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
+  height: calc(100vh - 120px);
 }
 
 .toolbar {
   display: flex;
   justify-content: space-between;
+  align-items: center;
+  gap: 16px;
   background: var(--bg-card);
-  padding: 16px;
+  padding: 12px 16px;
   border-radius: 8px;
   border: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
 
-.filter-group {
+.toolbar-left {
   display: flex;
-  gap: 12px;
+  gap: 16px;
+  align-items: center;
+  flex: 1;
+}
+
+.filter-label {
+  font-size: 14px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.filter-item {
+  min-width: 120px;
+}
+
+.search-input {
+  width: 200px;
+}
+
+.reset-btn {
+}
+
+.expand-toggle {
+  padding: 0 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.expand-toggle:hover {
+  color: var(--primary-blue);
+}
+
+.advanced-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.date-picker {
+  width: 260px;
+}
+
+.desc-input {
+  width: 200px;
+}
+
+.table-wrapper {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.task-table {
+  background: var(--bg-card);
+  border-radius: 8px;
+  box-shadow: var(--shadow-card);
+  flex: 1;
 }
 
 .pagination-wrap {
   display: flex;
   justify-content: flex-end;
-  margin-top: 20px;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+  flex-shrink: 0;
+}
+
+.pagination-info {
+  font-size: 13px;
+  color: var(--text-secondary);
 }
 
 .type-badge {
