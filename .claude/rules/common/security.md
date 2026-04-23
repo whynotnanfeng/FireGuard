@@ -1,17 +1,66 @@
-# 安全审查清单 (Security Checklist)
+# Security Review Checklist
 
-## 1. 凭据管理 (Secrets)
-- **禁止硬编码**: 严禁在代码、注释或环境变量模板中提交真实的 API Key、数据库密码或私钥。
-- **检测**: 开发过程中若发现任何类似 `sk-...` 的密钥，必须立即移除并轮换。
-- **.gitignore**: 确保 `.env`、`*.pem` 等文件已被 Git 忽略。
+## Authentication & Authorization
 
-## 2. 输入验证 (Input Validation)
-- **后端**: 必须使用 Pydantic 模型对所有 API 输入进行强类型校验。严禁直接执行未经清洗的 SQL 字符串。
-- **前端**: 在提交数据前进行基础的字段校验，提升用户体验。
+- [x] JWT secrets loaded from environment variables (NOT hardcoded)
+- [x] Password hashing using bcrypt (passlib)
+- [x] Token expiration configured (default: 24h)
+- [x] User-specific resource access validation
+- [ ] Rate limiting on authentication endpoints
+- [ ] Account lockout after failed attempts
+- [ ] Refresh token rotation
 
-## 3. 敏感信息处理
-- **LOG/调试**: 严禁在 `print` 或 `console.log` 中输出用户密码、Token 等敏感数据。
-- **错误响应**: API 错误由于安全性考虑，不得向前端暴露详细的系统堆栈信息或数据库错误细节。
+## Input Validation
 
-## 4. 权限与认证
-- 涉及敏感操作（如删除任务、修改配置）的接口必须通过 `Depends(get_current_user)` 进行权限验证。
+- [x] Username length validation (2-50 chars)
+- [x] Password minimum length (6 chars)
+- [x] Task type validation (image/video/stream)
+- [x] Input types JSON validation
+- [x] Model ownership validation
+- [x] Storage limit enforcement
+- [x] File size validation before upload
+- [ ] SQL injection prevention (SQLModel handles this)
+- [x] Path traversal prevention (using Path operations)
+- [ ] URL validation for source_url
+- [x] WebSocket token validation
+
+## Data Protection
+
+- [x] No secrets in source code
+- [x] Environment variables for configuration
+- [x] File upload size limits
+- [x] Storage quota per user
+- [ ] Encryption at rest for sensitive data
+- [ ] Secure file deletion
+
+## CORS & Network Security
+
+- [x] Configurable allowed origins
+- [x] CORS credentials enabled
+- [x] CORS max-age configured
+- [ ] HTTPS enforcement in production
+- [ ] WebSocket connection validation
+- [x] IP-based access logging
+
+## API Security
+
+- [x] OAuth2 scheme for protected endpoints
+- [x] Bearer token authentication
+- [x] 401/403 proper error responses
+- [ ] Rate limiting on API endpoints
+- [ ] Request size limits
+- [x] API versioning structure
+
+## Error Handling & Logging
+
+- [x] No stack traces in production responses
+- [x] Structured logging (JSON format for production)
+- [ ] Sensitive data masking in logs
+- [x] Access logging for audit trail
+- [ ] Log rotation configuration
+
+## Dependencies
+
+- [ ] Dependency vulnerability scanning (pip-audit)
+- [x] Pinned requirements.txt versions
+- [ ] Security updates automation

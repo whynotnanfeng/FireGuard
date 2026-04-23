@@ -2,18 +2,29 @@
   <div class="layout">
     <aside class="sidebar">
       <div class="logo">
-        <h2>火灾监测系统</h2>
+        <div class="logo-icon">
+          <FireOutlined />
+        </div>
+        <div class="logo-text">
+          <h2>火灾监测系统</h2>
+          <span class="logo-sub">FIRE DETECTION</span>
+        </div>
       </div>
       <nav class="nav-menu">
         <router-link to="/tasks" class="nav-item" active-class="active">
-          <span class="anticon-wrapper"><UnorderedListOutlined /></span> 任务管理
+          <span class="nav-icon"><UnorderedListOutlined /></span>
+          <span class="nav-label">任务管理</span>
         </router-link>
         <router-link to="/models" class="nav-item" active-class="active">
-          <span class="anticon-wrapper"><AppstoreOutlined /></span> 模型库
+          <span class="nav-icon"><AppstoreOutlined /></span>
+          <span class="nav-label">模型库</span>
         </router-link>
       </nav>
+      <div class="sidebar-footer">
+        <div class="version-info">v1.2.0</div>
+      </div>
     </aside>
-    
+
     <div class="main-content">
       <header class="header">
         <div class="page-title">{{ route.path === '/models' ? '模型库' : '任务管理' }}</div>
@@ -44,7 +55,7 @@
 <script setup lang="ts">
 import { useAuthStore } from '@/stores/auth'
 import { useRoute } from 'vue-router'
-import { UnorderedListOutlined, AppstoreOutlined, UserOutlined } from '@ant-design/icons-vue'
+import { UnorderedListOutlined, AppstoreOutlined, UserOutlined, FireOutlined } from '@ant-design/icons-vue'
 
 const authStore = useAuthStore()
 const route = useRoute()
@@ -57,66 +68,135 @@ function handleCommand(cmd: string) {
 </script>
 
 <style scoped>
-.layout {
-  display: flex;
-  height: 100vh;
-  background: var(--bg-card); /* main content white */
-}
-
-/* Sidebar: Very light gray matching reference */
 .sidebar {
-  width: 240px;
-  background: var(--bg-sidebar); 
-  border-right: 1px solid var(--border-color);
+  width: 260px;
+  background: #ffffff;
+  border-right: 1px solid #e8ecf0;
   display: flex;
   flex-direction: column;
+  position: relative;
+  overflow: hidden;
 }
 
 .logo {
-  height: 70px;
+  height: 72px;
   display: flex;
   align-items: center;
   padding: 0 24px;
+  gap: 14px;
+  border-bottom: 1px solid #e8ecf0;
+  position: relative;
+  z-index: 1;
 }
 
-.logo h2 { 
-  font-size: 20px; 
-  font-weight: 800; 
-  color: var(--primary-blue); 
+.logo-icon {
+  width: 40px;
+  height: 40px;
+  background: linear-gradient(135deg, #ff6b35 0%, #f7c948 50%, #ff4444 100%);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: #fff;
+  flex-shrink: 0;
+  box-shadow: 0 4px 12px rgba(255, 107, 53, 0.3);
+}
+
+.logo-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.logo-text h2 {
+  font-size: 17px;
+  font-weight: 700;
+  color: #1a1a2e;
   margin: 0;
-  letter-spacing: -0.5px;
+  letter-spacing: 0.5px;
+  line-height: 1.2;
+}
+
+.logo-sub {
+  font-size: 10px;
+  color: #a0aec0;
+  letter-spacing: 1.5px;
+  font-weight: 600;
+  text-transform: uppercase;
 }
 
 .nav-menu {
-  padding: 24px 16px;
+  padding: 20px 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
+  flex: 1;
+  position: relative;
+  z-index: 1;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 16px;
-  color: var(--text-secondary);
+  padding: 12px 16px;
+  color: #64748b;
   text-decoration: none;
   border-radius: 8px;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   font-weight: 500;
   font-size: 14px;
+  position: relative;
+}
+
+.nav-icon {
+  font-size: 18px;
+  width: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s;
+}
+
+.nav-label {
+  transition: color 0.2s;
 }
 
 .nav-item:hover {
-  background: rgba(9, 30, 66, 0.04);
-  color: var(--text-primary);
+  background: #f1f5f9;
+  color: #334155;
 }
 
-/* Active State: White rect, blue text */
 .nav-item.active {
-  background: #FFFFFF;
+  background: rgba(74, 144, 217, 0.08);
   color: var(--primary-blue);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  font-weight: 600;
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  background: var(--primary-blue);
+  border-radius: 0 2px 2px 0;
+}
+
+.sidebar-footer {
+  padding: 16px 24px;
+  border-top: 1px solid #e8ecf0;
+  position: relative;
+  z-index: 1;
+}
+
+.version-info {
+  font-size: 11px;
+  color: #cbd5e1;
+  text-align: center;
+  letter-spacing: 0.5px;
 }
 
 .main-content {
@@ -127,19 +207,18 @@ function handleCommand(cmd: string) {
   background: var(--bg-card);
 }
 
-/* Header is clean, matching the white body */
 .header {
-  height: 70px;
+  height: 64px;
   background: var(--bg-card);
   border-bottom: 1px solid var(--border-color);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 32px;
+  padding: 0 28px;
 }
 
 .page-title {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -148,25 +227,32 @@ function handleCommand(cmd: string) {
   cursor: pointer;
 }
 
-.el-dropdown-link {
+.dropdown-link {
+  color: var(--text-secondary);
+  transition: color 0.2s;
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: var(--text-secondary);
-  font-weight: 500;
+  gap: 6px;
+  font-size: 14px;
 }
 
-.el-dropdown-link:hover {
+.dropdown-link:hover {
   color: var(--primary-blue);
 }
 
 .content-body {
   flex: 1;
-  padding: 32px;
+  padding: 24px 28px;
   overflow-y: auto;
+  background: var(--bg-primary);
 }
 
-/* Transitions */
+.layout {
+  display: flex;
+  height: 100vh;
+  background: var(--bg-card);
+}
+
 .fade-enter-active,
 .fade-leave-active {
   transition: opacity 0.2s ease;

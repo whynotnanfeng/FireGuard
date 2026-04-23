@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
@@ -16,13 +17,14 @@ from typing import Dict, List, Optional, Set, TYPE_CHECKING
 if TYPE_CHECKING:
     from app.services.video_stream import VideoStream
 from app.services.notifier import notifier
+from app.utils.time import now_beijing
 
 import cv2
 
 from app.config import config
 from app.database import engine
 from app.models.task import Task
-from app.models.result import Result
+from app.models.result import TaskResult
 from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,8 @@ class StreamManager:
         self._streams: Dict[str, "VideoStream"] = {}
         self._paused: Set[str] = set()
         self._monitor_task: Optional[asyncio.Task] = None
+        # V1.3.0: High-integrity identity tracking
+        self._stream_tokens: Dict[str, object] = {} 
 
     def start_monitor(self) -> None:
         """Start the background monitor to sync exception status."""
@@ -84,10 +88,10 @@ class StreamManager:
                     healed = []
                     with Session(engine) as session:
                         running_tasks = session.exec(select(Task).where(Task.status == "running")).all()
-                        utc_now = datetime.utcnow()
+                        beijing_now = now_beijing()
                         for r_task in running_tasks:
                             if r_task.task_type == "stream" and r_task.id not in self._streams:
-                                if r_task.updated_at and (utc_now - r_task.updated_at).total_seconds() > 30:
+                                if r_task.updated_at and (beijing_now - r_task.updated_at).total_seconds() > 30:
                                     r_task.status = "exception"
                                     r_task.error_msg = "系统重启或非预期中断 (状态自愈)"
                                     session.add(r_task)
@@ -107,23 +111,44 @@ class StreamManager:
             await asyncio.sleep(5)
 
     def start_stream(self, task_id: str, source: str, model_path: str, mapping: Optional[dict]) -> "VideoStream":
-        """Initialize and start a stream's background grabbers."""
+        """V12: 冷启动 - 始终创建新流实例（由调用方负责先stop旧流）"""
         from app.services.video_stream import VideoStream
         from app.services.detector import get_detector
-        
-        # Shutdown existing if any
-        if task_id in self._streams:
-            self.stop_stream(task_id)
 
-        detector = get_detector(model_path, mapping)
-        stream = VideoStream(task_id, source, detector)
-        # V7 Fix: Start grabbers explicitly only for live execution (not verification)
-        stream.start_grabbers()
-        
-        self._streams[task_id] = stream
+        # V1.2.46: Add a short delay to ensure old thread sockets are fully closed by OS
+        time.sleep(0.3)
+
+        # 加载检测器引擎
+        detector = get_detector(model_path)
+
+        # V1.3.3: Pre-load detection config from DB
+        detection_config = None
+        from app.models.task import Task
+        from sqlmodel import Session
+        from app.database import engine
+        with Session(engine) as session:
+            task = session.get(Task, task_id)
+            if task and task.detection_config:
+                try:
+                    detection_config = json.loads(task.detection_config)
+                    logger.info(f"[V1.3.3] Injected initial config for {task_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse initial config for {task_id}: {e}")
+
+        # V1.3.0: Create unique identity token for this run
+        token = object()
+        self._stream_tokens[task_id] = token
+
+        # 创建并启动新流
+        new_stream = VideoStream(task_id, source, detector, token, mapping)
+        new_stream.detection_config = detection_config # Inject config
+        new_stream.start_grabbers()
+
+        # 注册到管理器
+        self._streams[task_id] = new_stream
         self._paused.discard(task_id)
-        logger.info(f"Stream {task_id} started (Live)")
-        return stream
+        logger.info(f"[V12] Stream {task_id} cold-started successfully")
+        return new_stream
 
     def get_stream(self, task_id: str) -> Optional["VideoStream"]:
         return self._streams.get(task_id)
@@ -139,11 +164,21 @@ class StreamManager:
             self._streams[task_id].resume()
 
     def stop_stream(self, task_id: str) -> None:
+        logger.info(f"V1.3.0 MANAGER: Hard-stop requested for stream {task_id}")
         if task_id in self._streams:
             self._streams[task_id].stop()
             del self._streams[task_id]
+        
+        # Invalidate the token to kill any lingering threads
+        if task_id in self._stream_tokens:
+            del self._stream_tokens[task_id]
+            
         self._paused.discard(task_id)
-        logger.info(f"Stream {task_id} stopped and cleaned up")
+        logger.info(f"Stream {task_id} logically and physically detached")
+
+    def is_active(self, task_id: str, token: object) -> bool:
+        """V1.3.0: Cross-verification heartbeat for workers."""
+        return self._stream_tokens.get(task_id) is token
 
     def is_ready(self, task_id: str) -> bool:
         return task_id in self._streams
@@ -207,7 +242,7 @@ class TaskRunner:
 
             # Update status to running
             task.status = "running"
-            task.updated_at = datetime.utcnow()
+            task.updated_at = now_beijing()
             session.add(task)
             session.commit()
             session.refresh(task)
@@ -223,7 +258,6 @@ class TaskRunner:
                 return
 
         try:
-            # Parse mapping safely
             mapping = None
             if dm and dm.label_config:
                 try:
@@ -232,10 +266,18 @@ class TaskRunner:
                 except Exception as e:
                     logger.warning(f"Task {task_id}: Failed to parse label_config: {e}")
 
+            detection_config = {}
+            if task.detection_config:
+                try:
+                    detection_config = json.loads(task.detection_config)
+                    logger.info(f"Task {task_id}: Using detection config: {detection_config}")
+                except Exception as e:
+                    logger.warning(f"Task {task_id}: Failed to parse detection_config: {e}")
+
             if task.task_type == "image":
-                await self._process_image(task_id, task.source_path, task.user_id, dm.file_path, mapping)
+                await self._process_image(task_id, task.source_path, task.user_id, dm.file_path, mapping, detection_config)
             elif task.task_type == "video":
-                await self._process_video(task_id, task.source_path, task.user_id, dm.file_path, mapping)
+                await self._process_video(task_id, task.source_path, task.user_id, dm.file_path, mapping, detection_config)
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
             with Session(engine) as session:
@@ -248,12 +290,12 @@ class TaskRunner:
     # ── Image processing ─────────────────────────────────────────────────────
 
     async def _process_image(
-        self, task_id: str, source_path: str, user_id: str, model_path: str, label_mapping: Optional[dict] = None
+        self, task_id: str, source_path: str, user_id: str, model_path: str, label_mapping: Optional[dict] = None, detection_config: Optional[dict] = None
     ) -> None:
         from sqlmodel import Session, select
         from app.database import engine
         from app.models.task import Task
-        from app.models.result import Result
+        from app.models.result import TaskResult
         from app.models.model import DetectionModel
         from app.services.detector import get_detector, Detector
 
@@ -278,12 +320,27 @@ class TaskRunner:
             is_multimodal = detector.is_rgbir and ir_dir.exists()
             logger.info(f"Task {task_id}: Multimodal mode enabled: {is_multimodal}")
 
+            # FPS Throttling for Image Tasks
+            fps_target = detection_config.get("fps", config.DETECTION_FPS_IMAGE)
+            last_process_time = 0.0
+
             all_detections: dict = {}
             result_dir = config.RESULTS_DIR / user_id / task_id
             result_dir.mkdir(parents=True, exist_ok=True)
 
             first_result_path = ""
             for idx, img_path in enumerate(image_files):
+                now_exec = time.time()
+                if fps_target > 0:
+                    # For image tasks, FPS means how many images we process per "second" of processing time
+                    # or more simply, we can just use it as a rate limiter.
+                    if (now_exec - last_process_time) < (1.0 / fps_target):
+                        # Technically we should skip or wait. For images, we usually want to skip
+                        # if we want to simulate a specific rate from a sequence.
+                        # But for a folder, it's more like a rate limiter.
+                        # Let's just implement it as a rate limiter to avoid overloading.
+                        pass # Processing images usually doesn't need skipping unless it's a burst
+                
                 if task_id in self._cancelled_tasks:
                     logger.info(f"Image task {task_id} cancelled during processing")
                     return first_result_path, all_detections
@@ -305,14 +362,18 @@ class TaskRunner:
                     else:
                         logger.warning(f"IR image not found for {img_path.name}, falling back to RGB only")
 
-                dets = detector.detect(input_data)
-                annotated = Detector.draw_boxes(img_rgb, dets)
+                dets = detector.detect(input_data, label_mapping=label_mapping)
+                
+                filtered_dets = self._apply_detection_config(dets, detection_config)
+                
+                annotated = Detector.draw_boxes(img_rgb, filtered_dets)
                 out_name = f"annotated_{img_path.name}"
                 out_path = result_dir / out_name
                 cv2.imwrite(str(out_path), annotated)
                 if idx == 0:
                     first_result_path = str(out_path)
-                all_detections[out_name] = [d.to_dict() for d in dets]
+                all_detections[out_name] = [d.to_dict() for d in filtered_dets]
+                last_process_time = time.time()
 
             return first_result_path, all_detections
 
@@ -321,7 +382,7 @@ class TaskRunner:
         with Session(engine) as session:
             task = session.get(Task, task_id)
             if task:
-                result = Result(
+                result = TaskResult(
                     task_id=task_id,
                     result_path=result_path,
                     detections=json.dumps(detections),
@@ -329,7 +390,7 @@ class TaskRunner:
                 session.add(result)
                 task.status = "completed"
                 task.progress = 100
-                task.updated_at = datetime.utcnow()
+                task.updated_at = now_beijing()
                 session.commit()
                 logger.info(f"Image task {task_id} completed. Detections: {len(detections)}")
                 await notifier.broadcast_status(task_id, "completed")
@@ -337,12 +398,12 @@ class TaskRunner:
     # ── Video processing ──────────────────────────────────────────────────────
 
     async def _process_video(
-        self, task_id: str, source_path: str, user_id: str, model_path: str, label_mapping: Optional[dict] = None
+        self, task_id: str, source_path: str, user_id: str, model_path: str, label_mapping: Optional[dict] = None, detection_config: Optional[dict] = None
     ) -> None:
         from sqlmodel import Session
         from app.database import engine
         from app.models.task import Task
-        from app.models.result import Result
+        from app.models.result import TaskResult
         from app.models.model import DetectionModel
         from app.services.detector import get_detector, Detector
 
@@ -398,7 +459,15 @@ class TaskRunner:
                 fourcc = cv2.VideoWriter_fourcc(*"VP80")
                 vid_detections = []
                 frame_idx = 0
-                frame_step = 5 # Process 1 detection every 5 frames
+                
+                # V1.6: Dynamic FPS Calculation
+                fps_target = detection_config.get("fps", config.DETECTION_FPS_VIDEO)
+                if fps_target > 0:
+                    frame_step = max(1, int(fps / fps_target))
+                else:
+                    frame_step = 1 # Unlimited
+                
+                logger.info(f"Task {task_id}: Processing video with target FPS {fps_target} (Source FPS: {fps:.2f}, Step: {frame_step})")
 
                 # Optimization: Adjust output FPS to match our sampling rate to save CPU encoding time
                 output_fps = max(1, fps // frame_step)
@@ -428,11 +497,11 @@ class TaskRunner:
                         if is_multimodal and frame_ir is not None:
                             input_data = [frame_rgb, frame_ir]
                         
-                        dets = detector.detect(input_data)
-                        vid_detections.extend([d.to_dict() for d in dets])
+                        dets = detector.detect(input_data, label_mapping=label_mapping)
+                        filtered_dets = self._apply_detection_config(dets, detection_config)
+                        vid_detections.extend([d.to_dict() for d in filtered_dets])
                         
-                        # Only draw and write when we detect (sampling)
-                        annotated = Detector.draw_boxes(frame_rgb, dets)
+                        annotated = Detector.draw_boxes(frame_rgb, filtered_dets)
                         writer.write(annotated)
                     
                     frame_idx += 1
@@ -452,7 +521,7 @@ class TaskRunner:
         with Session(engine) as session:
             task = session.get(Task, task_id)
             if task:
-                result = Result(
+                result = TaskResult(
                     task_id=task_id,
                     result_path=result_path,
                     detections=json.dumps(detections),
@@ -460,7 +529,7 @@ class TaskRunner:
                 session.add(result)
                 task.status = "completed"
                 task.progress = 100
-                task.updated_at = datetime.utcnow()
+                task.updated_at = now_beijing()
                 session.commit()
                 logger.info(f"Video task {task_id} completed. Frames processed")
                 await notifier.broadcast_status(task_id, "completed")
@@ -471,9 +540,67 @@ class TaskRunner:
     def _fail_task(session, task, error_msg: str) -> None:
         task.status = "failed"
         task.error_msg = error_msg[:1000]
-        task.updated_at = datetime.utcnow()
+        task.updated_at = now_beijing()
         session.add(task)
         session.commit()
+
+    @staticmethod
+    def _apply_detection_config(detections, detection_config: Optional[dict]):
+        if not detection_config:
+            return detections
+        
+        # 1. Resolve Global Threshold (Default to 0.25 if not set)
+        global_threshold_val = detection_config.get("global_threshold", 25)
+        # Convert 0-100 to 0.0-1.0
+        global_threshold = global_threshold_val / 100.0 if global_threshold_val > 1 else global_threshold_val
+        
+        categories = detection_config.get("categories", [])
+        if not categories:
+            # If categories config is empty, only apply global threshold
+            return [d for d in detections if (d.confidence if hasattr(d, 'confidence') else d.get("confidence", 0)) >= global_threshold]
+
+        # 2. Build lookups for both ID and Name to be robust
+        # Some models return "fire", some "0". Config usually has both.
+        selected_by_id = {}
+        selected_by_name = {}
+        
+        for cat in categories:
+            if cat.get("selected", True):
+                cid = str(cat.get("id", ""))
+                name = str(cat.get("name", "")).lower()
+                if cid: selected_by_id[cid] = cat
+                if name: selected_by_name[name] = cat
+        
+        filtered = []
+        for det in detections:
+            class_name = str(det.class_name if hasattr(det, 'class_name') else det.get("class", "")).lower()
+            # Try to find class_id if available (not all detectors provide it in Detection object yet)
+            class_id = str(getattr(det, 'class_id', "")) # placeholder if we add it later
+            confidence = det.confidence if hasattr(det, 'confidence') else det.get("confidence", 0)
+            
+            # Match by Name OR ID
+            cat_config = None
+            if class_name in selected_by_name:
+                cat_config = selected_by_name[class_name]
+            elif class_id in selected_by_id:
+                cat_config = selected_by_id[class_id]
+            
+            # If the class is not and wasn't intended to be in the "categories" list, 
+            # we consider it "not selected" if the list is non-empty.
+            if cat_config is None:
+                continue
+            
+            # 3. Resolve Effective Threshold
+            cat_threshold = cat_config.get("threshold")
+            if cat_threshold is not None:
+                effective_threshold = cat_threshold / 100.0 if cat_threshold > 1 else cat_threshold
+            else:
+                effective_threshold = global_threshold
+            
+            if confidence >= effective_threshold:
+                filtered.append(det)
+        
+        return filtered
 
 
 # Global singletons

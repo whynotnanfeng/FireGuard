@@ -1,48 +1,77 @@
-# OS
+# ──────────────────────────────────────────────────────────────────────────────
+# FireGuard Project Git Ignore Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+
+# --- System & OS ---
 .DS_Store
 Thumbs.db
 *.log
+*.tmp
+*.bak
+.directory
 
-# Frontend
+# --- AI Agent & Developer Tools (MANDATORY IGNORE) ---
+.agents/
+.gemini/
+.claude/
+.agent/
+.antigravity/
+.trae/
+.kiro/
+brain/
+scratch/
+plan_act_agent*/
+CLAUDE.md
+skills/
+skills-lock.json
+*.session
+.cursor/
+.windsurf/
+
+# --- Frontend (Vue/Vite) ---
 frontend/node_modules/
 frontend/dist/
+frontend/dist-ssr/
+frontend/*.local
 frontend/.env.local
 frontend/.env.*.local
+frontend/.eslintcache
+frontend/.stylelintcache
 
-# Backend / Python
-__pycache__/
-*.py[cod]
-*$py.class
-backend/.venv/
-backend/venv/
-backend/ENV/
-backend/env/
-backend/.pytest_cache/
+# --- Backend & Python ---
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/.pytest_cache/
+**/.venv/
+**/venv/
+**/env/
+**/ENV/
+**/build/
+**/dist/
+**/*.egg-info/
 
-# Project Data (Crucial: Ignore all local state)
-backend/data/
-backend/logs/
-backend/*.db
+# --- Project Data & Databases (Ignore all local state) ---
+data/
+backend/data/*
+!backend/data/.gitkeep
+backend/logs/*
+!backend/logs/.gitkeep
 backend/scratch/
+backend/*.db
 *.db
+*.sqlite3
 
-# Simulator Binaries and Data
-simulator/__pycache__/
+# --- Simulator Binaries & Data ---
 simulator/bin/
-simulator/data/
+simulator/data/*
+!simulator/data/.gitkeep
 simulator/uploads/
 testdata/
 
-# AI Agent Tooling (Internal system data)
-skills/
-CLAUDE.md
-skills-lock.json
-.agents/
-.trae/
-.kiro/
-.claude/
-.antigravity/
-
-# Local Test Caches
-.pytest_cache/
-
+# --- IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.history/

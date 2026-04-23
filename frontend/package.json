@@ -12,6 +12,8 @@
     "@ant-design/icons-vue": "^7.0.1",
     "ant-design-vue": "^4.2.6",
     "axios": "^1.6.2",
+    "hls.js": "^1.6.16",
+    "lucide-vue-next": "^1.0.0",
     "pinia": "^2.1.7",
     "vue": "^3.3.8",
     "vue-router": "^4.2.5"

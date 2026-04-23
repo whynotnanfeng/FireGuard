@@ -7,10 +7,11 @@
 - **目标驱动执行**: 先定义成功标准，通过循环验证确保目标达成。
 
 ## 2. 全栈技术栈与环境 (Tech Stack & Environment)
-- **后端 (Backend)**: FastAPI + SQLModel + Python 3.10+
-  - 核心库: `ultralytics` (YOLO), `opencv-python`, `sqlmodel`, `websockets`
+- **后端 (Backend)**: Python + FastAPI + SQLModel + ONNXRuntime
+  - 核心库: `onnxruntime`, `opencv-python`, `sqlmodel`, `websockets`, `ffmpeg-python`
 - **前端 (Frontend)**: Vue 3 + TypeScript + Vite
-  - 核心库: `ant-design-vue`, `pinia`, `vue-router`
+  - 核心库: `ant-design-vue`, `pinia`, `vue-router`, `hls.js`
+- **视频交付**: HLS 协议 (Session 录制 + 双 URL 架构)
 - **开发工具**: 优先使用 `pnpm` (前端) 和 `pip` (后端)
 
 ## 3. 开发流程 (Development Workflow)

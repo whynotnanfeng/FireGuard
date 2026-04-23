@@ -65,15 +65,21 @@ def register(body: RegisterRequest, session: Session = Depends(get_session)):
     )
 
 
+import logging
+logger = logging.getLogger("app")
+
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, session: Session = Depends(get_session)):
     user = session.exec(select(User).where(User.username == body.username)).first()
     if not user or not verify_password(body.password, user.password_hash):
+        logger.warning(f"[Auth] Login failed for user: {body.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
         )
+    
     token = create_access_token({"sub": user.id, "username": user.username})
+    logger.info(f"[Auth] Login successful: {body.username}")
     return TokenResponse(access_token=token)
 
 

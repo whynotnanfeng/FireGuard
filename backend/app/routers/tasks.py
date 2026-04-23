@@ -2,9 +2,12 @@ import asyncio
 import json
 import os
 import shutil
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 from fastapi import (
     APIRouter,
@@ -15,7 +18,7 @@ from fastapi import (
     UploadFile,
     BackgroundTasks,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -23,10 +26,13 @@ from app.config import config
 from app.database import get_session, engine
 from app.dependencies import check_storage_limit, get_current_user
 from app.models.model import DetectionModel
-from app.models.result import Result
+from app.models.result import TaskResult
 from app.models.task import Task
 from app.models.user import User
+from app.models.detection_record import DetectionRecord
 from app.services.notifier import notifier
+from app.services.storage_manager import storage_manager
+from app.utils.time import now_beijing
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -46,6 +52,8 @@ class TaskResponse(BaseModel):
     status: str
     progress: int
     error_msg: str
+    detection_config: Optional[dict] = None
+    has_history: bool = False
     created_at: str
     updated_at: str
 
@@ -58,6 +66,10 @@ class TaskListResponse(BaseModel):
 class TaskUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+
+
+class DetectionConfigUpdate(BaseModel):
+    detection_config: dict
 
 
 def _to_response(task: Task, session: Session) -> TaskResponse:
@@ -79,6 +91,8 @@ def _to_response(task: Task, session: Session) -> TaskResponse:
         status=task.status,
         progress=task.progress,
         error_msg=task.error_msg,
+        detection_config=json.loads(task.detection_config) if task.detection_config else None,
+        has_history=task.has_history,
         created_at=task.created_at.isoformat(),
         updated_at=task.updated_at.isoformat(),
     )
@@ -91,17 +105,24 @@ def list_tasks(
     skip: int = 0,
     limit: int = 20,
     status: Optional[str] = None,
+    search: Optional[str] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
     query = select(Task).where(Task.user_id == current_user.id)
     if status:
         query = query.where(Task.status == status)
+    if search:
+        query = query.where(Task.name.contains(search))
+        
     items = session.exec(query.offset(skip).limit(limit).order_by(Task.created_at.desc())).all()
 
     count_query = select(Task).where(Task.user_id == current_user.id)
     if status:
         count_query = count_query.where(Task.status == status)
+    if search:
+        count_query = count_query.where(Task.name.contains(search))
+        
     total = len(session.exec(count_query).all())
 
     return TaskListResponse(total=total, items=[_to_response(t, session) for t in items])
@@ -120,6 +141,10 @@ async def create_task(
     description: str = Form(default=""),
     rgb_files: List[UploadFile] = File(default=[]),
     ir_files: List[UploadFile] = File(default=[]),
+    # Detection Config Fields
+    enabled_classes: Optional[str] = Form(default=None),
+    threshold: Optional[float] = Form(default=None),
+    category_thresholds: Optional[str] = Form(default=None),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -146,6 +171,40 @@ async def create_task(
                 detail=f"Selected model does not support input type '{t}'",
             )
 
+    # Process detection config from multiple Form fields
+    detection_config = {}
+    if threshold is not None:
+        # Front-end sends 0-1 values if already divided, or 0-100. 
+        # TaskCreate.vue sends globalThreshold / 100, which is 0-1.
+        detection_config["global_threshold"] = threshold * 100 # Internal format is 0-100 for consistency with DetectionConfig.vue
+
+    if enabled_classes or category_thresholds:
+        # Reconstruct categories list as expected by _apply_detection_config
+        selected_ids = json.loads(enabled_classes) if enabled_classes else []
+        cat_thresh_map = json.loads(category_thresholds) if category_thresholds else {}
+        
+        # We need the model's class names to reconstruct the full list if possible
+        # but the minimal required for filtering is the id and selected flag.
+        categories_list = []
+        
+        # Get all available IDs from model config
+        model_classes = {}
+        if dm.label_config:
+            model_classes = json.loads(dm.label_config)
+        elif dm.class_names:
+            model_classes = {str(i): name for i, name in enumerate(json.loads(dm.class_names))}
+        
+        for cid, cat_name in model_classes.items():
+            categories_list.append({
+                "id": cid,
+                "name": cat_name,
+                "selected": cid in selected_ids,
+                "threshold": cat_thresh_map.get(cid) * 100 if cid in cat_thresh_map else None
+            })
+        
+        if categories_list:
+            detection_config["categories"] = categories_list
+
     # Create task record
     task = Task(
         user_id=current_user.id,
@@ -156,6 +215,7 @@ async def create_task(
         source_type=source_type,
         description=description,
         status="creating",
+        detection_config=json.dumps(detection_config) if detection_config else "{}",
     )
     session.add(task)
     session.commit()
@@ -177,17 +237,17 @@ async def create_task(
 
         # Save RGB files
         for f in rgb_files:
-            content = await f.read()
-            out = rgb_dir / (f.filename or "file")
-            out.write_bytes(content)
+            out_path = rgb_dir / (f.filename or "file")
+            with open(out_path, "wb") as buffer:
+                shutil.copyfileobj(f.file, buffer)
 
         # Save IR files
         if ir_files:
             ir_dir.mkdir(parents=True, exist_ok=True)
             for f in ir_files:
-                content = await f.read()
-                out = ir_dir / (f.filename or "file")
-                out.write_bytes(content)
+                out_path = ir_dir / (f.filename or "file")
+                with open(out_path, "wb") as buffer:
+                    shutil.copyfileobj(f.file, buffer)
 
         task.source_path = str(task_dir)
 
@@ -197,7 +257,7 @@ async def create_task(
         task.source_path = source_url
 
     task.status = "pending"
-    task.updated_at = datetime.utcnow()
+    task.updated_at = now_beijing()
     session.add(task)
     session.commit()
     session.refresh(task)
@@ -238,7 +298,7 @@ def update_task(
         task.name = body.name
     if body.description is not None:
         task.description = body.description
-    task.updated_at = datetime.utcnow()
+    task.updated_at = now_beijing()
 
     session.add(task)
     session.commit()
@@ -246,10 +306,34 @@ def update_task(
     return _to_response(task, session)
 
 
+# ── Update Detection Config ──────────────────────────────────────────────────
+
+@router.put("/{task_id}/detection-config")
+def update_detection_config(
+    task_id: str,
+    body: DetectionConfigUpdate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    task = session.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status not in ("pending", "paused"):
+        raise HTTPException(status_code=400, detail="Can only configure tasks in pending or paused status")
+
+    task.detection_config = json.dumps(body.detection_config)
+    task.updated_at = now_beijing()
+
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return {"message": "Detection config updated"}
+
+
 # ── Delete ────────────────────────────────────────────────────────────────────
 
 @router.delete("/{task_id}")
-def delete_task(
+async def delete_task(
     task_id: str,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
@@ -258,16 +342,15 @@ def delete_task(
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Force stop if running/queued (stream or batch)
-    from app.services.task_runner import stream_manager, task_runner
-    if task.task_type == "stream":
-        stream_manager.stop_stream(task_id)
-    
-    # Always send cancel signal to TaskRunner (for batch tasks or queued items)
-    task_runner.cancel_task(task_id)
+    # V1.2.50: Proactively notify observers that this task is gone before physical deletion
+    from app.services.task_runner import stream_manager
+    stream_manager.stop_stream(task_id)
+    await notifier.broadcast_status(task_id, "deleted")
+
+    session.delete(task)
 
     # Delete result record
-    result = session.exec(select(Result).where(Result.task_id == task_id)).first()
+    result = session.exec(select(TaskResult).where(TaskResult.task_id == task_id)).first()
     if result:
         if result.result_path and os.path.exists(result.result_path):
             if os.path.isdir(result.result_path):
@@ -285,7 +368,18 @@ def delete_task(
     if result_dir.exists():
         shutil.rmtree(result_dir, ignore_errors=True)
 
-    session.delete(task)
+    # Delete detection records
+    records = session.exec(select(DetectionRecord).where(DetectionRecord.task_id == task_id)).all()
+    for record in records:
+        session.delete(record)
+
+    # ── V1.2.15: Physical Cleanup of Recorded Videos ──────────────────
+    # Re-verify and delete the storage segments
+    history_dir = config.VIDEO_STORAGE_DIR / task_id
+    if history_dir.exists():
+        shutil.rmtree(history_dir, ignore_errors=True)
+    # ──────────────────────────────────────────────────────────────────
+
     session.commit()
     return {"message": "Task deleted"}
 
@@ -302,17 +396,16 @@ async def execute_task(
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # V12: Allow re-executing 'running' streams (Force Restart)
+    # V12: 允许 pending/exception/failed/running 状态执行
     if task.status == "running" and task.task_type != "stream":
         raise HTTPException(status_code=400, detail="Task is already running")
     
     if task.status not in ["pending", "paused", "failed", "exception", "running"]:
-        raise HTTPException(status_code=400, detail=f"Cannot execute task in '{task.status}' status. Allowed: pending, paused, failed, exception, running(streams)")
+        raise HTTPException(status_code=400, detail=f"Cannot execute task in '{task.status}' status")
 
     from app.services.task_runner import stream_manager, task_runner
 
     if task.task_type == "stream":
-        # Stream tasks managed separately: Start the grabbers IMMEDIATELY (Hot Stream)
         from app.models.model import DetectionModel
         dm = session.get(DetectionModel, task.model_id)
         if not dm:
@@ -323,14 +416,22 @@ async def execute_task(
             try: mapping = json.loads(dm.label_config)
             except: pass
 
-        # Immediate Success Transition (V9-Realtime)
+        # V12: 强制冷启动 - 先停止旧流（如有），保证资源干净
+        stream_manager.stop_stream(task.id)
+
+        # DB 立即置为 running，前端响应"正在连接"
         task.status = "running"
-        task.updated_at = datetime.utcnow()
+        task.error_msg = ""  # 清空旧错误信息（NOT NULL，必须用空字符串）
+        task.updated_at = now_beijing()
         session.add(task)
         session.commit()
         
-        # Start Backend Stream (Lazy Grabber)
+        # 启动新流
         stream_manager.start_stream(task.id, task.source_path, dm.file_path, mapping)
+        
+        # V12: 立即通知前端状态变更
+        await notifier.broadcast_status(task.id, "running")
+        
         return {"message": "Stream execution started", "position": 0}
     else:
         # Check if already queued
@@ -338,7 +439,7 @@ async def execute_task(
             return {"message": "Task already queued", "position": -1}
             
         task.status = "queued"
-        task.updated_at = datetime.utcnow()
+        task.updated_at = now_beijing()
         session.add(task)
         session.commit()
         position = await task_runner.enqueue(task_id)
@@ -348,7 +449,7 @@ async def execute_task(
 # ── Pause ─────────────────────────────────────────────────────────────────────
 
 @router.post("/{task_id}/pause")
-def pause_task(
+async def pause_task(
     task_id: str,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
@@ -359,16 +460,23 @@ def pause_task(
     if task.task_type != "stream":
         raise HTTPException(status_code=400, detail="Only stream tasks can be paused")
     if task.status != "running":
+        logger.warning(f"USER OPERATION: Pause failed for {task_id}. Reason: Task status is '{task.status}', expected 'running'")
         raise HTTPException(status_code=400, detail="Task is not running")
 
     from app.services.task_runner import stream_manager
-    stream_manager.pause_stream(task_id)
+    # V12: 物理停止流资源（包含录制封包）
+    stream_manager.stop_stream(task_id)
 
-    task.status = "paused"
-    task.updated_at = datetime.utcnow()
+    # V12: 暂停语义=重置为"未执行"(pending)
+    task.status = "pending"
+    task.updated_at = now_beijing()
     session.add(task)
     session.commit()
-    return {"message": "Task paused"}
+
+    # V12: 立即通知前端状态变更
+    await notifier.broadcast_status(task_id, "pending")
+
+    return {"message": "Task stopped and reset to pending"}
 
 
 # ── Result ────────────────────────────────────────────────────────────────────
@@ -394,7 +502,7 @@ def get_result(
     if task.status != "completed":
         raise HTTPException(status_code=400, detail="Task is not completed yet")
 
-    result = session.exec(select(Result).where(Result.task_id == task_id)).first()
+    result = session.exec(select(TaskResult).where(TaskResult.task_id == task_id)).first()
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
 
@@ -424,6 +532,44 @@ def get_result(
             "filenames": filenames,
             "detections": detections,
         }
+
+
+# ── Detection Records ────────────────────────────────────────────────────────
+
+@router.get("/{task_id}/detection-records")
+def get_detection_records(
+    task_id: str,
+    skip: int = 0,
+    limit: int = 500,
+    order: str = "desc", # "desc" | "asc"
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    task = session.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    query = select(DetectionRecord).where(DetectionRecord.task_id == task_id)
+    
+    if order == "asc":
+        query = query.order_by(DetectionRecord.detected_at.asc())
+    else:
+        query = query.order_by(DetectionRecord.detected_at.desc())
+
+    records = session.exec(query.offset(skip).limit(limit)).all()
+
+    return {
+        "records": [
+            {
+                "id": r.id,
+                "class_name": r.class_name,
+                "confidence": r.confidence,
+                "box": json.loads(r.box),
+                "detected_at": r.detected_at.isoformat(),
+            }
+            for r in records
+        ]
+    }
 
 
 # ── Download ZIP ──────────────────────────────────────────────────────────────
@@ -468,3 +614,84 @@ async def download_all(
         filename=f"{safe_name}_results.zip",
         media_type="application/x-zip-compressed",
     )
+
+
+# ── Historical Video API ───────────────────────────────────────────────────
+
+@router.get("/{task_id}/stream.m3u8")
+def get_merged_m3u8(
+    task_id: str,
+    mode: str = "live",
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    task = session.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    force_vod = mode == "vod"
+    content = storage_manager.generate_merged_m3u8(task_id, force_vod=force_vod)
+    if not content:
+        if force_vod:
+            raise HTTPException(status_code=404, detail="No video data available")
+        content = "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"
+
+    return Response(
+        content=content,
+        media_type="application/vnd.apple.mpegurl",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@router.get("/{task_id}/videos")
+def get_task_videos(
+    task_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get all recorded video segments for a task.
+    Enables seeking in the frontend progress bar.
+    """
+    task = session.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    segments = storage_manager.get_history_metadata(task_id)
+    return {"segments": segments}
+
+
+# ── Playback Debug Logging ────────────────────────────────────────────────
+class PlaybackLogRequest(BaseModel):
+    event_type: str
+    timestamp: float
+    details: dict
+
+@router.post("/{task_id}/playback-log")
+async def log_playback_event(
+    task_id: str,
+    body: PlaybackLogRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Dedicated endpoint for frontend to report playback issues/events.
+    Writes to a specific file in the backend for troubleshooting.
+    """
+    config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    
+    log_entry = {
+        "time": datetime.now().isoformat(),
+        "task_id": task_id,
+        "user_id": current_user.id,
+        "event_type": body.event_type,
+        "client_timestamp": body.timestamp,
+        "details": body.details
+    }
+    
+    with open(config.PLAYBACK_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+    
+    return {"status": "ok"}

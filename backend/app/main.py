@@ -3,25 +3,43 @@ import json
 import logging
 import os
 
-# V30: Precise 5-3 Protocol Alignment (1.0s FFMPEG timeout)
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|stimeout;1000000|probesize;32|analyzeduration;0|rtsp_flags;nobuffer|reorder_queue_size;0"
+# V5.0: FFmpeg容错优化 - TCP传输 + 完整帧保障
+# 移除 low_delay：避免半解码帧导致的水平撕裂
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000|probesize;1000000|analyzeduration;1000000|fflags;+genpts+discardcorrupt"
 
 from pathlib import Path
-
-# --- GLOBAL PERFORMANCE OPTIMIZATION ---
-# Using hybrid UDP+TCP + 128KB probe + zero reorder queue.
-# 'udp+tcp' allows fastest connection with robust fallback to TCP if UDP is blocked.
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp+tcp|stimeout;5000000|probesize;32|analyzeduration;0|rtsp_flags;nobuffer|reorder_queue_size;0"
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.exceptions import RequestValidationError
+from jose import JWTError
+from starlette.responses import Response
+from starlette.types import Scope
+
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        if path.endswith(".m3u8") or path.endswith(".ts"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+            # Remove ETag and Last-Modified to force 200 OK and prevent 304
+            if "etag" in response.headers:
+                del response.headers["etag"]
+            if "last-modified" in response.headers:
+                del response.headers["last-modified"]
+        return response
 
 from app.config import config
 from app.database import create_db_and_tables
 from app.routers import auth, models, tasks
 from app.services.notifier import notifier
 from app.utils.logger import setup_logging
+from app.schemas.exceptions import (
+    validation_exception_handler,
+    jwt_exception_handler,
+)
 
 # Initialize Logging
 setup_logging()
@@ -42,35 +60,33 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
+    allow_origins=config.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=config.CORS_MAX_AGE,
 )
+
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(JWTError, jwt_exception_handler)
 
 # ── Global Monitor Middleware ───────────────────────────────────────────────
 @app.middleware("http")
 async def log_requests(request, call_next):
-    access_log = config.BASE_DIR / "logs" / "access.log"
     import time
     start_time = time.time()
     
-    # Pre-request log
-    client = request.client.host if request.client else "unknown"
-    msg = f"{client} - {request.method} {request.url.path}"
-    
+    # Process request
     response = await call_next(request)
     
+    # Log after completion
     process_time = (time.time() - start_time) * 1000
-    final_msg = f"{msg} - {response.status_code} ({process_time:.2f}ms)\n"
+    client = request.client.host if request.client else "unknown"
     
-    try:
-        with open(access_log, "a", encoding="utf-8") as f:
-            f.write(final_msg)
-    except:
-        pass
+    # Only log meaningful requests (exclude static files if needed, or log all to logger)
+    if not request.url.path.startswith(("/api/results", "/api/storage")):
+        logger.info(f"ACCESS: {client} - {request.method} {request.url.path} - {response.status_code} ({process_time:.2f}ms)")
     
-    print(f"ACCESS: {final_msg.strip()}")
     return response
 
 # ── Routers ───────────────────────────────────────────────────────────────────
@@ -83,6 +99,10 @@ app.include_router(tasks.router, prefix="/api")
 
 config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/api/results", StaticFiles(directory=str(config.RESULTS_DIR)), name="results")
+
+# --- RT Storage Mounting ---
+config.VIDEO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/api/storage", NoCacheStaticFiles(directory=str(config.VIDEO_STORAGE_DIR)), name="storage")
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 
@@ -118,16 +138,20 @@ async def websocket_stream(
     task_id: str,
     token: str = Query(...),
 ):
+    # V10.1: ENSURE SCOPE SAFETY - Move crucial imports to top to avoid UnboundLocalError
+    from app.services.task_runner import stream_manager
+    from app.database import engine
+    from app.models.task import Task
+    from sqlmodel import Session
+    from app.models.model import DetectionModel
+    from starlette.websockets import WebSocketState # V1.2.19: Import for state checking
+    
     await websocket.accept()
 
     # Validate token and get user
     try:
         from app.dependencies import decode_token
-        from app.database import engine
         from app.models.user import User
-        from app.models.task import Task
-        from app.models.model import DetectionModel
-        from sqlmodel import Session
 
         payload = decode_token(token)
         user_id = payload.get("sub")
@@ -137,18 +161,53 @@ async def websocket_stream(
             return
 
         with Session(engine) as session:
+            # V12: 首先做快速权限检查
             task = session.get(Task, task_id)
             if not task or task.user_id != user_id:
-                await websocket.send_text('{"type":"error","message":"Task not found"}')
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_text('{"type":"error","message":"Forbidden: Task unreachable"}')
+                    await websocket.close()
+                return
+
+            # V12: 任务已暂停(pending)但有历史记录 → 发送特殊消息让前端展示历史模式
+            if task.status == "pending" and task.has_history:
+                await websocket.send_text(json.dumps({
+                    "type": "paused_with_history",
+                    "message": "任务已暂停，可查看历史检测记录。重新执行以继续。"
+                }))
                 await websocket.close()
                 return
-            if task.task_type != "stream":
-                await websocket.send_text('{"type":"error","message":"Not a stream task"}')
-                await websocket.close()
+
+            # V12: 任务不在运行状态
+            if task.status != "running":
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"任务状态为 {task.status}，无法连接视频流"
+                    }))
+                    await websocket.close()
                 return
-            if task.status not in ("running", "paused"):
-                await websocket.send_text('{"type":"error","message":"Task not running"}')
-                await websocket.close()
+
+            # V12: 任务 running，等待后端流对象就绪（最多 12s）
+            stream = None
+            for i in range(40):
+                task = session.get(Task, task_id)
+                stream = stream_manager.get_stream(task_id)
+                if stream and task and task.status == "running":
+                    logger.info(f"[WS Handshake] OK: Stream ready for {task_id}")
+                    break
+                if i % 10 == 0:
+                    logger.warning(f"[WS Handshake] Waiting {i+1}/40 for {task_id}")
+                await asyncio.sleep(0.3)
+
+            if not stream:
+                logger.error(f"[WS Handshake] TIMEOUT for {task_id}. Stream not initialized.")
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "后端视频引擎初始化超时，请重新执行任务"
+                    }))
+                    await websocket.close()
                 return
 
             dm = session.get(DetectionModel, task.model_id)
@@ -159,17 +218,28 @@ async def websocket_stream(
 
             source = task.source_path
             model_path = dm.file_path
+            detection_config = {}
+            if task.detection_config:
+                try:
+                    detection_config = json.loads(task.detection_config)
+                except Exception:
+                    pass
 
     except Exception as e:
-        await websocket.send_text(f'{{"type":"error","message":"{str(e)}"}}')
-        await websocket.close()
+        logger.error(f"[WS Handshake] Critical Failure for {task_id}: {e}")
+        if websocket.client_state == WebSocketState.CONNECTED:
+            try:
+                await websocket.send_text(f'{{"type":"error","message":"{str(e)}"}}')
+                await websocket.close()
+            except:
+                pass
         return
 
     # Run video stream
     try:
         from app.services.detector import get_detector
         from app.services.video_stream import VideoStream
-        from app.services.task_runner import stream_manager
+        
         stream = stream_manager.get_stream(task_id)
         if not stream:
             # Fallback: If for some reason Execute wasn't called or stream died
@@ -177,17 +247,22 @@ async def websocket_stream(
             return
 
         # Continuous run using the pre-heated stream
-        await stream.run(websocket)
+        await stream.run(websocket, detection_config=detection_config)
 
         # After run finishes, if it stopped due to internal error (e.g. max retries)
-        if stream._error_msg:
+        # V51: CRITICAL FIX - Check if this stream instance is still the active one
+        is_current = stream_manager.get_stream(task_id) is stream
+        if stream._error_msg and is_current:
              with Session(engine) as session:
                 db_task = session.get(Task, task_id)
-                if db_task:
+                if db_task and db_task.status == "running":
                     db_task.status = "exception"
                     db_task.error_msg = stream._error_msg
                     session.add(db_task)
                     session.commit()
+                    logger.error(f"Stream {task_id} failed and updated DB: {stream._error_msg}")
+        elif stream._error_msg:
+             logger.info(f"Zombie stream for {task_id} finished but blocked from poisoning DB.")
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for task {task_id}")

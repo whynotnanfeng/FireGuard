@@ -2,12 +2,21 @@
   <div class="task-list-page fade-in">
     <div class="toolbar">
       <div class="filter-group">
+        <a-input-search
+          v-model:value="filters.search"
+          placeholder="搜索任务名称..."
+          style="width: 280px"
+          allow-clear
+          @search="loadData"
+          @change="onSearchChange"
+        />
+        
         <a-select 
           v-model:value="filters.status" 
-          placeholder="状态" 
+          placeholder="全部状态" 
           allow-clear 
           @change="loadData" 
-          style="width: 120px"
+          style="width: 140px"
         >
           <a-select-option value="creating">创建中</a-select-option>
           <a-select-option value="pending">待执行</a-select-option>
@@ -53,23 +62,33 @@
 
         <template v-if="column.key === 'action'">
           <a-space>
+            <!-- 查看按钮：running时可查；或曾执行成功(has_history)时可查历史 -->
             <a-button 
                type="link"
-               :disabled="record.status !== 'completed' && !(record.task_type === 'stream' && record.status === 'running')"
+               :disabled="!canView(record)"
                @click="handleViewResult(record)"
             >查看</a-button>
 
+            <!-- 执行按钮：仅 pending/exception/failed 可执行（not running） -->
             <a-button 
                type="link" 
-               :disabled="!['pending', 'paused', 'failed', 'exception'].includes(record.status)"
+               :disabled="!canExecute(record)"
                @click="handleExecute(record)"
             >执行</a-button>
             
+            <!-- 停止按钮：仅 running 的 stream 任务 -->
             <a-button 
                type="link"
                :disabled="record.status !== 'running' || record.task_type !== 'stream'"
-               @click="handlePause(record)"
-            >暂停</a-button>
+               @click="handleStop(record)"
+            >停止</a-button>
+
+            <!-- 配置按钮：仅 pending 状态（未运行） -->
+            <a-button 
+               type="link"
+               :disabled="record.status !== 'pending'"
+               @click="handleConfig(record)"
+            >配置</a-button>
             
             <a-popconfirm title="确定删除该任务吗？" @confirm="handleDelete(record.id)">
                <a-button type="link" danger>删除</a-button>
@@ -91,31 +110,45 @@
 
     <!-- Modals -->
     <TaskCreate v-if="showCreate" @close="showCreate = false" @success="handleCreateSuccess" />
+    <DetectionConfig 
+       v-if="showConfig" 
+       :task-id="configRow?.id || ''" 
+       :model-id="configRow?.model_id || ''" 
+       @close="showConfig = false" 
+       @success="showConfig = false" 
+    />
     
     <a-modal 
        v-model:open="showResult" 
        title="任务结果" 
-       width="800px" 
+       width="1200px" 
        :footer="null"
-       destroyOnClose
+       :maskClosable="true"
+       :bodyStyle="{ padding: '20px', maxHeight: '85vh', overflowY: 'auto' }"
+       @after-close="handleModalAfterClose"
+       :destroyOnClose="true"
     >
-       <ResultViewer v-if="currentResultRow?.task_type !== 'stream'" :task-id="currentResultRow?.id || ''" />
-       <VideoPlayer 
-          v-else 
-          :task-id="currentResultRow?.id || ''" 
-          ws-url="ws://localhost:8000/ws/stream" 
-          @close="showResult = false"
-       />
+       <template v-if="currentResultRow && renderReady">
+         <ResultViewer v-if="currentResultRow.task_type !== 'stream'" :task-id="currentResultRow.id" :key="'result-' + currentResultRow.id" />
+         <VideoPlayer 
+            v-if="currentResultRow.task_type === 'stream'"
+            :task-id="currentResultRow.id" 
+            ws-url="ws://localhost:8000/ws/stream" 
+            @close="showResult = false"
+            :key="'stream-' + currentResultRow.id"
+         />
+       </template>
     </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useTaskStore } from '@/stores/task'
 import { tasksApi } from '@/api/tasks'
 import TaskStatus from '@/components/TaskStatus.vue'
 import TaskCreate from './TaskCreate.vue'
+import DetectionConfig from '@/components/DetectionConfig.vue'
 import ResultViewer from '@/components/ResultViewer.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import { message } from 'ant-design-vue'
@@ -125,11 +158,25 @@ const taskStore = useTaskStore()
 
 const page = ref(1)
 const limit = ref(10)
-const filters = reactive({ status: null })
+const filters = reactive({ 
+  status: null,
+  search: ''
+})
 
 const showCreate = ref(false)
+const showConfig = ref(false)
+const configRow = ref<any>(null)
 const showResult = ref(false)
 const currentResultRow = ref<any>(null)
+const renderReady = ref(false)
+
+// V1.4.20: Immediate Unmount Strategy
+// When showResult becomes false, we kill renderReady IMMEDIATELY.
+// This triggers v-if unmount of VideoPlayer BEFORE the modal animation finishes, 
+// ensuring WebSocket/Canvas processing stops and frees the main thread for mask removal.
+watch(showResult, (val) => {
+  if (!val) renderReady.value = false
+})
 
 const typeMap: any = { image: '图片', video: '视频', stream: '流媒体' }
 
@@ -147,25 +194,52 @@ function formatDate(ds: string) {
   return new Date(ds).toLocaleString()
 }
 
+/**
+ * V12: 查看按钮控制
+ * - stream任务: running时可看实时流；has_history=true时可看历史记录（即使已暂停）
+ * - 非stream任务: 仅 completed 可查看
+ */
+function canView(record: any): boolean {
+  if (record.task_type === 'stream') {
+    return record.status === 'running' || record.has_history === true
+  }
+  return record.status === 'completed'
+}
+
+/**
+ * V12: 执行按钮控制
+ * - 仅 pending/exception/failed 可执行（running 时不允许重复执行）
+ */
+function canExecute(record: any): boolean {
+  return ['pending', 'exception', 'failed'].includes(record.status)
+}
+
 let debounceTimer: any = null
 async function loadData() {
   // Clear any pending requests
   if (debounceTimer) clearTimeout(debounceTimer)
   
-  // Schedule a new request after 500ms of quiet
+  // Schedule a new request after 300ms of quiet
   debounceTimer = setTimeout(async () => {
     try {
       await taskStore.fetchTasks({
         skip: (page.value - 1) * limit.value,
         limit: limit.value,
-        status: filters.status || undefined
+        status: filters.status || undefined,
+        search: filters.search || undefined
       })
     } catch (e) {
       console.error('Failed to reload task list', e)
     } finally {
       debounceTimer = null
     }
-  }, 500)
+  }, 300)
+}
+
+function onSearchChange() {
+  // Reset to first page on search
+  page.value = 1
+  loadData()
 }
 
 let notificationWs: WebSocket | null = null
@@ -236,12 +310,14 @@ async function handleExecute(row: any) {
   }
 }
 
-async function handlePause(row: any) {
-  try {
-    await tasksApi.pause(row.id)
-    message.success('已暂停执行')
-    loadData()
-  } catch(e) {}
+async function handleStop(record: any) {
+    try {
+        await tasksApi.pause(record.id)
+        message.success('任务已停止')
+        loadData()
+    } catch (e) {
+        message.error('停止任务失败')
+    }
 }
 
 async function handleDelete(id: string) {
@@ -255,9 +331,22 @@ async function handleDelete(id: string) {
   } catch(e) {}
 }
 
-function handleViewResult(row: any) {
+async function handleViewResult(row: any) {
+  // V1.4.15: Two-stage activation to ensure Modal frame is ready before components mount
   currentResultRow.value = row
   showResult.value = true
+  await nextTick()
+  renderReady.value = true
+}
+
+function handleModalAfterClose() {
+  currentResultRow.value = null
+  renderReady.value = false
+}
+
+function handleConfig(row: any) {
+  configRow.value = row
+  showConfig.value = true
 }
 </script>
 

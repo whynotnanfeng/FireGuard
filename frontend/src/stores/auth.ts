@@ -25,7 +25,8 @@ export const useAuthStore = defineStore('auth', () => {
   async function fetchMe() {
     try {
       user.value = await authApi.me()
-    } catch {
+    } catch (e) {
+      console.warn('[AuthStore] fetchMe failed, logging out')
       logout()
     }
   }

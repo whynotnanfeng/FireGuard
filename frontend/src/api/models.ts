@@ -8,6 +8,8 @@ export interface DetectionModel {
   description: string
   status: string
   label_config?: Record<string, string>
+  default_threshold?: number
+  class_names?: string[]
   created_at: string
 }
 
@@ -20,8 +22,16 @@ export const modelsApi = {
   list: (params?: { skip?: number; limit?: number }): Promise<ModelListRes> =>
     request.get('/models', { params }),
 
+  get: (id: string): Promise<DetectionModel> =>
+    request.get(`/models/${id}`),
+
   create: (formData: FormData): Promise<DetectionModel> =>
     request.post('/models', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+
+  analyze: (formData: FormData): Promise<{ label_config: Record<string, string>, class_names: string[], default_threshold: number }> =>
+    request.post('/models/analyze', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
 

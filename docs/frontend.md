@@ -12,7 +12,8 @@
 | TypeScript | 5.0+ | 严谨的类型系统 |
 | Pinia | 2.1+ | 持久化状态管理 |
 | Axios | 1.6+ | 封装了拦截器的 HTTP 客户端 |
-| mpegts.js | 最新 | 用于支持 HTTP-FLV 实时视频流播放 |
+| mpegts.js | 最新 | 用于支持 HTTP-FLV 实时视频流播放（已弃用） |
+| hls.js | 最新 | 统一 HLS 架构，实时监控 + 历史回放 |
 
 ## 项目结构 (frontend/src/)
 
@@ -30,10 +31,10 @@
 ├── views/
 │   ├── Layout.vue          # 侧边栏布局 (火灾监测系统品牌展示)
 │   ├── Login.vue           # 极简现代化登录页
-│   ├── TaskList.vue        # 任务列表 (集成搜索与批量操作)
+│   ├── TaskList.vue        # 任务列表 (集成搜索与状态筛选)
 │   ├── TaskCreate.vue      # 任务创建引导弹窗
-│   ├── ModelList.vue       # 模型库管理 (新增“创建时间”字段)
-│   └── ResultViewer.vue    # 核心结果查看页
+│   ├── ModelList.vue       # 模型库管理 (集成删除冲突保护)
+│   └── ResultViewer.vue    # 核心结果查看页 (重绘 V2 布局)
 ├── components/
 │   ├── LabelMappingEditor.vue # 核心组件：模型标签可视化编辑器
 │   ├── TaskStatus.vue      # 任务状态 Badge 封装
@@ -52,8 +53,9 @@
 
 ### 2. UI 稳定性防护 (v1.2.0 引入)
 针对实时流任务的高频状态同步，前端实现了“双重过滤机制”：
-- **请求防抖 (Debounce)**: 在 `TaskList.vue` 中对 `loadData` API 调用实施了 500ms 的防抖锁定。即使后端在瞬间发出多个 WebSocket 信号，前端也只会合并执行一次全量同步，极大地减轻了渲染压力。
+- **请求防抖 (Debounce)**: 在 `TaskList.vue` 中对 `loadData` API 调用实施了 500ms 的防抖锁定，并对搜索输入应用 300ms 防抖，极大地减轻了渲染与后端压力。
 - **状态宽限期**: 配合后端的 5s 隔离协议，前端在接收到新启动信号时，会优先展示稳定的“正在连接”动效，平滑过渡初期的物理握手。
+- **静默失败策略 (409 Suppression)**: [api/request.ts] 全局静默 409 状态码的错误提示，将冲突处理权交回组件 (如 ModelList.vue)，以提供更友好的引导式弹窗。
 
 ## 关键业务组件
 
@@ -73,3 +75,147 @@
 
 - **`/login`**: 公开路由，未登录用户可访问。
 - **导航守卫**: 路由跳转前检查 `localStorage` 中的 `access_token`，若失效则通过 Axios 拦截器强制跳转回登录页。
+
+## 核心业务组件 (v1.2.1 更新)
+
+### 检测配置组件 (DetectionConfig)
+**文件**: `frontend/src/components/DetectionConfig.vue`
+
+支持按类别独立设置检测阈值，是检测配置功能的核心 UI。
+
+**特性**:
+- 全选/取消全选类别
+- 搜索过滤类别（适配 COCO 等多类别模型）
+- 滚动列表，防止类别过多时布局溢出
+- 类别独立阈值设置（百分比显示，0-100）
+- 公共阈值设置，显示模型推荐阈值
+- 支持新建任务和编辑任务两种模式
+
+**配置数据结构**:
+```typescript
+interface CategoryItem {
+  id: string
+  name: string
+  selected: boolean
+  threshold: number | null  // null 表示使用公共阈值
+}
+
+interface ConfigState {
+  global_threshold: number  // 公共阈值（百分比）
+  categories: CategoryItem[]
+}
+```
+
+### 结果查看器 (ResultViewer)
+**文件**: `frontend/src/components/ResultViewer.vue`
+
+用于图片和视频任务的结果查看，自定义了轮播实现。
+
+**特性**:
+- 自定义轮播（非 Ant Design Carousel），解决索引不同步问题
+- **V2 布局重用**：移除页脚冗余元数据，最大化检测结果面板显示空间。
+- **高密度适配**：引入 `expandable` 弹性容器，支持数十个检测类别的平铺展示与独立局部滚动。
+- 左右箭头导航 + 底部圆点指示器
+- 当前文件检测结果统计
+- 所有文件检测结果汇总
+- 检测类别统计（支持局部滚动区域）
+
+**显示内容**:
+- 当前文件名称和索引 (`1 / 23`)
+- 当前文件检测目标数量
+- 当前文件各类别统计
+- 所有文件检测目标总数
+- 所有文件各类别汇总
+
+### 视频流播放器 (VideoPlayer)
+**文件**: `frontend/src/components/VideoPlayer.vue`
+
+用于实时视频流任务的结果查看。
+
+**特性**:
+- **双 URL HLS 架构 (v1.2.5)**：
+  - **直播模式 (initLiveHls)**：使用 `/api/storage/{id}/live/index.m3u8` 直接读取 FFmpeg 实时写入的 m3u8，消除白屏问题。
+  - **回放模式 (initVodHls)**：使用 `/api/tasks/{id}/stream.m3u8?mode=vod` 加载合并所有 session 的 VOD 流，支持任意位置 seek。
+  - **进度条双驱动**：直播模式使用 `elapsed time` 驱动（始终在最右端），回放模式使用 `video.duration` 驱动。
+  - **liveVideoReady 标志**：HLS 视频首次播放后隐藏加载遮罩，避免白色画面闪烁。
+- WebSocket 实时状态接收（连接、重试、运行、异常）
+- 检测框叠加显示（支持 Letterbox 投影对齐）
+- 实时检测记录面板（右侧），支持分页与手动刷新。
+- **智能脉冲重连**：连接失败后延迟重试，网络错误 2s 后自动恢复。
+- **自动同步重连**：检测到后端任务重启后自动恢复 HLS 连接。
+
+**布局**:
+```
+┌─────────────────────────────┬──────────────┐
+│                             │  检测记录    │
+│      实时视频画面            │  ──────────  │
+│      (检测框叠加)           │  时间 类别%  │
+│                             │  时间 类别%  │
+│                             │  ──────────  │
+│   [暂停] [停止]              │  < 1/20 >   │
+└─────────────────────────────┴──────────────┘
+```
+
+### 任务创建 (TaskCreate)
+**文件**: `frontend/src/views/TaskCreate.vue`
+
+新建检测任务的表单页面。
+
+**新增功能 (v1.2.1)**:
+- 配置按钮：打开 DetectionConfig 弹窗
+- 类别阈值随任务表单一起提交
+- 置信度阈值随任务表单一起提交
+
+**表单字段**:
+```typescript
+interface TaskForm {
+  name: string
+  task_type: 'image' | 'video' | 'stream'
+  input_types: ('rgb' | 'ir')[]
+  model_id: string
+  source_type: 'upload' | 'url' | 'rtsp'
+  source_url?: string
+  description?: string
+}
+```
+
+**业务规则**:
+- 图片任务：禁用 RTSP 数据源
+- 视频任务：禁用 RTSP 数据源
+- 流媒体任务：仅允许 RTSP 数据源
+- 多模态模型：自动锁定输入类型为 rgb+ir，不可修改
+
+## 样式与主题 (v1.2.1)
+
+### CSS 变量
+```css
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #fafafa;
+  --border-color: #f0f0f0;
+  --text-primary: rgba(0, 0, 0, 0.88);
+  --text-secondary: rgba(0, 0, 0, 0.65);
+  --text-muted: rgba(0, 0, 0, 0.45);
+  --danger-red: #ff4d4f;
+}
+```
+
+### 阈值显示规范
+- **前端配置**: 百分比形式 (0-100)，显示 % 单位
+- **后端存储**: 小数形式 (0-1)
+- **转换公式**: `frontend = backend * 100`
+
+## 组件状态管理
+
+### TaskList.vue
+- 任务列表展示、分页、搜索
+- 查看按钮：打开 ResultViewer 或 VideoPlayer
+- 配置按钮：打开 DetectionConfig
+- 执行按钮：启动任务
+- 删除按钮：删除任务
+
+### VideoPlayer 生命周期
+1. **onMounted**: 建立 WebSocket 连接，启动 HLS 引擎（直播或 VOD），启动进度条定时器
+2. **watch(taskId)**: 任务 ID 变化时断开重连，重新初始化 HLS
+3. **watch(playbackMode)**: 模式切换时销毁旧 HLS 实例，初始化新 HLS 实例
+4. **onUnmounted**: 断开 WebSocket，销毁所有 HLS 实例，清理定时器

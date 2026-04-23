@@ -56,11 +56,12 @@
       title="上传模型" 
       v-model:open="showCreate"
       width="500px"
+      :bodyStyle="{ maxHeight: '550px', overflowY: 'auto' }"
       destroyOnClose
     >
       <a-form :model="form" ref="formRef" :rules="rules" :label-col="{ span: 5 }" :wrapper-col="{ span: 19 }">
         <a-form-item label="模型名称" name="name">
-          <a-input v-model:value="form.name" placeholder="例如: yolov8n-fire" />
+          <a-input v-model:value="form.name" placeholder="例如: fire-detection-v1.onnx" />
         </a-form-item>
         <a-form-item label="输入类型" name="input_types">
           <a-checkbox-group v-model:value="form.input_types">
@@ -71,13 +72,14 @@
         <a-form-item label="模型描述">
           <a-textarea v-model:value="form.description" :rows="2" />
         </a-form-item>
-        <a-form-item label="模型文件" required>
+        <a-form-item label="模型文件" required :extra="analyzing ? '正在解析元数据...' : ''">
           <div class="upload-zone" @click="fileInput?.click()">
-             <CloudUploadOutlined class="icon" />
-             <div class="text">点击上传 .pt 或 .onnx 文件</div>
-             <div class="files" v-if="file">{{file.name}} ({{(file.size/1024/1024).toFixed(2)}}MB)</div>
+             <CloudUploadOutlined v-if="!analyzing" class="icon" />
+             <a-spin v-else size="large" style="margin-bottom: 8px" />
+             <div class="text">{{ analyzing ? '解析中...' : '点击上传 .onnx 文件' }}</div>
+             <div class="files" v-if="file && !analyzing">{{file.name}} ({{(file.size/1024/1024).toFixed(2)}}MB)</div>
           </div>
-          <input type="file" ref="fileInput" accept=".pt,.onnx" style="display:none" @change="onFileChange" />
+          <input type="file" ref="fileInput" accept=".onnx" style="display:none" @change="onFileChange" />
         </a-form-item>
         <a-form-item label="标签映射">
            <LabelMappingEditor v-model="form.label_config" />
@@ -94,6 +96,7 @@
       title="编辑标签" 
       v-model:open="showEditLabels"
       width="500px"
+      :bodyStyle="{ maxHeight: '550px', overflowY: 'auto' }"
       destroyOnClose
     >
       <div v-if="editingModel" style="margin-bottom: 12px">
@@ -113,9 +116,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { modelsApi, type DetectionModel } from '@/api/models'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import { CloudUploadOutlined } from '@ant-design/icons-vue'
 import LabelMappingEditor from '@/components/LabelMappingEditor.vue'
 
@@ -125,6 +128,7 @@ const showCreate = ref(false)
 
 const formRef = ref()
 const submitting = ref(false)
+const analyzing = ref(false)
 const fileInput = ref<HTMLInputElement>()
 const file = ref<File | null>(null)
 
@@ -145,6 +149,23 @@ const rules = {
   name: [{ required: true, message: '请输入模型名称' }],
   input_types: [{ required: true, type: 'array', min: 1, message: '请选择至少一种输入类型' }]
 }
+
+function resetForm() {
+  form.name = ''
+  form.description = ''
+  form.input_types = ['rgb']
+  form.label_config = null
+  file.value = null
+  if (fileInput.value) {
+    fileInput.value.value = ''
+  }
+}
+
+watch(showCreate, (val) => {
+  if (!val) {
+    resetForm()
+  }
+})
 
 const columns = [
   { title: '模型名称', dataIndex: 'name', key: 'name', width: 200 },
@@ -178,13 +199,47 @@ async function handleDelete(id: string) {
     await modelsApi.delete(id)
     message.success('删除成功')
     loadData()
-  } catch(e) {}
+  } catch(err: any) {
+    if (err.response?.status === 409) {
+      const detail = err.response.data?.detail || ''
+      const match = detail.match(/tasks \[(.*)\]/)
+      let countText = '一些'
+      if (match && match[1]) {
+        countText = match[1].split(',').length.toString()
+      }
+      
+      Modal.error({
+        title: '无法删除模型',
+        content: `该模型正被 ${countText} 个任务使用，请先删除对应任务。`,
+        okText: '知道了',
+        centered: true
+      })
+    }
+  }
 }
 
-function onFileChange(e: Event) {
+async function onFileChange(e: Event) {
    const target = e.target as HTMLInputElement
    if (target.files && target.files.length > 0) {
-      file.value = target.files[0]
+      const selectedFile = target.files[0]
+      file.value = selectedFile
+
+      // Auto analyze
+      const fd = new FormData()
+      fd.append('file', selectedFile)
+      
+      analyzing.value = true
+      try {
+        const res = await modelsApi.analyze(fd)
+        if (res.label_config && Object.keys(res.label_config).length > 0) {
+          form.label_config = res.label_config
+          message.success('已自动提取模型标签')
+        }
+      } catch (err) {
+        console.error('Failed to analyze model:', err)
+      } finally {
+        analyzing.value = false
+      }
    }
 }
 
@@ -215,12 +270,7 @@ async function submit() {
      await modelsApi.create(fd)
      message.success('上传成功')
      showCreate.value = false
-     // reset
-     form.name = ''
-     form.description = ''
-     form.input_types = ['rgb']
-     form.label_config = null
-     file.value = null
+     // reset is now handled by watcher
      loadData()
   } catch(e) {} finally {
      submitting.value = false
@@ -277,6 +327,11 @@ async function saveLabelUpdate() {
   padding: 16px;
   border-radius: 8px;
   border: 1px solid var(--border-color);
+}
+.model-table {
+  background: var(--bg-card);
+  border-radius: 8px;
+  box-shadow: var(--shadow-card);
 }
 .upload-zone {
     width: 100%;

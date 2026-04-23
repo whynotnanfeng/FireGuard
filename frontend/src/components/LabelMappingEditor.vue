@@ -8,6 +8,7 @@
           bordered 
           :pagination="false"
           rowKey="id"
+          :scroll="{ y: 300 }"
       >
         <template #bodyCell="{ column, record, index }">
           <template v-if="column.key === 'id'">

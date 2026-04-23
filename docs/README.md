@@ -10,14 +10,17 @@
 - **[系统总结报告](./summary.md)**: 迁移至 Ant Design Vue 后的技术成果汇总。
 
 ### 2. 技术规格说明
-- **[架构设计](./architecture.md)**: 系统前后端架构图、核心推理引擎 (Detector) 的逻辑深度解析。
-- **[API 文档](./api.md)**: 详尽的接口协议说明，涵盖认证、任务与模型管理。
+- **[架构设计](./architecture.md)**: 系统前后端架构图、核心推理引擎 (Detector) 与视频交付架构深度解析。
+- **[API 文档](./api.md)**: 详尽的接口协议说明，涵盖认证、任务、模型管理、HLS 视频交付与模拟器 API。
 - **[数据库设计](./database.md)**: 实体 ER 图与关键字段说明。
-- **[前端设计](./frontend.md)**: UI 框架、组件树以及现代化 UI 的设计规范。
+- **[前端设计](./frontend.md)**: UI 框架、组件树、双 URL HLS 架构以及现代化 UI 的设计规范。
+- **[模拟器文档](./simulator.md)**: 流模拟控制台完整指南，含画质评估、转码预设与防呆逻辑。
 
 ### 3. 开发与运维
 - **[开发者交接指南](./DEVELOPER_GUIDE.md)**: 专为下一任开发者准备的技术细节与业务逻辑快速入口。
+- **[变更日志](./CHANGELOG.md)**: 版本迭代记录。
 - **[待办事项 (TODO)](./todo.md)**: 查看当前进度并参与未来的路线图规划。
+- **[ONNX 导出指南](./ONNX_EXPORT_GUIDE.md)**: 如何为模型注入元数据以实现自动标签映射。
 
 ---
 
@@ -25,9 +28,10 @@
 
 | 模块 | 技术选型 |
 |---|---|
-| **前端** | Vue 3 + Ant Design Vue 4 + Vite + Pinia |
+| **前端** | Vue 3 + Ant Design Vue 4 + Vite + Pinia + hls.js |
 | **后端** | FastAPI + SQLModel + Python 3.9+ |
-| **AI 推理** | Ultralytics (YOLO) + ONNX Runtime |
+| **AI 推理** | ONNX Runtime |
+| **视频交付** | HLS (Session 录制 + 双 URL 架构) |
 | **数据存储** | SQLite (本地化引擎) |
 
 ---

@@ -15,11 +15,13 @@ from app.dependencies import check_storage_limit, get_current_user
 from app.models.model import DetectionModel
 from app.models.task import Task
 from app.models.user import User
+from app.services.detector import get_detector, Detector
+import tempfile
 
 router = APIRouter(prefix="/models", tags=["models"])
 logger = logging.getLogger(__name__)
 
-ALLOWED_FORMATS = {".pt", ".onnx"}
+ALLOWED_FORMATS = {".onnx"}
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -32,6 +34,8 @@ class ModelResponse(BaseModel):
     description: str
     status: str
     label_config: Optional[dict]
+    default_threshold: float
+    class_names: list
     created_at: str
 
 
@@ -55,6 +59,8 @@ def _to_response(m: DetectionModel) -> ModelResponse:
         description=m.description,
         status=m.status,
         label_config=json.loads(m.label_config) if m.label_config else None,
+        default_threshold=m.default_threshold,
+        class_names=json.loads(m.class_names) if m.class_names else [],
         created_at=m.created_at.isoformat(),
     )
 
@@ -77,6 +83,42 @@ def list_models(
     total = len(session.exec(total_query).all())
 
     return ModelListResponse(total=total, items=[_to_response(m) for m in items])
+
+
+@router.post("/analyze")
+async def analyze_model(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Extract metadata from a model file without saving it to the database.
+    Used for real-time label extraction in the UI.
+    """
+    _, ext = os.path.splitext(file.filename or "")
+    ext = ext.lower()
+    if ext not in ALLOWED_FORMATS:
+        raise HTTPException(status_code=400, detail=f"Only {ALLOWED_FORMATS} files allowed")
+
+    # Save to temp file for analysis
+    fd, temp_path = tempfile.mkstemp(suffix=ext)
+    try:
+        content = await file.read()
+        with os.fdopen(fd, 'wb') as tmp:
+            tmp.write(content)
+        
+        # Analyze using Detector (bypass singleton cache for one-off analysis)
+        detector = Detector(temp_path)
+        return {
+            "label_config": detector.metadata_label_map or {},
+            "class_names": detector.class_names,
+            "default_threshold": float(getattr(detector.model, 'conf_thresh', 0.25)) if hasattr(detector, 'model') else 0.25
+        }
+    except Exception as e:
+        logger.error(f"Analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to analyze model: {str(e)}")
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 @router.post("", response_model=ModelResponse, status_code=201)
@@ -139,10 +181,36 @@ async def create_model(
     # Update record
     dm.file_path = str(file_path)
     dm.status = "completed"
+    
+    try:
+        detector = get_detector(str(file_path))
+        dm.class_names = json.dumps(detector.class_names)
+            
+        if hasattr(detector, 'model') and hasattr(detector.model, 'conf_thresh'):
+            dm.default_threshold = float(detector.model.conf_thresh)
+    except Exception as e:
+        logger.warning(f"Failed to extract model metadata: {e}")
+        dm.class_names = "[]"
+        dm.default_threshold = 0.25
+    
     session.add(dm)
     session.commit()
     session.refresh(dm)
 
+    return _to_response(dm)
+
+
+@router.get("/{model_id}", response_model=ModelResponse)
+def get_model(
+    model_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    dm = session.get(DetectionModel, model_id)
+    if not dm:
+        raise HTTPException(status_code=404, detail="Model not found")
+    if dm.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
     return _to_response(dm)
 
 

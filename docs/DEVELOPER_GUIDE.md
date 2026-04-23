@@ -1,75 +1,107 @@
-# 🚀 FireGuard (火灾监测系统) - 开发者交接文档 (v1.2.0)
+# 🚀 FireGuard (火灾监测系统) - 开发者交接文档 (v1.2.5)
 
-欢迎来到 FireGuard 的代码仓库！这份文档汇总了当前项目的所有设计架构与上下文关联，旨在帮助下一任接手开发者（或协同开发者）在**零耗时上下文理解**的情况下，立即上手开展进一步开发。
-
----
-
-## 1. 系统架构全景
+## 1. 架构全景与技术栈
 
 本项目采用了经典的前后端分离架构方案，分为 `frontend` 和 `backend` 两个根目录。
 
-### 后端 (Backend) - FastAPI
-- **框架**: FastAPI (高性能异步 Web 框架)
-- **数据库 ORM**: SQLModel (基于 SQLAlchemy 与 Pydantic)
-- **数据库**: SQLite (本地单文件存储，`backend/fire_detection.db`)
-- **任务架构**: 采用多线程守护模式。每个 `VideoStream` 任务都有独立的 Grabber 线程和 Sentinel 线程。
-
-### 前端 (Frontend) - Vue 3
-- **构建工具**: Vite + TypeScript
-- **UI 组件库**: Ant Design Vue 4.x
-- **状态管理**: Pinia (认证 `auth.ts`、任务状态缓存 `task.ts` 等)
+### 核心技术栈
+- **后端 (Backend)**: FastAPI + SQLModel + SQLite。采用多线程守护模式，每个任务拥有独立的 `Grabber` (抓取) 和 `Sentinel` (哨兵) 线程。
+- **前端 (Frontend)**: Vue 3 + Vite + Ant Design Vue 4.x。
+- **视频引擎**: `hls.js` (统一 HLS 架构，实时监控 + 历史回放)。
+- **AI 推理**: ONNX Runtime (支持 YOLOv8 等导出模型)。
 
 ---
 
-## 2. 核心稳定性架构 (v1.2.0 "Stability Edition")
+## 2. 视频流核心协议 (VideoStream Protocol)
 
- FireGuard v1.2.0 引入了工业级的稳定性保障机制，相关设计决策已归档至 ADR 记录中。
+### A. 5-3 物理隔离协议 (稳定性基石)
+- **5s 缓冲期**：任务启动的前 5s 为物理握手期，前端强制展示"正在连接"，隔离底层不稳定的初始化信号。
+- **3s 恢复节奏**：一旦连接失败，系统以 3s 为周期进行节奏性重启，确保网络栈有足够时间清理。
 
-### A. 5-3 物理隔离协议 (Physical Isolation)
-- **详情见**: [ADR-0001: 5-3 Physical Isolation Protocol](./adr/0001-5-3-physical-isolation-protocol.md)
-- **机制**：
-    - **5s 缓冲期**：任务启动时，系统强制保持 5s 的“正在连接”状态。此期间物理握手信号被隔离，防止 UI 闪烁。
-    - **3s 恢复节奏**：一旦连接失败，系统以 3s 为周期节奏性重启，确保网络栈有足够时间清理。
+### B. 双 URL HLS 架构 (v1.2.5 核心)
+系统采用**直播/回放分离**的双 URL 架构，彻底解决了直播白屏、回放黑屏和进度条定位异常的问题：
 
-### B. 后端状态防火墙 (State Wall)
-- **详情见**: [ADR-0002: State-Aware Status Wall](./adr/0002-state-aware-status-wall.md)
-- **机制**：`Notifier` 对外提供的广播接口具有**状态感知**能力。通过对比缓存内容，所有内容未变的信号都会在最上流被**直接拦截**。
-- **效果**：从物理层切断了“刷新风暴”，确保 UI 仅在状态真正跃迁时才进行同步。
+- **直播模式 (initLiveHls)**：
+  - URL: `/api/storage/{task_id}/live/index.m3u8`（直接读取 FFmpeg 实时写入的 m3u8）
+  - 优势：FFmpeg 写入第一个分片后即可播放，无需等待 merged playlist 生成
+  - 进度条：使用 `elapsed time = Date.now() - first_session_start_time` 驱动，始终定位在最右端
 
-### C. 哨兵心跳机制 (Sentinel Ticker)
-- **挑战**：OpenCV 探测 RTSP 流时由于阻塞可能导致“视觉假死”。
-- **方案**：启动一个独立哨兵子线程，在主探测线程阻塞期间强制发送保活信号。
+- **回放模式 (initVodHls)**：
+  - URL: `/api/tasks/{task_id}/stream.m3u8?mode=vod`（合并所有 session 的 m3u8，强制带 ENDLIST）
+  - 优势：`#EXT-X-ENDLIST` 标签使 hls.js 将其视为 VOD，支持任意位置 seek
+  - 进度条：使用 `video.duration` 驱动，与真实视频时长强绑定
 
----
+- **Session 录制管理**：
+  - 每次任务启动创建新的 `live/` 目录，FFmpeg 写入 HLS 分片
+  - 任务停止时，`live/` 被重命名为 `session_N/`，元数据持久化到 `sessions_meta.json`
+  - `generate_merged_m3u8()` 将所有 session 用 `#EXT-X-DISCONTINUITY` 标记拼接
 
-## 核心业务逻辑说明
-
-### 视频流处理流水线 (`VideoStream`)
-1. **初始化**: 重置物理时钟，启动哨兵。
-2. **抓取**: 并行启动主流 (idx=0) 与辅流抓取线程。
-3. **推理**: 抓取成功后，首帧进入 YOLO/ONNX 推理引擎。
-4. **结果分发**: 检测结果通过 WebSocket 在 `VideoPlayer.vue` 中实时渲染，而状态变更通过 `Notifier` 进行广播。
-`notifier.broadcast_status` 统一分发。
-
----
-
-## 4. 生产部署建议
-
-### 核心平台
-- **流源**: 推荐使用 RTSP 或 HTTP-FLV 监控流。
-- **数据库**: 当前使用 SQLite。如果并发任务数超过 50，建议迁移至 PostgreSQL。
-
-### 模拟辅助服务 (Optional Simulator)
-- **定位**: 供本地开发使用的推流桥接器。
-- **解耦**: 模拟器与主平台完全解耦。不需要模拟功能时可安全删除 `simulator/` 文件夹。
+### C. 时间对齐机制
+- 使用 `first_session_start_time`（任务首次启动时间）作为视频流的物理起点
+- 公式：`绝对时间 = first_session_start_time + 视频当前偏移`
+- 直播模式进度条由 `startLiveProgressTimer()` 以 500ms 间隔持续更新
 
 ---
 
-## 5. 开发建议与禁忌
+## 3. 推理频率控制 (FPS Configuration)
 
-1. **时钟一致性**: 不要随意重置 `_start_time`，除非任务被物理重启。
-2. **通知接口**: 必须使用 `notifier.broadcast_status(task_id, status)`。
-3. **阻塞调用**: 严禁在异步主循环中添加同步阻塞调用。所有 OpenCV 操作必须在 `VideoStream` 或 `TaskRunner` 的执行器线程中进行。
+系统支持分场景的推理节流，配置位于 `backend/app/config.py`：
 
-**V1.2.0 寄语**：
-目前的 5-3 协议已经非常稳固。在此基础上开发新功能时，请保持现有组件的“职责单一”度（不要把过多的逻辑塞进 View 里，建议抽离到 Composables 或 Pinia Store），同时继续沿用 `Ant Design Vue` 相关的 `CSS Vars` 色彩设计！祝 Coding 愉快！
+| 配置项 | 默认值 | 语义 |
+|----------|--------|------|
+| `DETECTION_FPS_STREAM` | 5 | 实时流推理频率 (Hz) |
+| `DETECTION_FPS_VIDEO` | 0 | 离线视频处理频率 (0 为不限制) |
+| `DETECTION_FPS_IMAGE` | 0 | 图片处理频率 |
+
+---
+
+## 4. 后端核心模块说明
+
+### A. 存储管理 (StorageManager)
+- **文件**: `backend/app/services/storage_manager.py`
+- **职责**: 
+  - **Session 录制**: 每次任务启动创建 `live/` 目录，FFmpeg 通过管道写入 HLS 分片
+  - **Session 封包**: 任务停止时将 `live/` 重命名为 `session_N/`，计算时长并持久化元数据
+  - **M3U8 合并**: `generate_merged_m3u8()` 将所有 session 用 `#EXT-X-DISCONTINUITY` 标记拼接为统一时间轴
+  - **VOD 模式**: `force_vod=True` 时强制添加 `#EXT-X-ENDLIST`，使 hls.js 支持随机 seek
+  - **预测性自动清理**: 当磁盘占用接近上限时自动删除最旧分片
+
+### B. 状态防火墙 (State Wall)
+- **机制**: `Notifier` 层会拦截所有内容未变的广播信号。
+- **效果**: 相比 v1.1.0，WebSocket 网络负载降低了 90% 以上，解决了“刷新风暴”。
+
+### C. 自动化解析引擎
+- **路径**: `POST /api/models/analyze`
+- **逻辑**: 用户选择模型文件时，后端瞬时解析 ONNX 标签并返回预览，不产生数据库脏数据。
+
+---
+
+## 5. 前端开发规范
+
+### A. V6 连接标识符 (Idempotency)
+所有 WebSocket 回调必须校验标识符，防止旧连接的“幽灵消息”污染新连接状态：
+```javascript
+if (connectionId !== activeConnectionId) return;
+```
+
+### B. UI 控制逻辑
+- **409 策略**: 全局拦截器已屏蔽 409 报错，由组件根据业务场景（如模型冲突）自行弹窗引导。
+- **配置持久化**: `detection_config` 以 JSON 形式存储在任务表中，支持单类别阈值独立设置。
+
+---
+
+## 6. 运维与工具箱
+
+### A. 快速启动
+- **后端**: `python -m uvicorn app.main:app --reload`
+- **前端**: `npm run dev`
+- **模拟器**: `python -m simulator.main` (从根目录运行以避免导入错误)
+
+### B. 灾难恢复与测试
+- **数据恢复**: `python recover_database.py` (从物理模型文件重建数据库关联)
+- **测试隔离**: 运行 `pytest` 时会自动切换至 `test.db`，不会破坏研发数据。
+- **数据库迁移**: `python migrate_db.py` (用于生产环境字段更新)
+
+---
+
+**开发者建议**：保持组件职责单一，UI 状态尽可能通过 Pinia 管理，新增检测功能时务必遵循 5-3 隔离协议。

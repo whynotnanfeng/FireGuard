@@ -1,6 +1,5 @@
 """
 Unified inference engine supporting:
-  - YOLO .pt  via ultralytics
   - ONNX .onnx via onnxruntime (YOLOv8 format)
 """
 from __future__ import annotations
@@ -28,7 +27,7 @@ class Detection:
         return {
             "box": self.box,
             "confidence": round(self.confidence, 4),
-            "class": self.class_name,
+            "class_name": self.class_name,
         }
 
 
@@ -37,54 +36,39 @@ class Detection:
 _model_cache: Dict[str, "Detector"] = {}
 
 
-def get_detector(model_path: str, label_mapping: Optional[Dict[int, str]] = None) -> "Detector":
-    # If mapping changes, we should ideally reload or update the cached detector
-    # For now, we update the mapping in the existing instance if provided
+def get_detector(model_path: str) -> "Detector":
+    """Singleton model engine management."""
     if model_path not in _model_cache:
-        _model_cache[model_path] = Detector(model_path, label_mapping)
-    elif label_mapping is not None:
-        _model_cache[model_path].label_mapping = label_mapping
+        _model_cache[model_path] = Detector(model_path)
     return _model_cache[model_path]
 
 
 # 鈹€鈹€ Detector 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 class Detector:
-    """Unified inference interface for .pt and .onnx models."""
+    """Unified inference interface for .onnx models."""
 
     INPUT_SIZE = 640
 
-    def __init__(self, model_path: str, label_mapping: Optional[Dict[int, str]] = None):
+    def __init__(self, model_path: str):
         self.model_path = model_path
-        self.label_mapping = label_mapping
         self.backend: str = ""
         self.is_rgbir: bool = False
         self.input_names: List[str] = []
+        self.class_names: List[str] = []
+        self.metadata_label_map: Dict[str, str] = {}
         self._load(model_path)
 
 
     # 鈹€鈹€ Loading 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     def _load(self, path: str) -> None:
-        if path.endswith(".pt"):
-            self._load_pt(path)
-        elif path.endswith(".onnx"):
+        if path.endswith(".onnx"):
             self._load_onnx(path)
         else:
             raise ValueError(f"Unsupported model format: {path}")
 
-    def _load_pt(self, path: str) -> None:
-        try:
-            from ultralytics import YOLO
-            self.model = YOLO(path)
-            self.backend = "ultralytics"
-            # Extract class names from model
-            self.class_names: List[str] = list(self.model.names.values())
-            logger.info(f"Loaded YOLO model: {path} (classes: {self.class_names})")
-        except ImportError:
-            raise RuntimeError("ultralytics is not installed. Run: pip install ultralytics")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load YOLO model: {e}")
+
 
     def _load_onnx(self, path: str) -> None:
         try:
@@ -112,9 +96,17 @@ class Detector:
                     try:
                         val = json.loads(meta[key])
                         if isinstance(val, dict):
-                            self.class_names = list(val.values())
+                            # Store both the full mapping and the ordered list
+                            self.metadata_label_map = {str(k): str(v) for k, v in val.items()}
+                            # Sort by keys to get consistent class_names list if keys are numeric strings
+                            try:
+                                sorted_keys = sorted(val.keys(), key=lambda x: int(x))
+                                self.class_names = [str(val[k]) for k in sorted_keys]
+                            except Exception:
+                                self.class_names = list(val.values())
                         elif isinstance(val, list):
-                            self.class_names = val
+                            self.class_names = [str(v) for v in val]
+                            self.metadata_label_map = {str(i): str(v) for i, v in enumerate(val)}
                         found_names = True
                         break
                     except Exception:
@@ -142,57 +134,17 @@ class Detector:
 
     # 鈹€鈹€ Inference 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-    def detect(self, image: np.ndarray | List[np.ndarray], conf: float = 0.25, task_id: str = "") -> List[Detection]:
+    def detect(self, image: np.ndarray | List[np.ndarray], conf: float = 0.25, task_id: str = "", label_mapping: Optional[dict] = None) -> List[Detection]:
         """Run detection on a single image (or pair of images for multi-modal)."""
-        if self.backend == "ultralytics":
-            if isinstance(image, list):
-                image = image[0] # YOLO doesn't support our multi-input yet
-            return self._detect_pt(image, conf)
-        else:
-            return self._detect_onnx(image, conf, task_id)
+        return self._detect_onnx(image, conf, task_id, label_mapping)
 
-    def detect_batch(self, images: List[np.ndarray | List[np.ndarray]], conf: float = 0.25, task_id: str = "") -> List[List[Detection]]:
+
+    def detect_batch(self, images: List[np.ndarray | List[np.ndarray]], conf: float = 0.25, task_id: str = "", label_mapping: Optional[dict] = None) -> List[List[Detection]]:
         """Batch inference."""
-        return [self.detect(img, conf, task_id) for img in images]
+        return [self.detect(img, conf, task_id, label_mapping) for img in images]
 
-    def _detect_pt(self, image: np.ndarray, conf: float) -> List[Detection]:
-        results = self.model(image, conf=conf, verbose=False)
-        detections: List[Detection] = []
-        for r in results:
 
-            for box in r.boxes:
-                # Get coordinates [x1, y1, x2, y2]
-                coords = box.xyxy[0].tolist()
-                x1, y1, x2, y2 = [int(v) for v in coords]
-                
-                confidence = float(box.conf[0])
-                cls_idx = int(box.cls[0])
-                
-                # Priority 1: User defined mapping
-                cls_name = f"Class {cls_idx}" # fallback
-                if self.label_mapping:
-                    if cls_idx in self.label_mapping:
-                        cls_name = self.label_mapping[cls_idx]
-                    elif str(cls_idx) in self.label_mapping:
-                        cls_name = self.label_mapping[str(cls_idx)]
-                    else:
-                        # Priority 2: Model names or fallback
-                        cls_name = self.model.names.get(cls_idx, cls_name)
-                else:
-                    # Priority 2: Model names or fallback
-                    cls_name = self.model.names.get(cls_idx, cls_name)
-
-                detections.append(Detection(
-                    box=[x1, y1, x2, y2],
-                    confidence=confidence,
-                    class_name=cls_name,
-                ))
-                # Explicitly log mapping result for verification
-                logger.info(f"[Detector] [PT-Backend] Result: ID {cls_idx} -> Mapped to '{cls_name}' (conf: {confidence:.4f})")
-                
-        return detections
-
-    def _detect_onnx(self, image: np.ndarray | List[np.ndarray], conf: float, task_id: str = "") -> List[Detection]:
+    def _detect_onnx(self, image: np.ndarray | List[np.ndarray], conf: float, task_id: str = "", label_mapping: Optional[dict] = None) -> List[Detection]:
         """ONNX inference with diagnostic logging and preprocessing."""
         if self.is_rgbir and isinstance(image, list) and len(image) >= 2:
             # Multi-modal RGB-IR logic
@@ -217,7 +169,7 @@ class Detector:
                 if out.shape[-1] == 3: pred_scores = out # 3 classes as per guide
             
             if pred_boxes is not None and pred_scores is not None:
-                return self._postprocess_rgbir(pred_boxes, pred_scores, orig_w, orig_h, ratio, pad, conf)
+                return self._postprocess_rgbir(pred_boxes, pred_scores, orig_w, orig_h, ratio, pad, conf, label_mapping)
             else:
                 logger.error(f"[Detector] RGB-IR output shapes mismatch. Outputs: {[o.shape for o in outputs]}")
                 return []
@@ -253,7 +205,7 @@ class Detector:
                 primary_out = np.column_stack((b, s, c))
                 logger.info(f"[Detector] Identified 3-output pattern. Unified into {primary_out.shape} matrix.")
 
-        return self._postprocess(primary_out, orig_w, orig_h, ratio, pad, conf, task_id)
+        return self._postprocess(primary_out, orig_w, orig_h, ratio, pad, conf, task_id, label_mapping)
 
     def _preprocess(
         self, image: np.ndarray
@@ -311,7 +263,8 @@ class Detector:
         ratio: float,
         pad: Tuple[int, int],
         conf_thresh: float,
-        task_id: str = ""
+        task_id: str = "",
+        label_mapping: Optional[dict] = None
     ) -> List[Detection]:
         """Parse YOLO architecture outputs and apply NMS."""
         try:
@@ -400,11 +353,11 @@ class Detector:
                 cls_idx = int(class_ids[idx])
                 
                 # Priority 1: User defined mapping
-                if self.label_mapping and cls_idx in self.label_mapping:
-                    cls_name = self.label_mapping[cls_idx]
-                elif self.label_mapping and str(cls_idx) in self.label_mapping:
+                if label_mapping and cls_idx in label_mapping:
+                    cls_name = label_mapping[cls_idx]
+                elif label_mapping and str(cls_idx) in label_mapping:
                     # JSON keys are always strings
-                    cls_name = self.label_mapping[str(cls_idx)]
+                    cls_name = label_mapping[str(cls_idx)]
                 else:
                     # Priority 2: Model metadata or fallback
                     cls_name = self.class_names[cls_idx] if cls_idx < len(self.class_names) else f"Class {cls_idx}"
@@ -432,7 +385,8 @@ class Detector:
         orig_h: int, 
         ratio: float, 
         pad: Tuple[int, int], 
-        conf_thresh: float
+        conf_thresh: float,
+        label_mapping: Optional[dict] = None
     ) -> List[Detection]:
         """Post-process for RT-DETR variant (No NMS)."""
         if pred_boxes.ndim == 3: pred_boxes = pred_boxes[0]
@@ -463,8 +417,8 @@ class Detector:
                 
                 # Mapping
                 cls_name = f"Class {cls_idx}"
-                if self.label_mapping:
-                    cls_name = self.label_mapping.get(cls_idx, self.label_mapping.get(str(cls_idx), cls_name))
+                if label_mapping:
+                    cls_name = label_mapping.get(cls_idx, label_mapping.get(str(cls_idx), cls_name))
                 elif cls_idx < len(self.class_names):
                     cls_name = self.class_names[cls_idx]
 
@@ -481,24 +435,37 @@ class Detector:
 
     @staticmethod
     def draw_boxes(image: np.ndarray, detections: List[Detection]) -> np.ndarray:
-        """Draw bounding boxes with labels on image (in-place copy)."""
+        """Draw bounding boxes on image (in-place copy) with labels and confidence."""
         img = image.copy()
+        # BGR Colors
         colors = {
-            "fire": (0, 60, 255),
-            "smoke": (60, 60, 60),
+            "fire": (0, 60, 255),      # Red-Orange
+            "smoke": (80, 80, 80),     # Dark Gray
+            "person": (255, 165, 0),   # Blue
+            "car": (255, 0, 255),      # Purple
         }
+        
         for det in detections:
             x1, y1, x2, y2 = det.box
-            color = colors.get(det.class_name.lower(), (0, 165, 255))
+            cls_name = det.class_name.lower()
+            color = colors.get(cls_name, (0, 165, 255)) # Default Orange
+            
+            # 1. Draw main rectangle
             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+            
+            # 2. Draw label background (filled tab)
             label = f"{det.class_name} {det.confidence:.2f}"
-            (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-            if y1 - lh - 6 < 0:
-                cv2.rectangle(img, (x1, y1), (x1 + lw + 4, y1 + lh + 6), color, -1)
-                cv2.putText(img, label, (x1 + 2, y1 + lh + 2),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            else:
-                cv2.rectangle(img, (x1, y1 - lh - 6), (x1 + lw + 4, y1), color, -1)
-                cv2.putText(img, label, (x1 + 2, y1 - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.5
+            thickness = 1
+            
+            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+            
+            # Ensure label doesn't go off top of image
+            ty1 = max(y1, th + 10)
+            cv2.rectangle(img, (x1, ty1 - th - 10), (x1 + tw + 10, ty1), color, -1)
+            
+            # 3. Draw text
+            cv2.putText(img, label, (x1 + 5, ty1 - 5), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+            
         return img

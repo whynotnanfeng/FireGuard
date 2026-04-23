@@ -19,7 +19,7 @@ async def test_video_stream_initial_grace_period(mock_detector):
     task_id = "test-task"
     source = "rtsp://localhost/test"
     
-    stream = VideoStream(task_id, source, mock_detector)
+    stream = VideoStream(task_id, source, mock_detector, token=None)
     
     # Mock WebSocket
     mock_ws = MagicMock()
@@ -36,19 +36,19 @@ async def test_video_stream_initial_grace_period(mock_detector):
             stream.start_grabbers()
         
         # At T=1001.0 (1s elapsed), check if is_lagging triggers a retry message
-        # self._last_frame_time is initialized to self._start_time (1000.0)
+        # self._last_frame_time is initialized to self._session_start_time (1000.0)
         mock_time.return_value = 1001.6 # 1.6s elapsed, triggers > 1.5s check
         
         # We simulate the run() loop logic partially
-        # Note: stream._last_frame_time is 1000.0, stream._start_time is 1000.0
+        # Note: stream._last_frame_time is 1000.0, stream._session_start_time is 1000.0
         current_time = 1001.6
-        is_lagging = (current_time - stream._last_frame_time) > 1.5 and (current_time - stream._start_time) > 5.0
+        is_lagging = (current_time - stream._last_frame_time) > 1.5 and (current_time - stream._session_start_time) > 5.0
         
         assert is_lagging is False, "Watchdog should not trigger within 5s grace period"
         
         # At T=1006.0 (6s elapsed), it should trigger
         current_time = 1006.0
-        is_lagging = (current_time - stream._last_frame_time) > 1.5 and (current_time - stream._start_time) > 5.0
+        is_lagging = (current_time - stream._last_frame_time) > 1.5 and (current_time - stream._session_start_time) > 5.0
         
         assert is_lagging is True, "Watchdog should trigger after 5s grace period"
 
@@ -60,7 +60,7 @@ async def test_video_stream_dynamic_grace_after_success(mock_detector):
     """
     task_id = "test-task-dynamic"
     source = "rtsp://localhost/test"
-    stream = VideoStream(task_id, source, mock_detector)
+    stream = VideoStream(task_id, source, mock_detector, token=None)
     
     with patch('time.time') as mock_time:
         # 1. INITIAL STATE (No frames)
@@ -97,7 +97,7 @@ async def test_video_stream_exception_bypass_grace_period(mock_detector):
     """
     task_id = "test-task-exception"
     source = "rtsp://invalid"
-    stream = VideoStream(task_id, source, mock_detector)
+    stream = VideoStream(task_id, source, mock_detector, token=None)
     
     with patch('time.time') as mock_time:
         stream._start_time = 1000.0
@@ -122,7 +122,7 @@ async def test_video_stream_active_broadcast_grace(mock_detector):
     """
     task_id = "test-task"
     source = "rtsp://localhost/test"
-    stream = VideoStream(task_id, source, mock_detector)
+    stream = VideoStream(task_id, source, mock_detector, token=None)
     
     # Setup loop for threadsafe calls
     stream.loop = MagicMock()

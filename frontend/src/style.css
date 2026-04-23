@@ -1,31 +1,26 @@
-/* ── Global CSS custom properties & resets ────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  /* Brand palette */
-  --primary-blue:  #0066cc;
-  --primary-hover: #0052a3;
-  --danger-red:    #d93025;
-  --success-green: #0d8a52;
+  --primary-blue:  #4a90d9;
+  --primary-hover: #3a7bc8;
+  --danger-red:    #e85d26;
+  --success-green: #22c55e;
 
-  /* Light backgrounds */
-  --bg-primary:    #F7F8FA;
-  --bg-sidebar:    #F7F8FA;
-  --bg-card:       #FFFFFF;
-  --bg-card-hover: #F8F9FA;
-  --bg-input:      #FFFFFF;
+  --bg-primary:    #f5f7fa;
+  --bg-sidebar:    #ffffff;
+  --bg-card:       #ffffff;
+  --bg-card-hover: #f8f9fb;
+  --bg-input:      #f9fafb;
+  --bg-secondary:  #eef1f5;
 
-  /* Text */
-  --text-primary:  #172b4d;
-  --text-secondary:#5e6c84;
-  --text-muted:    #a5adba;
+  --text-primary:  #1e293b;
+  --text-secondary:#64748b;
+  --text-muted:    #94a3b8;
 
-  /* Borders */
-  --border-color:  #dfe1e6;
-  --border-active: #0066cc;
+  --border-color:  #e2e8f0;
+  --border-active: #4a90d9;
 
-  /* Shadows */
-  --shadow-card:   0 2px 8px rgba(9, 30, 66, 0.08);
+  --shadow-card:   0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
 
   font-family: 'Inter', 'Roboto', 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 14px;
@@ -39,7 +34,6 @@ body {
   overflow-x: hidden;
 }
 
-/* ── Ant Design Vue theme overrides (Light Theme) ───────────────────────────── */
 .ant-btn-primary {
   background-color: var(--primary-blue);
   border-color: var(--primary-blue);
@@ -67,12 +61,50 @@ body {
   color: var(--text-secondary);
 }
 
-/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(9, 30, 66, 0.15); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(9, 30, 66, 0.3); }
 
-/* ── Animations ─────────────────────────────────────────────────────────────── */
 @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
 .fade-in { animation: fadeIn 0.3s ease forwards; }
+
+.task-list-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.filter-group {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.task-table {
+  background: var(--bg-card);
+  border-radius: 8px;
+  box-shadow: var(--shadow-card);
+}
+
+.type-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+}
+
+.pagination-wrap {
+  display: flex;
+  justify-content: center;
+  margin-top: 24px;
+}
