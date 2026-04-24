@@ -59,6 +59,10 @@ class Config:
 
     RECONNECT_MAX_RETRIES: int = int(os.getenv("RECONNECT_MAX_RETRIES", "3"))
 
+    # --- MediaMTX Gateway Config ---
+    MEDIAMTX_API_URL: str = os.getenv("MEDIAMTX_API_URL", "http://127.0.0.1:9997/v3/config/paths/")
+    MEDIAMTX_RTSP_BASE: str = os.getenv("MEDIAMTX_RTSP_BASE", "rtsp://127.0.0.1:8554/")
+
     ALLOWED_ORIGINS: List[str] = [
         o.strip()
         for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000").split(",")
@@ -68,6 +72,33 @@ class Config:
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10240"))
 
     CORS_MAX_AGE: int = int(os.getenv("CORS_MAX_AGE", "600"))
+
+    @property
+    def FFMPEG_PATH(self) -> str:
+        # 1. 优先使用环境变量中显式指定的路径
+        env_path = os.getenv("FFMPEG_PATH")
+        if env_path and os.path.exists(env_path):
+            return env_path
+        
+        # 2. 检查项目集成的模拟器 bin 目录 (适用于 Windows 演示环境)
+        root_dir = self.BASE_DIR.parent
+        simulator_ffmpeg = root_dir / "simulator" / "bin" / "ffmpeg.exe"
+        if simulator_ffmpeg.exists():
+            return str(simulator_ffmpeg)
+            
+        # 3. 兜底返回，依赖系统环境变量 PATH
+        return "ffmpeg"
+
+    @property
+    def FFPROBE_PATH(self) -> str:
+        env_path = os.getenv("FFPROBE_PATH")
+        if env_path and os.path.exists(env_path):
+            return env_path
+        root_dir = self.BASE_DIR.parent
+        simulator_ffprobe = root_dir / "simulator" / "bin" / "ffprobe.exe"
+        if simulator_ffprobe.exists():
+            return str(simulator_ffprobe)
+        return "ffprobe"
 
 
 config = Config()

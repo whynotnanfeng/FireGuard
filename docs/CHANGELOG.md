@@ -2,6 +2,39 @@
 
 All notable changes to the FireGuard project will be documented in this file.
 
+## [v1.4.0] - 2026-04-24 "Industrial Refactor"
+
+### Added
+- **MediaMTX Gateway Integration**:
+  - Backend: Shifted to MediaMTX as the unified stream proxy/delivery engine.
+  - Backend: Implemented `MediaGatewayManager` with `fg_` namespace isolation for secure multi-tenant stream management.
+  - Backend: Automated lifecycle management for dynamic RTSP proxy paths.
+- **Global Inference Process Pool**:
+  - Backend: Decoupled AI inference into a dedicated process pool (`InferenceWorker`) to bypass Python GIL.
+  - Backend: Optimized IPC (Inter-Process Communication) using high-speed JPEG compression for 1080P/4K frames.
+  - Backend: Adaptive worker count based on system CPU/GPU availability.
+- **RGBT Temporal Alignment Buffer**:
+  - Backend: Introduced `RGBTAlignmentBuffer` to synchronize RGBT (RGB + Infrared) dual-stream frames.
+  - Backend: High-precision temporal anchoring with 100ms jitter tolerance.
+- **Dynamic HLS DVR & VOD Snapshotting**:
+  - Backend: Implemented `generate_vod_snapshot` for instantaneous, frozen historical playback.
+  - Backend: Automated absolute path rewriting in M3U8 files to resolve frontend 404 errors.
+  - Backend: High-performance memory aggregation for historical detection records (Group By detected_at).
+- **Industrial-Grade Frontend DVR**:
+  - Frontend: Refactored `VideoPlayer.vue` with a robust `playMode` ('live' | 'history') state machine.
+  - Frontend: Implemented **Sliding Window Pre-loader** for proactive detection data fetching during historical playback.
+  - Frontend: Precision AI frame alignment using HLS `programDateTime` (UTC temporal anchoring).
+  - Frontend: Debounced seeking (400ms) to prevent UI thrashing during rapid timeline interaction.
+
+### Fixed
+- **Database Performance**: Added database index on `DetectionRecord.detected_at` to eliminate O(N) scanning during historical queries.
+- **Ghost Frame Bug**: Implemented instant buffer flushing and canvas clearing upon stream switching.
+- **Sync Drift**: Resolved temporal drift between video frames and detection boxes by unifying `firstSessionStartTime` as the global reference point.
+
+### Changed
+- **Architecture Evolution**: Moved from single-threaded monolithic stream handling to a distributed gateway + process pool architecture.
+- **Configuration**: Standardized MediaMTX and Inference settings in `config.py`.
+
 ## [v1.3.1] - 2026-04-23
 
 ### Added

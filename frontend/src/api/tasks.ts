@@ -51,7 +51,7 @@ export interface VideoSegment {
 }
 
 export const tasksApi = {
-  list: (params?: { skip?: number; limit?: number; status?: string; search?: string }): Promise<TaskListRes> =>
+  list: (params?: { skip?: number; limit?: number; status?: string; search?: string; task_type?: string; model_id?: string; description?: string; date_from?: string; date_to?: string }): Promise<TaskListRes> =>
     request.get('/tasks', { params }),
 
   get: (id: string): Promise<Task> =>
@@ -71,6 +71,9 @@ export const tasksApi = {
 
   getDetectionRecords: (id: string, params?: { limit?: number; skip?: number; order?: string; start_time?: string; end_time?: string }): Promise<{ records: DetectionRecord[] }> =>
     request.get(`/tasks/${id}/detection-records`, { params }),
+
+  getDetections: (id: string, params: { start_time: number; end_time: number }): Promise<Array<{ timestamp: number; boxes: any[] }>> =>
+    request.get(`/tasks/${id}/detections`, { params }),
 
   delete: (id: string): Promise<{ message: string }> =>
     request.delete(`/tasks/${id}`),

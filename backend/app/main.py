@@ -1,8 +1,8 @@
 import os
-# V5.0: FFmpeg容错优化 - TCP传输 + 完整帧保障
-# 移除 low_delay：避免半解码帧导致的水平撕裂
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000|probesize;1000000|analyzeduration;1000000|fflags;+genpts+discardcorrupt"
+# 全局强制 OpenCV 走 TCP 拉流，解决 UDP 丢包导致的花屏和模型掉帧问题
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|threads;1"
 
+import cv2  # 确保环境变量设置后，系统的后续模块再去 import cv2
 import asyncio
 import json
 import logging
@@ -47,13 +47,52 @@ logger = logging.getLogger("app")
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
+from contextlib import asynccontextmanager
+from app.services.media_gateway import media_gateway
+
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- Startup ---
+    create_db_and_tables()
+    from app.services.task_runner import task_runner, stream_manager
+    
+    # 清理上一次非正常退出遗留的 fg_ 动态路径
+    media_gateway.clear_all_proxies()
+    
+    # [新增] 启动全局推理进程池
+    stream_manager.start_inference_pool(worker_count=2)
+    
+    # 启动后台任务和监控器
+    asyncio.create_task(task_runner.start())
+    stream_manager.start_monitor()
+    
+    logger.info("🔥 Fire Detection API started")
+    
+    yield
+    
+    # --- Shutdown ---
+    logger.info("Fireguard Backend shutting down...")
+    
+    # [新增] 停止并清理推理池
+    stream_manager.stop_inference_pool()
+    
+    # 清理当前正在运行的网关路径
+    media_gateway.clear_all_proxies()
+    # 释放 httpx 资源池
+    media_gateway.close()
+
+# ── App ───────────────────────────────────────────────────────────────────────
+
 app = FastAPI(
     title="火灾目标检测系统",
     description="Fire Detection Platform API",
-    version="1.3.1",
+    version="1.4.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
+    lifespan=lifespan,
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
@@ -106,15 +145,6 @@ app.mount("/api/results", StaticFiles(directory=str(config.RESULTS_DIR)), name="
 config.VIDEO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/storage", NoCacheStaticFiles(directory=str(config.VIDEO_STORAGE_DIR)), name="storage")
 
-# ── Startup ───────────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-async def startup_event():
-    create_db_and_tables()
-    from app.services.task_runner import task_runner, stream_manager
-    asyncio.create_task(task_runner.start())
-    stream_manager.start_monitor()
-    logger.info("\U0001f525 Fire Detection API started")
 
 
 # ── WebSocket: Notifications ──────────────────────────────────────────────────

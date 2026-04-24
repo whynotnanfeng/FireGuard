@@ -22,6 +22,6 @@ class DetectionRecord(SQLModel, table=True):
     class_name: str = Field(max_length=50)
     confidence: float = Field()
     box: str = Field(default="[]", max_length=200)
-    detected_at: datetime = Field(default_factory=now_beijing)
+    detected_at: datetime = Field(default_factory=now_beijing, index=True)
 
     task: Optional["Task"] = Relationship(back_populates="detection_records")

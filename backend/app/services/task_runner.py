@@ -10,6 +10,9 @@ import json
 import logging
 import os
 import time
+import threading
+import queue
+import multiprocessing as mp
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
@@ -41,6 +44,70 @@ class StreamManager:
         self._monitor_task: Optional[asyncio.Task] = None
         # V1.3.0: High-integrity identity tracking
         self._stream_tokens: Dict[str, object] = {} 
+
+        # [新增] 全局 IPC 队列 (必须在此初始化，规避 Windows spawn 问题)
+        self.global_inference_in_q = mp.Queue(maxsize=100)
+        self.global_inference_out_q = mp.Queue(maxsize=100)
+        self.workers = []
+        self._dispatcher_thread = None
+
+    def start_inference_pool(self, worker_count: int = 2):
+        """启动全局推理进程池和结果分发线程"""
+        from app.services.inference_worker import GlobalInferenceWorker
+        
+        # 1. 启动指定数量的子进程
+        for _ in range(worker_count):
+            w = GlobalInferenceWorker(self.global_inference_in_q, self.global_inference_out_q)
+            w.start()
+            self.workers.append(w)
+            
+        # 2. 启动主进程的结果分发线程
+        self._dispatcher_thread = threading.Thread(target=self._result_dispatcher_loop, daemon=True)
+        self._dispatcher_thread.start()
+        logger.info(f"Started Inference Pool with {worker_count} workers.")
+
+    def stop_inference_pool(self):
+        """安全关闭进程池"""
+        for w in self.workers:
+            w.stop()
+            try:
+                self.global_inference_in_q.put(None, timeout=1.0) # 塞毒丸
+            except:
+                pass
+        for w in self.workers:
+            w.join(timeout=3.0)
+            if w.is_alive():
+                w.terminate()
+        
+        # 停止分发线程
+        if self._dispatcher_thread:
+            try:
+                self.global_inference_out_q.put(None)
+            except:
+                pass
+
+    def _result_dispatcher_loop(self):
+        """核心路由：从全局队列拿结果，精准送回给对应的 VideoStream 实例"""
+        logger.info("[Dispatcher] Result dispatcher thread started.")
+        while True:
+            try:
+                result = self.global_inference_out_q.get(timeout=1.0)
+                if result is None: 
+                    logger.info("[Dispatcher] Received shutdown signal.")
+                    break
+                
+                task_id, timestamp, raw_detections = result
+                stream = self.get_stream(task_id)
+                
+                # 只有当流存活时才处理结果
+                if stream:
+                    # 调用 VideoStream 内部的方法处理落盘和 WebSocket 分发
+                    stream.handle_inference_result(timestamp, raw_detections)
+                    
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Dispatcher loop error: {e}")
 
     def start_monitor(self) -> None:
         """Start the background monitor to sync exception status."""
@@ -113,13 +180,9 @@ class StreamManager:
     def start_stream(self, task_id: str, source: str, model_path: str, mapping: Optional[dict], is_resume: bool = False) -> "VideoStream":
         """V12: 冷启动 - 始终创建新流实例（由调用方负责先stop旧流）"""
         from app.services.video_stream import VideoStream
-        from app.services.detector import get_detector
 
         # V1.2.46: Add a short delay to ensure old thread sockets are fully closed by OS
         time.sleep(0.3)
-
-        # 加载检测器引擎
-        detector = get_detector(model_path)
 
         # V1.3.3: Pre-load detection config from DB
         detection_config = None
@@ -139,8 +202,8 @@ class StreamManager:
         token = object()
         self._stream_tokens[task_id] = token
 
-        # 创建并启动新流
-        new_stream = VideoStream(task_id, source, detector, token, mapping)
+        # 创建并启动新流 (注意：现在传入 model_path 而非 detector 实例)
+        new_stream = VideoStream(task_id, source, model_path, token, mapping)
         new_stream._is_resuming = is_resume
         new_stream.detection_config = detection_config # Inject config
         new_stream.start_grabbers()
@@ -148,7 +211,7 @@ class StreamManager:
         # 注册到管理器
         self._streams[task_id] = new_stream
         self._paused.discard(task_id)
-        logger.info(f"[V12] Stream {task_id} cold-started successfully")
+        logger.info(f"[V12] Stream {task_id} cold-started successfully using Global Pool")
         return new_stream
 
     def get_stream(self, task_id: str) -> Optional["VideoStream"]:

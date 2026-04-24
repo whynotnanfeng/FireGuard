@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import logging
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -17,8 +18,9 @@ from fastapi import (
     HTTPException,
     UploadFile,
     BackgroundTasks,
+    Query,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, PlainTextResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -106,6 +108,11 @@ def list_tasks(
     limit: int = 20,
     status: Optional[str] = None,
     search: Optional[str] = None,
+    task_type: Optional[str] = None,
+    model_id: Optional[str] = None,
+    description: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -114,6 +121,16 @@ def list_tasks(
         query = query.where(Task.status == status)
     if search:
         query = query.where(Task.name.contains(search))
+    if task_type:
+        query = query.where(Task.task_type == task_type)
+    if model_id:
+        query = query.where(Task.model_id == model_id)
+    if description:
+        query = query.where(Task.description.contains(description))
+    if date_from:
+        query = query.where(Task.created_at >= datetime.fromisoformat(date_from))
+    if date_to:
+        query = query.where(Task.created_at <= datetime.fromisoformat(date_to))
         
     items = session.exec(query.offset(skip).limit(limit).order_by(Task.created_at.desc())).all()
 
@@ -122,6 +139,16 @@ def list_tasks(
         count_query = count_query.where(Task.status == status)
     if search:
         count_query = count_query.where(Task.name.contains(search))
+    if task_type:
+        count_query = count_query.where(Task.task_type == task_type)
+    if model_id:
+        count_query = count_query.where(Task.model_id == model_id)
+    if description:
+        count_query = count_query.where(Task.description.contains(description))
+    if date_from:
+        count_query = count_query.where(Task.created_at >= datetime.fromisoformat(date_from))
+    if date_to:
+        count_query = count_query.where(Task.created_at <= datetime.fromisoformat(date_to))
         
     total = len(session.exec(count_query).all())
 
@@ -534,6 +561,61 @@ def get_result(
         }
 
 
+# ── Historical Detections API (Phase 4) ──────────────────────────────────
+@router.get("/{task_id}/detections")
+def get_historical_detections(
+    task_id: str,
+    start_time: int = Query(..., description="起始绝对时间戳(毫秒)"),
+    end_time: int = Query(..., description="结束绝对时间戳(毫秒)"),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """前端在历史回放模式下，通过滑动窗口拉取聚合后的历史检测框"""
+    task = session.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    try:
+        # 1. 极速范围查询 (依靠 ix_detection_records_detected_at 索引)
+        dt_start = datetime.fromtimestamp(start_time / 1000.0)
+        dt_end = datetime.fromtimestamp(end_time / 1000.0)
+        
+        stmt = select(DetectionRecord).where(
+            DetectionRecord.task_id == task_id,
+            DetectionRecord.detected_at >= dt_start,
+            DetectionRecord.detected_at <= dt_end
+        ).order_by(DetectionRecord.detected_at.asc())
+        
+        records = session.exec(stmt).all()
+        
+        # 2. 内存聚合：将同一毫秒内的框组合在一起
+        # 使用 int(ts * 1000) 作为 key 确保毫秒级对齐
+        grouped_data = defaultdict(list)
+        for r in records:
+            ts_ms = int(r.detected_at.timestamp() * 1000)
+            box_data = json.loads(r.box)
+            # 格式化为前端 renderLoop 期望的 boxes 格式
+            grouped_data[ts_ms].append({
+                "x": box_data[0],
+                "y": box_data[1],
+                "w": box_data[2] - box_data[0],
+                "h": box_data[3] - box_data[1],
+                "conf": r.confidence,
+                "label": r.class_name
+            })
+            
+        # 3. 转换为前端缓冲池期望的格式
+        result = [
+            {"timestamp": ts, "boxes": boxes}
+            for ts, boxes in sorted(grouped_data.items())
+        ]
+            
+        return result
+    except Exception as e:
+        logger.error(f"Failed to fetch historical detections: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Detection Records ────────────────────────────────────────────────────────
 
 @router.get("/{task_id}/detection-records")
@@ -636,6 +718,23 @@ async def download_all(
 # 新架构下，HLS 视频流由 DirectHLSWriter (ffmpeg -c:v copy) 直接生成
 # 前端通过 /storage/{task_id}/stream_rgb.m3u8 直接访问静态文件
 # 不再需要通过 FastAPI 代理路由转发
+
+@router.get("/{task_id}/vod-stream", response_class=PlainTextResponse)
+def get_vod_snapshot(
+    task_id: str, 
+    channel: str = Query("rgb"), 
+    end_time: float = Query(..., description="定格时的相对时间(秒)")
+):
+    """前端切换到历史模式时，获取带有 ENDLIST 的定格 M3U8 文件"""
+    try:
+        m3u8_content = storage_manager.generate_vod_snapshot(task_id, channel, end_time)
+        return m3u8_content
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Failed to generate VOD snapshot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/{task_id}/videos")
 def get_task_videos(

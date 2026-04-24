@@ -8,9 +8,6 @@ from collections import deque
 from typing import List, Optional, Dict, Any
 import os
 
-# Force TCP transport for RTSP streams BEFORE OpenCV/FFmpeg loads
-# This must be set before importing cv2 to take effect
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|threads;1"
 
 import cv2
 import numpy as np
@@ -19,6 +16,7 @@ from app.config import config
 from app.utils.time import now_beijing
 from app.services.detector import Detection, Detector
 from app.services.storage_manager import storage_manager
+from app.services.media_gateway import media_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -57,14 +55,14 @@ class VideoStream:
         self,
         task_id: str,
         source: str,
-        detector: Detector,
+        model_path: str, # [修改点1] 传入路径而非实例
         token: object,
         label_mapping: Optional[dict] = None,
     ):
         self.task_id = task_id
         self.source = source
         self.sources = source.split(";") if ";" in source else [source]
-        self.detector = detector
+        self.model_path = model_path
         self.token = token
         self.loop = asyncio.get_event_loop()
         self._stop_event = threading.Event()
@@ -87,6 +85,14 @@ class VideoStream:
         self.natural_width: Optional[int] = None
         self.natural_height: Optional[int] = None
         self._is_resuming = False
+
+        # 判断是否为多模态 (判断传入的源是否有分号或列表长度 >= 2)
+        self.is_multimodal = len(self.sources) >= 2
+        
+        # 只有多模态才初始化对齐缓冲区
+        if self.is_multimodal:
+            from app.services.alignment import RGBTAlignmentBuffer
+            self.alignment_buffer = RGBTAlignmentBuffer(max_tolerance_sec=0.05)
 
         # Initialize message queue for this task
         task_message_queues[task_id] = queue.Queue(maxsize=100)
@@ -250,19 +256,39 @@ class VideoStream:
         self._retry_count = 0
         self._cap_opened = False
 
-        # Start DirectHLSWriter for each source (zero-copy recording)
-        for idx, url in enumerate(self.sources):
-            channel = "rgb" if idx == 0 else "ir"
-            storage_manager.start_recording(self.task_id, url, channel=channel)
+        # --- MediaMTX Gateway Integration ---
+        # 记录实际使用的流地址，供后续线程使用
+        self._proxied_sources = []
 
-            t = threading.Thread(target=self._frame_grabber, args=(url, idx), daemon=True)
+        # Start DirectHLSWriter for each source (zero-copy recording)
+        for idx, raw_url in enumerate(self.sources):
+            # 1. 动态注册到流媒体网关，获取高可用内网地址
+            proxied_url = media_gateway.register_proxy(self.task_id, raw_url, idx)
+            self._proxied_sources.append(proxied_url)
+            
+            channel = "rgb" if idx == 0 else "ir"
+            
+            # 2. 录制和抓流全部使用网关代理地址
+            writer = storage_manager.start_recording(self.task_id, proxied_url, channel=channel)
+            if not writer or writer.error_msg:
+                err = writer.error_msg if writer else "无法初始化 HLS 录像机"
+                logger.error(f"[VideoStream] {err} for channel {channel}")
+                # 标记错误但继续尝试启动抓图线程，看看能否保留检测功能
+                self._error_msg = f"视频源连接成功但画面转换失败: {err}"
+
+            t = threading.Thread(target=self._frame_grabber, args=(proxied_url, idx), daemon=True)
             t.start()
 
-        t_detect = threading.Thread(target=self._grab_and_detect, daemon=True)
-        t_detect.start()
+        # [新增] 根据模态类型，启动不同的投递线程
+        if self.is_multimodal:
+            t_dispatch = threading.Thread(target=self._alignment_and_dispatch_dual, daemon=True)
+        else:
+            t_dispatch = threading.Thread(target=self._dispatch_single, daemon=True)
+            
+        t_dispatch.start()
 
         self._grabbers_started = True
-        logger.info(f"[VideoStream] Grabbers & Detectors started for task {self.task_id}")
+        logger.info(f"[VideoStream] Grabbers & Dispatchers started for task {self.task_id} using Gateway")
 
     def stop(self) -> None:
         if self._stop_event.is_set():
@@ -271,13 +297,125 @@ class VideoStream:
         self._is_resuming = True
 
         storage_manager.stop_recording(self.task_id)
-        self.detector = None
+
+        # --- MediaMTX Gateway Cleanup ---
+        # 注销网关通道，释放摄像头连接资源
+        media_gateway.unregister_proxy(self.task_id, len(self.sources))
 
         # Clean up message queue
         if self.task_id in task_message_queues:
             del task_message_queues[self.task_id]
 
         logger.info(f"[VideoStream] Terminal Stop initiated for task {self.task_id}")
+
+    # --- 投递逻辑 1：单模态极速投递 (JPEG 压缩) ---
+    def _dispatch_single(self):
+        from app.services.task_runner import stream_manager
+        last_detect_time = 0
+        while not self._stop_event.is_set():
+            now = time.time()
+            fps_target = self.detection_config.get("fps", 25) if self.detection_config else 25
+
+            if fps_target > 0 and (now - last_detect_time) < (1.0 / fps_target):
+                time.sleep(0.01)
+                continue
+
+            frame = None
+            with self._lock:
+                if self._latest_frames[0] is not None:
+                    frame = self._latest_frames[0].copy()
+                    
+            if frame is not None:
+                # JPEG 极速压缩 (质量85，兼顾速度和精度)
+                ret, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ret:
+                    payload = (
+                        self.task_id, now, self.model_path, 
+                        self.label_mapping, 0.25, encoded_img.tobytes()
+                    )
+                    try:
+                        stream_manager.global_inference_in_q.put_nowait(payload)
+                        last_detect_time = now
+                    except queue.Full:
+                        pass # 队列满则天然跳帧
+            time.sleep(0.01)
+
+    # --- 投递逻辑 2：多模态对齐投递 (JPEG 压缩) ---
+    def _alignment_and_dispatch_dual(self):
+        from app.services.task_runner import stream_manager
+        last_detect_time = 0
+        while not self._stop_event.is_set():
+            now = time.time()
+            fps_target = self.detection_config.get("fps", 25) if self.detection_config else 25
+
+            if fps_target > 0 and (now - last_detect_time) < (1.0 / fps_target):
+                time.sleep(0.01)
+                continue
+
+            pair = self.alignment_buffer.get_aligned_pair()
+            if pair:
+                frame_timestamp, f_rgb, f_ir = pair
+                # 分别压缩
+                ret1, enc_rgb = cv2.imencode('.jpg', f_rgb, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                ret2, enc_ir = cv2.imencode('.jpg', f_ir, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                
+                if ret1 and ret2:
+                    payload = (
+                        self.task_id, frame_timestamp, self.model_path, 
+                        self.label_mapping, 0.25, [enc_rgb.tobytes(), enc_ir.tobytes()]
+                    )
+                    try:
+                        stream_manager.global_inference_in_q.put_nowait(payload)
+                        last_detect_time = now
+                    except queue.Full:
+                        pass
+            else:
+                time.sleep(0.01)
+
+    # --- 接收与分发 (由 StreamManager 的全局 Dispatcher 调用) ---
+    def handle_inference_result(self, timestamp: float, raw_detections: list):
+        """运行在主进程上下文，安全调用 DB 和 WebSocket"""
+        if self._stop_event.is_set():
+            return
+        
+        # 转换原始结果为 Detection 对象列表 (如果需要)
+        from app.services.detector import Detection
+        detections = []
+        for d in raw_detections:
+            if isinstance(d, dict):
+                detections.append(Detection(**d))
+            else:
+                detections.append(d)
+
+        # 应用过滤配置
+        filtered = self._apply_detection_config(detections, self.detection_config)
+        
+        if filtered:
+            current_abs_time = int(timestamp * 1000)
+            
+            # 1. 保存到数据库
+            self._save_detection_records_sync(filtered, current_abs_time)
+
+            # 2. 构造 WebSocket 消息并推送
+            payload = {
+                "task_id": self.task_id,
+                "timestamp": current_abs_time,
+                "boxes": [
+                    {
+                        "x": float(d.box[0]),
+                        "y": float(d.box[1]),
+                        "w": float(d.box[2] - d.box[0]),
+                        "h": float(d.box[3] - d.box[1]),
+                        "conf": float(d.confidence),
+                        "label": d.class_name,
+                    }
+                    for d in filtered
+                ],
+                "is_history": False,
+            }
+            self._push_to_message_queue(payload)
+            self._latest_results = filtered
+            self._last_results_time = timestamp
 
     def _frame_grabber(self, source_url: str, idx: int):
         cap = None
@@ -318,7 +456,6 @@ class VideoStream:
                     self._broadcast_ws("connecting", "正在连接...")
 
                 try:
-                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|threads;1"
                     cap = cv2.VideoCapture(source_url, cv2.CAP_FFMPEG)
                     if cap.isOpened():
                         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -326,6 +463,10 @@ class VideoStream:
                         self._cap_opened = True
                         self._retry_count = 0
                         consecutive_corrupt = 0
+                        
+                        # 核心修复：连接成功后必须广播 running 状态，前端才会切换 UI 并初始化播放器
+                        self._broadcast_ws("running", "视频源已连接，正在准备画面...")
+                        logger.info(f"[VideoStream] Broadcasted 'running' status for task {self.task_id}")
                 except Exception as e:
                     logger.error(f"[VideoStream] OpenCV failed to open {source_url}: {e}")
                     cap = None
@@ -335,22 +476,36 @@ class VideoStream:
             try:
                 ret, img = cap.read()
                 if not ret:
-                    logger.warning("[VideoStream] Stream read failed, reconnecting...")
-                    if cap:
-                        cap.release()
-                    cap = None
-                    self._cap_opened = False
+                    logger.warning(f"[VideoStream {self.task_id}] Failed to read frame from {source_url}")
+                    time.sleep(0.5)
                     continue
+
+                now = time.time()
+                
+                # [核心修改点]: 根据模态类型处理帧
+                if self.is_multimodal:
+                    # 多模态：压入对齐缓冲区
+                    if idx == 0:
+                        self.alignment_buffer.add_rgb(now, img)
+                    else:
+                        self.alignment_buffer.add_ir(now, img)
+                else:
+                    # 单模态：直接覆盖最新帧
+                    with self._lock:
+                        self._latest_frames[0] = img
+                        self._last_frame_time = now
+                    
+                self._ret = True
 
                 if self._stop_event.is_set():
                     break
 
                 if self._is_corrupted_frame(img):
                     consecutive_corrupt += 1
+                    if consecutive_corrupt % 30 == 0: # 减少日志量
+                        logger.warning(f"[VideoStream {self.task_id}] Received {consecutive_corrupt} corrupted frames")
                     if consecutive_corrupt >= max_consecutive_corrupt:
-                        logger.warning(
-                            f"[VideoStream] {consecutive_corrupt} consecutive corrupt frames, reconnecting..."
-                        )
+                        logger.warning(f"[VideoStream {self.task_id}] Too many corrupt frames, reconnecting...")
                         if cap:
                             cap.release()
                         cap = None
@@ -359,6 +514,8 @@ class VideoStream:
                     continue
 
                 consecutive_corrupt = 0
+                if idx == 0 and not self._ret:
+                     logger.info(f"[VideoStream {self.task_id}] SUCCESS: First valid frame received from source_0")
 
                 now = time.time()
                 h, w = img.shape[:2]
@@ -587,6 +744,10 @@ class VideoStream:
                 has_frame = False
                 with self._lock:
                     has_frame = self._ret and self._latest_frames[0] is not None
+                
+                if has_frame and not hasattr(self, '_first_frame_logged'):
+                    logger.info(f"[VideoStream {self.task_id}] has_frame is now TRUE. Starting 'running' status cycle.")
+                    self._first_frame_logged = True
 
                 if not has_frame:
                     if now - last_heartbeat >= heartbeat_interval:
@@ -605,6 +766,7 @@ class VideoStream:
                             payload = {"type": self.MSG_CONNECTING}
 
                         try:
+                            logger.debug(f"[VideoStream WS] Sending periodic status: {payload['type']}")
                             await websocket.send_text(json.dumps(payload))
                         except Exception:
                             break

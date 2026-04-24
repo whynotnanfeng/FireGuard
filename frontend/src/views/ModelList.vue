@@ -136,14 +136,24 @@
       </a-table>
 
       <div class="pagination-wrap" v-if="totalFiltered > 0">
-        <span class="pagination-info">共 {{ totalFiltered }} 条</span>
-        <a-pagination
+        <span class="pagination-info">
+          第 {{ page }}/{{ totalPages }} 页，共 {{ totalFiltered }} 条
+        </span>
+        <a-select 
+          v-model:value="pageSize" 
+          size="small" 
+          @change="onPageSizeChange" 
+          class="page-size-select"
+        >
+          <a-select-option :value="10">10 条/页</a-select-option>
+          <a-select-option :value="20">20 条/页</a-select-option>
+          <a-select-option :value="50">50 条/页</a-select-option>
+          <a-select-option :value="100">100 条/页</a-select-option>
+        </a-select>
+        <CustomPagination
           v-model:current="page"
-          v-model:pageSize="pageSize"
+          :pageSize="pageSize"
           :total="totalFiltered"
-          show-less-items
-          show-quick-jumper
-          @change="onPageChange"
         />
       </div>
     </div>
@@ -218,6 +228,7 @@ import { modelsApi, type DetectionModel } from '@/api/models'
 import { message, Modal } from 'ant-design-vue'
 import { CloudUploadOutlined, ReloadOutlined, DownOutlined, UpOutlined } from '@ant-design/icons-vue'
 import LabelMappingEditor from '@/components/LabelMappingEditor.vue'
+import CustomPagination from '@/components/CustomPagination.vue'
 import dayjs, { type Dayjs } from 'dayjs'
 
 const models = ref<DetectionModel[]>([])
@@ -258,6 +269,10 @@ const filtersExpanded = ref(false)
 const page = ref(1)
 const pageSize = ref(10)
 
+const totalFiltered = computed(() => filteredModels.value.length)
+const totalPages = computed(() => Math.ceil(totalFiltered.value / pageSize.value) || 1)
+
+
 const filteredModels = computed(() => {
   return models.value.filter(m => {
     if (filters.search && !m.name.toLowerCase().includes(filters.search.toLowerCase())) {
@@ -292,7 +307,6 @@ const filteredModels = computed(() => {
   })
 })
 
-const totalFiltered = computed(() => filteredModels.value.length)
 
 const pagedModels = computed(() => {
   const start = (page.value - 1) * pageSize.value
@@ -302,6 +316,10 @@ const pagedModels = computed(() => {
 
 function onPageChange() {
   // pagination component handles page/pageSize updates, computed recalculates
+}
+
+function onPageSizeChange() {
+  page.value = 1
 }
 
 function applyFilters() {
@@ -572,9 +590,14 @@ async function saveLabelUpdate() {
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   padding: 12px 0;
   flex-shrink: 0;
+}
+
+.page-size-select {
+  width: 95px;
+  margin-right: 4px;
 }
 .pagination-info {
   font-size: 13px;

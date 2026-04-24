@@ -7,7 +7,7 @@ export const useTaskStore = defineStore('task', () => {
   const total = ref(0)
   const loading = ref(false)
 
-  async function fetchTasks(params?: { skip?: number; limit?: number; status?: string; search?: string }) {
+  async function fetchTasks(params?: { skip?: number; limit?: number; status?: string; search?: string; task_type?: string; model_id?: string; description?: string; date_from?: string; date_to?: string }) {
     loading.value = true
     try {
       const res = await tasksApi.list(params)

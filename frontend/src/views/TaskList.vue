@@ -100,7 +100,7 @@
     <div class="table-wrapper">
       <a-table 
          :loading="taskStore.loading" 
-         :dataSource="pagedTasks" 
+         :dataSource="taskStore.tasks" 
          :columns="columns"
          :pagination="false"
          rowKey="id"
@@ -153,14 +153,25 @@
         </template>
       </a-table>
 
-      <div class="pagination-wrap" v-if="totalFiltered > 0">
-        <span class="pagination-info">共 {{ totalFiltered }} 条</span>
-        <a-pagination
+      <div class="pagination-wrap" v-if="taskStore.total > 0">
+        <span class="pagination-info">
+          第 {{ page }}/{{ totalPages }} 页，共 {{ taskStore.total }} 条
+        </span>
+        <a-select 
+          v-model:value="pageSize" 
+          size="small" 
+          @change="onPageSizeChange" 
+          class="page-size-select"
+        >
+          <a-select-option :value="10">10 条/页</a-select-option>
+          <a-select-option :value="20">20 条/页</a-select-option>
+          <a-select-option :value="50">50 条/页</a-select-option>
+          <a-select-option :value="100">100 条/页</a-select-option>
+        </a-select>
+        <CustomPagination
           v-model:current="page"
-          v-model:pageSize="pageSize"
-          :total="totalFiltered"
-          show-less-items
-          show-quick-jumper
+          :pageSize="pageSize"
+          :total="taskStore.total"
           @change="onPageChange"
         />
       </div>
@@ -210,6 +221,7 @@ import TaskCreate from './TaskCreate.vue'
 import DetectionConfig from '@/components/DetectionConfig.vue'
 import ResultViewer from '@/components/ResultViewer.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
+import CustomPagination from '@/components/CustomPagination.vue'
 import { message } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, DownOutlined, UpOutlined } from '@ant-design/icons-vue'
 import dayjs, { type Dayjs } from 'dayjs'
@@ -218,6 +230,8 @@ const taskStore = useTaskStore()
 
 const page = ref(1)
 const pageSize = ref(10)
+
+const totalPages = computed(() => Math.ceil(taskStore.total / pageSize.value) || 1)
 const filters = reactive({ 
   status: undefined as string | undefined,
   task_type: undefined as string | undefined,
@@ -241,6 +255,7 @@ watch(showResult, (val) => {
 })
 
 const typeMap: any = { image: '图片', video: '视频', stream: '流媒体' }
+
 
 const columns = [
   { title: '任务名称', dataIndex: 'name', key: 'name', width: 180, ellipsis: true },
@@ -268,49 +283,18 @@ function canExecute(record: any): boolean {
   return ['pending', 'exception', 'failed'].includes(record.status)
 }
 
-const filteredTasks = computed(() => {
-  return taskStore.tasks.filter(t => {
-    if (filters.search && !t.name.toLowerCase().includes(filters.search.toLowerCase())) {
-      return false
-    }
-    if (filters.status && t.status !== filters.status) {
-      return false
-    }
-    if (filters.task_type && t.task_type !== filters.task_type) {
-      return false
-    }
-    if (filters.model_id && t.model_id !== filters.model_id) {
-      return false
-    }
-    if (filters.description && !t.description.toLowerCase().includes(filters.description.toLowerCase())) {
-      return false
-    }
-    if (filters.dateRange && filters.dateRange.length === 2) {
-      const created = new Date(t.created_at).getTime()
-      const start = filters.dateRange[0].startOf('day').valueOf()
-      const end = filters.dateRange[1].endOf('day').valueOf()
-      if (created < start || created > end) {
-        return false
-      }
-    }
-    return true
-  })
-})
-
-const totalFiltered = computed(() => filteredTasks.value.length)
-
-const pagedTasks = computed(() => {
-  const start = (page.value - 1) * pageSize.value
-  const end = start + pageSize.value
-  return filteredTasks.value.slice(start, end)
-})
-
 function onPageChange() {
-  // pagination component handles page/pageSize updates
+  loadData()
+}
+
+function onPageSizeChange() {
+  page.value = 1
+  loadData()
 }
 
 function applyFilters() {
   page.value = 1
+  loadData()
 }
 
 function onSearchChange() {
@@ -325,6 +309,7 @@ function resetFilters() {
   filters.description = ''
   filters.dateRange = undefined
   page.value = 1
+  loadData()
 }
 
 const modelOptions = ref<any[]>([])
@@ -348,7 +333,12 @@ async function loadData() {
         skip: (page.value - 1) * pageSize.value,
         limit: pageSize.value,
         status: filters.status || undefined,
-        search: filters.search || undefined
+        search: filters.search || undefined,
+        task_type: filters.task_type || undefined,
+        model_id: filters.model_id || undefined,
+        description: filters.description || undefined,
+        date_from: filters.dateRange ? filters.dateRange[0].toISOString() : undefined,
+        date_to: filters.dateRange ? filters.dateRange[1].toISOString() : undefined
       })
     } catch (e) {
       console.error('Failed to reload task list', e)
@@ -557,9 +547,14 @@ function handleConfig(row: any) {
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   padding: 12px 0;
   flex-shrink: 0;
+}
+
+.page-size-select {
+  width: 95px;
+  margin-right: 4px;
 }
 
 .pagination-info {
