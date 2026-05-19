@@ -54,6 +54,27 @@
             </a-form-item>
           </div>
           
+          <div v-if="form.model_id" class="inference-device-section">
+            <a-form-item label="推理设备" class="device-item">
+              <a-radio-group v-model:value="form.use_gpu">
+                <a-radio :value="false">CPU 推理</a-radio>
+                <a-radio :value="true" :disabled="!gpuAvailable && !gpuChecking">GPU 推理</a-radio>
+              </a-radio-group>
+              <a-button 
+                size="small" 
+                @click="checkGpuStatus" 
+                :loading="gpuChecking"
+                style="margin-left: 8px"
+              >
+                <template #icon><ThunderboltOutlined /></template>
+                {{ gpuAvailable ? '重新检测 GPU' : '检测 GPU 状态' }}
+              </a-button>
+              <div v-if="gpuStatusMsg" class="gpu-status-msg" :class="{ 'gpu-ok': gpuAvailable, 'gpu-fail': !gpuAvailable }">
+                {{ gpuStatusMsg }}
+              </div>
+            </a-form-item>
+          </div>
+          
           <div v-if="form.model_id" class="detection-config-section">
             <div class="config-header">
               <span class="config-title">检测配置</span>
@@ -180,7 +201,8 @@ import {
   VideoCameraOutlined,
   CheckCircleOutlined,
   InfoCircleOutlined,
-  SettingOutlined 
+  SettingOutlined,
+  ThunderboltOutlined 
 } from '@ant-design/icons-vue'
 import DetectionConfig from '@/components/DetectionConfig.vue'
 
@@ -214,6 +236,7 @@ interface TaskForm {
   source_type: 'upload' | 'url' | 'rtsp'
   source_url: string
   description: string
+  use_gpu: boolean
 }
 
 const form = reactive<TaskForm>({
@@ -223,8 +246,13 @@ const form = reactive<TaskForm>({
   model_id: '',
   source_type: 'upload',
   source_url: '',
-  description: ''
+  description: '',
+  use_gpu: false
 })
+
+const gpuAvailable = ref(false)
+const gpuChecking = ref(false)
+const gpuStatusMsg = ref('')
 
 const allowedSourceTypes = computed(() => {
   const types = { upload: true, url: true, rtsp: true }
@@ -287,6 +315,7 @@ onMounted(async () => {
     } finally {
         loadingModels.value = false
     }
+    await checkGpuStatus()
 })
 
 const filteredModels = computed(() => {
@@ -359,6 +388,25 @@ function onFileChange(e: Event, type: 'rgb'|'ir') {
     }
 }
 
+async function checkGpuStatus() {
+  gpuChecking.value = true
+  gpuStatusMsg.value = ''
+  try {
+    const res = await taskStore.checkGpuStatus()
+    gpuAvailable.value = res.available
+    if (res.available) {
+      gpuStatusMsg.value = `GPU就绪: ${res.checks.device_name || '未知'}, 显存: ${res.checks.vram_mb || 0}MB`
+    } else {
+      gpuStatusMsg.value = `GPU不可用: ${res.reason || '环境不满足要求'}`
+    }
+  } catch (e: any) {
+    gpuAvailable.value = false
+    gpuStatusMsg.value = `GPU检测失败: ${e?.message || '未知错误'}`
+  } finally {
+    gpuChecking.value = false
+  }
+}
+
 async function submit() {
     if (!formRef.value) return
     try {
@@ -385,15 +433,18 @@ async function submit() {
     fd.append('model_id', form.model_id)
     fd.append('source_type', form.source_type)
     fd.append('description', form.description)
+    fd.append('use_gpu', String(form.use_gpu))
     
     const selectedCategoryIds = categories.value.filter(c => c.selected).map(c => c.id)
-    fd.append('enabled_classes', JSON.stringify(selectedCategoryIds))
+    if (selectedCategoryIds.length > 0) {
+        fd.append('enabled_classes', JSON.stringify(selectedCategoryIds))
+    }
     fd.append('threshold', String(globalThreshold.value))
     
     const categoryThresholds: Record<string, number> = {}
     categories.value.forEach(cat => {
         if (cat.selected && cat.threshold !== null) {
-            categoryThresholds[cat.id] = cat.threshold / 100
+            categoryThresholds[cat.id] = cat.threshold
         }
     })
     if (Object.keys(categoryThresholds).length > 0) {
@@ -590,6 +641,42 @@ function handleDetectionConfigSuccess(config: any) {
 
 .placeholder-content .icon {
   font-size: 24px;
+}
+
+.inference-device-section {
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
+.device-item {
+  margin-bottom: 0;
+}
+
+.device-item :deep(.ant-form-item-label) {
+  margin-bottom: 8px;
+}
+
+.gpu-status-msg {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.gpu-status-msg.gpu-ok {
+  background: rgba(82, 196, 26, 0.1);
+  color: #52c41a;
+  border: 1px solid rgba(82, 196, 26, 0.3);
+}
+
+.gpu-status-msg.gpu-fail {
+  background: rgba(255, 77, 79, 0.1);
+  color: #ff4d4f;
+  border: 1px solid rgba(255, 77, 79, 0.3);
 }
 
 .detection-config-section {

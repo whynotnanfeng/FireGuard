@@ -1,0 +1,1665 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FireGuard - 任务查看窗口设计方案 v2</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --blue-50: #f0f5ff;
+            --blue-100: #d6e4ff;
+            --blue-200: #adc6ff;
+            --blue-500: #2f54eb;
+            --blue-600: #1d39c4;
+            --green-50: #f6ffed;
+            --green-500: #52c41a;
+            --green-600: #389e0d;
+            --orange-50: #fff7e6;
+            --orange-500: #fa8c16;
+            --orange-600: #d46b08;
+            --red-50: #fff1f0;
+            --red-500: #ff4d4f;
+            --red-600: #cf1322;
+            --gray-25: #fcfcfd;
+            --gray-50: #f9fafb;
+            --gray-100: #f2f4f7;
+            --gray-200: #eaecf0;
+            --gray-300: #d0d5dd;
+            --gray-400: #98a2b3;
+            --gray-500: #667085;
+            --gray-600: #475467;
+            --gray-700: #344054;
+            --gray-800: #1d2939;
+            --gray-900: #101828;
+            --shadow-xs: 0 1px 2px rgba(16,24,40,0.05);
+            --shadow-sm: 0 1px 3px rgba(16,24,40,0.1), 0 1px 2px rgba(16,24,40,0.06);
+            --shadow-md: 0 4px 8px -2px rgba(16,24,40,0.1), 0 2px 4px -2px rgba(16,24,40,0.06);
+            --shadow-lg: 0 12px 16px -4px rgba(16,24,40,0.08), 0 4px 6px -2px rgba(16,24,40,0.03);
+            --shadow-xl: 0 20px 24px -4px rgba(16,24,40,0.08), 0 8px 8px -4px rgba(16,24,40,0.03);
+            --radius-xs: 4px;
+            --radius-sm: 6px;
+            --radius-md: 8px;
+            --radius-lg: 12px;
+            --radius-xl: 16px;
+            --font-sans: 'DM Sans', 'Noto Sans SC', -apple-system, sans-serif;
+            --font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+            --transition-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+            --transition-slow: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--gray-25);
+            color: var(--gray-900);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 32px;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        .design-presentation {
+            width: 100%;
+            max-width: 1440px;
+        }
+
+        .presentation-header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        .presentation-header .eyebrow {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--blue-500);
+            margin-bottom: 8px;
+        }
+
+        .presentation-header h1 {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--gray-900);
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+
+        .presentation-header p {
+            font-size: 15px;
+            color: var(--gray-500);
+            max-width: 520px;
+            margin: 0 auto;
+            line-height: 1.6;
+        }
+
+        .variant-tabs {
+            display: flex;
+            justify-content: center;
+            gap: 2px;
+            margin-bottom: 32px;
+            background: var(--gray-100);
+            padding: 4px;
+            border-radius: var(--radius-lg);
+            width: fit-content;
+            margin-left: auto;
+            margin-right: auto;
+            border: 1px solid var(--gray-200);
+        }
+
+        .variant-tab {
+            padding: 10px 28px;
+            border: none;
+            background: transparent;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--gray-500);
+            transition: all var(--transition-fast);
+            font-family: var(--font-sans);
+            position: relative;
+        }
+
+        .variant-tab:hover {
+            color: var(--gray-700);
+            background: var(--gray-50);
+        }
+
+        .variant-tab.active {
+            background: #fff;
+            color: var(--gray-900);
+            box-shadow: var(--shadow-xs);
+        }
+
+        .variant-panel { display: none; }
+        .variant-panel.active { display: block; }
+
+        .mockup-window {
+            background: #fff;
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow-xl);
+            overflow: hidden;
+            border: 1px solid var(--gray-200);
+        }
+
+        .window-titlebar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 24px;
+            border-bottom: 1px solid var(--gray-200);
+            background: var(--gray-50);
+        }
+
+        .window-titlebar-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .window-titlebar h2 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--gray-900);
+            letter-spacing: -0.2px;
+        }
+
+        .task-type-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 10px;
+            border-radius: 100px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .task-type-badge.image { background: var(--green-50); color: var(--green-600); }
+        .task-type-badge.video { background: var(--blue-50); color: var(--blue-600); }
+        .task-type-badge.stream { background: var(--orange-50); color: var(--orange-600); }
+
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--gray-600);
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+        }
+
+        .status-dot.running { background: var(--green-500); box-shadow: 0 0 0 3px rgba(82,196,26,0.2); animation: statusPulse 2s infinite; }
+        .status-dot.completed { background: var(--blue-500); }
+        .status-dot.failed { background: var(--red-500); }
+        .status-dot.paused { background: var(--orange-500); }
+
+        @keyframes statusPulse {
+            0%, 100% { box-shadow: 0 0 0 3px rgba(82,196,26,0.2); }
+            50% { box-shadow: 0 0 0 6px rgba(82,196,26,0.08); }
+        }
+
+        .window-titlebar-right {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .titlebar-btn {
+            width: 34px;
+            height: 34px;
+            border: 1px solid transparent;
+            background: transparent;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            color: var(--gray-400);
+            font-size: 16px;
+            transition: all var(--transition-fast);
+        }
+
+        .titlebar-btn:hover {
+            background: var(--gray-100);
+            color: var(--gray-700);
+            border-color: var(--gray-200);
+        }
+
+        .window-body {
+            display: flex;
+            height: 640px;
+        }
+
+        .media-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #0d1117;
+            position: relative;
+            min-width: 0;
+            overflow: hidden;
+        }
+
+        .media-viewport {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .media-placeholder {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: rgba(255,255,255,0.35);
+            font-size: 13px;
+            gap: 14px;
+        }
+
+        .media-placeholder .icon-placeholder {
+            width: 72px;
+            height: 72px;
+            border: 2px dashed rgba(255,255,255,0.15);
+            border-radius: var(--radius-lg);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 26px;
+            color: rgba(255,255,255,0.25);
+        }
+
+        .media-nav {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.08);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: rgba(255,255,255,0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+            font-size: 18px;
+            z-index: 10;
+        }
+
+        .media-nav:hover {
+            background: rgba(255,255,255,0.15);
+            color: #fff;
+            border-color: rgba(255,255,255,0.2);
+        }
+
+        .media-nav.prev { left: 16px; }
+        .media-nav.next { right: 16px; }
+
+        .media-dots {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 6px;
+            z-index: 10;
+        }
+
+        .media-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.25);
+            cursor: pointer;
+            transition: all var(--transition-base);
+        }
+
+        .media-dot.active {
+            background: #fff;
+            width: 20px;
+            border-radius: 3px;
+        }
+
+        .media-controls-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 20px;
+            background: rgba(13,17,23,0.95);
+            backdrop-filter: blur(16px);
+            border-top: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .media-controls-left,
+        .media-controls-center,
+        .media-controls-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .media-controls-center { flex: 1; justify-content: center; }
+
+        .ctrl-btn {
+            width: 34px;
+            height: 34px;
+            border: 1px solid rgba(255,255,255,0.08);
+            background: rgba(255,255,255,0.04);
+            border-radius: var(--radius-sm);
+            color: rgba(255,255,255,0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+            font-size: 14px;
+            font-family: var(--font-sans);
+        }
+
+        .ctrl-btn:hover {
+            background: rgba(255,255,255,0.1);
+            color: rgba(255,255,255,0.9);
+            border-color: rgba(255,255,255,0.15);
+        }
+
+        .ctrl-btn.primary {
+            background: var(--blue-500);
+            border-color: var(--blue-500);
+            color: #fff;
+        }
+
+        .ctrl-btn.primary:hover {
+            background: var(--blue-600);
+            border-color: var(--blue-600);
+        }
+
+        .live-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 12px;
+            background: rgba(255,77,79,0.12);
+            border: 1px solid rgba(255,77,79,0.25);
+            border-radius: 100px;
+            color: #ff6b6b;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        .live-badge .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #ff4d4f;
+            animation: statusPulse 1.5s infinite;
+        }
+
+        .history-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 12px;
+            background: rgba(47,84,235,0.1);
+            border: 1px solid rgba(47,84,235,0.2);
+            border-radius: 100px;
+            color: #5b8cff;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .seekbar-container {
+            padding: 12px 20px;
+            background: rgba(13,17,23,0.95);
+            border-top: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .seekbar-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: rgba(255,255,255,0.4);
+            margin-bottom: 8px;
+            font-family: var(--font-mono);
+            letter-spacing: 0.3px;
+        }
+
+        .seekbar-track {
+            width: 100%;
+            height: 5px;
+            background: rgba(255,255,255,0.08);
+            border-radius: 3px;
+            position: relative;
+            cursor: pointer;
+            overflow: hidden;
+        }
+
+        .seekbar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--blue-500), #85a5ff);
+            border-radius: 3px;
+            width: 48%;
+            position: relative;
+            transition: width 0.3s ease;
+        }
+
+        .seekbar-fill::after {
+            content: '';
+            position: absolute;
+            right: -6px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 1px 6px rgba(0,0,0,0.4);
+            opacity: 0;
+            transition: opacity var(--transition-fast);
+        }
+
+        .seekbar-track:hover .seekbar-fill::after { opacity: 1; }
+
+        .seekbar-segments {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            display: flex;
+        }
+
+        .seekbar-segment {
+            height: 100%;
+            background: rgba(82,196,26,0.35);
+            border-radius: 1px;
+        }
+
+        .info-panel {
+            width: 380px;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            background: #fff;
+            border-left: 1px solid var(--gray-200);
+        }
+
+        .info-panel-header {
+            padding: 18px 22px;
+            border-bottom: 1px solid var(--gray-100);
+            background: var(--gray-50);
+        }
+
+        .info-panel-header-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+
+        .info-file-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--gray-900);
+            font-family: var(--font-mono);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 240px;
+        }
+
+        .info-file-index {
+            font-size: 11px;
+            color: var(--gray-400);
+            background: var(--gray-50);
+            padding: 3px 10px;
+            border-radius: 100px;
+            border: 1px solid var(--gray-200);
+            font-family: var(--font-mono);
+            font-weight: 500;
+        }
+
+        .info-meta-row {
+            display: flex;
+            gap: 20px;
+            font-size: 11px;
+            color: var(--gray-400);
+        }
+
+        .info-meta-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .info-meta-item .label { color: var(--gray-400); }
+        .info-meta-item .value { color: var(--gray-600); font-weight: 600; }
+
+        .info-panel-body {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .info-panel-body::-webkit-scrollbar { width: 4px; }
+        .info-panel-body::-webkit-scrollbar-track { background: transparent; }
+        .info-panel-body::-webkit-scrollbar-thumb { background: var(--gray-200); border-radius: 2px; }
+
+        .info-section {
+            padding: 18px 22px;
+            border-bottom: 1px solid var(--gray-100);
+        }
+
+        .info-section:last-child { border-bottom: none; }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 14px;
+        }
+
+        .section-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--gray-700);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .section-title .icon-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--blue-500);
+        }
+
+        .section-badge {
+            font-size: 10px;
+            padding: 2px 8px;
+            background: var(--blue-50);
+            color: var(--blue-600);
+            border-radius: 100px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .stats-grid.three-col {
+            grid-template-columns: 1fr 1fr 1fr;
+        }
+
+        .stat-card {
+            background: var(--gray-50);
+            border: 1px solid var(--gray-100);
+            border-radius: var(--radius-md);
+            padding: 14px;
+            text-align: center;
+            transition: all var(--transition-fast);
+        }
+
+        .stat-card:hover {
+            border-color: var(--gray-200);
+            box-shadow: var(--shadow-xs);
+        }
+
+        .stat-card .value {
+            font-size: 26px;
+            font-weight: 700;
+            color: var(--gray-900);
+            line-height: 1;
+            margin-bottom: 6px;
+            font-family: var(--font-mono);
+            letter-spacing: -1px;
+        }
+
+        .stat-card .label {
+            font-size: 11px;
+            color: var(--gray-400);
+            font-weight: 500;
+        }
+
+        .stat-card.accent .value { color: var(--blue-500); }
+        .stat-card.success .value { color: var(--green-500); }
+        .stat-card.warning .value { color: var(--orange-500); }
+        .stat-card.danger .value { color: var(--red-500); }
+
+        .category-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .category-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .category-name {
+            width: 56px;
+            font-size: 12px;
+            color: var(--gray-600);
+            font-weight: 500;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .category-bar-bg {
+            flex: 1;
+            height: 6px;
+            background: var(--gray-100);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .category-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--blue-500), #85a5ff);
+            border-radius: 3px;
+            transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .category-count {
+            width: 32px;
+            font-size: 11px;
+            color: var(--gray-500);
+            text-align: right;
+            font-family: var(--font-mono);
+            font-weight: 600;
+        }
+
+        .tag-cloud {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .tag-item {
+            display: inline-flex;
+            align-items: center;
+            background: var(--gray-50);
+            border: 1px solid var(--gray-100);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+            font-size: 11px;
+            transition: all var(--transition-fast);
+        }
+
+        .tag-item:hover {
+            border-color: var(--gray-200);
+            box-shadow: var(--shadow-xs);
+        }
+
+        .tag-label {
+            padding: 4px 10px;
+            background: rgba(47,84,235,0.06);
+            color: var(--blue-600);
+            font-weight: 600;
+        }
+
+        .tag-count {
+            padding: 4px 10px;
+            color: var(--gray-600);
+            font-family: var(--font-mono);
+            font-weight: 500;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 20px;
+            color: var(--gray-300);
+            font-size: 12px;
+            font-style: italic;
+        }
+
+        .detection-events {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .event-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--gray-50);
+            transition: background var(--transition-fast);
+        }
+
+        .event-item:last-child { border-bottom: none; }
+        .event-item:hover { background: var(--gray-25); margin: 0 -22px; padding: 12px 22px; }
+
+        .event-time {
+            font-size: 11px;
+            font-family: var(--font-mono);
+            color: var(--gray-400);
+            white-space: nowrap;
+            padding-top: 1px;
+            min-width: 56px;
+        }
+
+        .event-content { flex: 1; min-width: 0; }
+
+        .event-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            margin-bottom: 5px;
+        }
+
+        .event-tag {
+            font-size: 10px;
+            padding: 2px 8px;
+            background: var(--blue-50);
+            color: var(--blue-600);
+            border-radius: 100px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
+        }
+
+        .event-tag.high {
+            background: var(--red-50);
+            color: var(--red-600);
+        }
+
+        .event-confidence {
+            font-size: 10px;
+            color: var(--gray-400);
+            font-family: var(--font-mono);
+        }
+
+        .event-pagination {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 2px;
+            padding: 12px 0 0;
+        }
+
+        .page-btn {
+            width: 28px;
+            height: 28px;
+            border: 1px solid var(--gray-200);
+            background: #fff;
+            border-radius: var(--radius-xs);
+            font-size: 11px;
+            color: var(--gray-500);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all var(--transition-fast);
+            font-family: var(--font-mono);
+            font-weight: 500;
+        }
+
+        .page-btn:hover {
+            border-color: var(--blue-500);
+            color: var(--blue-500);
+            background: var(--blue-50);
+        }
+
+        .page-btn.active {
+            background: var(--blue-500);
+            border-color: var(--blue-500);
+            color: #fff;
+        }
+
+        .info-panel-footer {
+            padding: 14px 22px;
+            border-top: 1px solid var(--gray-100);
+            display: flex;
+            gap: 8px;
+            background: var(--gray-50);
+        }
+
+        .footer-btn {
+            flex: 1;
+            padding: 9px 14px;
+            border: 1px solid var(--gray-200);
+            background: #fff;
+            border-radius: var(--radius-sm);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--gray-600);
+            cursor: pointer;
+            transition: all var(--transition-fast);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            font-family: var(--font-sans);
+            letter-spacing: -0.1px;
+        }
+
+        .footer-btn:hover {
+            border-color: var(--gray-300);
+            background: var(--gray-50);
+            color: var(--gray-800);
+        }
+
+        .footer-btn.primary {
+            background: var(--blue-500);
+            color: #fff;
+            border-color: var(--blue-500);
+        }
+
+        .footer-btn.primary:hover {
+            background: var(--blue-600);
+            border-color: var(--blue-600);
+        }
+
+        .footer-btn.danger {
+            background: #fff;
+            color: var(--red-500);
+            border-color: var(--red-500);
+        }
+
+        .footer-btn.danger:hover {
+            background: var(--red-50);
+        }
+
+        .design-notes {
+            margin-top: 36px;
+            background: #fff;
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow-md);
+            border: 1px solid var(--gray-200);
+            overflow: hidden;
+        }
+
+        .design-notes-header {
+            padding: 18px 24px;
+            background: var(--gray-50);
+            border-bottom: 1px solid var(--gray-200);
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--gray-900);
+            letter-spacing: -0.2px;
+        }
+
+        .design-notes-body {
+            padding: 24px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .note-card {
+            padding: 20px;
+            background: var(--gray-50);
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--gray-100);
+        }
+
+        .note-card h4 {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--gray-900);
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            letter-spacing: -0.2px;
+        }
+
+        .note-card h4 .dot-indicator {
+            width: 8px; height: 8px; border-radius: 50%;
+        }
+
+        .note-card h4 .dot-indicator.blue { background: var(--blue-500); }
+        .note-card h4 .dot-indicator.green { background: var(--green-500); }
+        .note-card h4 .dot-indicator.orange { background: var(--orange-500); }
+        .note-card h4 .dot-indicator.red { background: var(--red-500); }
+
+        .note-card p { font-size: 12px; color: var(--gray-500); line-height: 1.7; }
+
+        .note-card ul { list-style: none; padding: 0; }
+        .note-card ul li {
+            font-size: 12px; color: var(--gray-500); padding: 4px 0; padding-left: 18px; position: relative; line-height: 1.6;
+        }
+        .note-card ul li::before {
+            content: ''; position: absolute; left: 0; top: 11px;
+            width: 6px; height: 6px; border-radius: 50%; background: var(--gray-300);
+        }
+
+        .color-palette { display: flex; gap: 8px; margin-top: 10px; }
+        .color-swatch {
+            width: 36px; height: 36px; border-radius: var(--radius-sm);
+            border: 1px solid var(--gray-200); box-shadow: var(--shadow-xs);
+        }
+
+        .design-features {
+            margin-top: 24px;
+            background: #fff;
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow-md);
+            border: 1px solid var(--gray-200);
+            overflow: hidden;
+        }
+
+        .design-features-header {
+            padding: 18px 24px;
+            background: var(--gray-50);
+            border-bottom: 1px solid var(--gray-200);
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--gray-900);
+            letter-spacing: -0.2px;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            padding: 24px;
+        }
+
+        .feature-card {
+            padding: 20px;
+            background: var(--gray-50);
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--gray-100);
+            text-align: center;
+            transition: all var(--transition-base);
+        }
+
+        .feature-card:hover {
+            border-color: var(--gray-200);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .feature-icon {
+            width: 44px; height: 44px;
+            border-radius: var(--radius-md);
+            background: var(--blue-50);
+            color: var(--blue-500);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px; margin: 0 auto 12px;
+        }
+
+        .feature-card h4 {
+            font-size: 13px; font-weight: 700; color: var(--gray-900);
+            margin-bottom: 6px; letter-spacing: -0.2px;
+        }
+
+        .feature-card p {
+            font-size: 11px; color: var(--gray-400); line-height: 1.6;
+        }
+
+        .comparison-table {
+            margin-top: 24px;
+            background: #fff;
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow-md);
+            border: 1px solid var(--gray-200);
+            overflow: hidden;
+        }
+
+        .comparison-table-header {
+            padding: 18px 24px;
+            background: var(--gray-50);
+            border-bottom: 1px solid var(--gray-200);
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--gray-900);
+            letter-spacing: -0.2px;
+        }
+
+        .comparison-table-body { padding: 0; }
+
+        .comp-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .comp-table th {
+            text-align: left;
+            padding: 12px 24px;
+            background: var(--gray-25);
+            border-bottom: 1px solid var(--gray-200);
+            font-weight: 700;
+            color: var(--gray-600);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .comp-table td {
+            padding: 14px 24px;
+            border-bottom: 1px solid var(--gray-100);
+            color: var(--gray-600);
+            line-height: 1.6;
+        }
+
+        .comp-table tr:last-child td { border-bottom: none; }
+
+        .comp-table .improvement {
+            color: var(--green-600);
+            font-weight: 600;
+        }
+
+        .comp-table .highlight {
+            color: var(--blue-600);
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="design-presentation">
+        <div class="presentation-header">
+            <div class="eyebrow">Design Proposal v2</div>
+            <h1>任务查看窗口 - 设计方案</h1>
+            <p>FireGuard 检测平台 | 左媒体 / 右信息 | 浅色工业风 · 专业监控级交互</p>
+        </div>
+
+        <div class="variant-tabs">
+            <button class="variant-tab active" onclick="switchTab('image')">图像任务</button>
+            <button class="variant-tab" onclick="switchTab('video')">视频任务</button>
+            <button class="variant-tab" onclick="switchTab('stream')">视频流任务</button>
+        </div>
+
+        <!-- ==================== IMAGE TASK ==================== -->
+        <div class="variant-panel active" id="panel-image">
+            <div class="mockup-window">
+                <div class="window-titlebar">
+                    <div class="window-titlebar-left">
+                        <h2>仓库监控-夜间巡检</h2>
+                        <span class="task-type-badge image">IMAGE</span>
+                        <span class="status-indicator">
+                            <span class="status-dot completed"></span>已完成
+                        </span>
+                    </div>
+                    <div class="window-titlebar-right">
+                        <div class="titlebar-btn" title="全屏 (F)">&#x26F6;</div>
+                        <div class="titlebar-btn" title="关闭 (Esc)">&times;</div>
+                    </div>
+                </div>
+                <div class="window-body">
+                    <div class="media-panel">
+                        <div class="media-viewport">
+                            <div class="media-placeholder">
+                                <div class="icon-placeholder">&#x25A3;</div>
+                                <span>annotated_warehouse_01.jpg</span>
+                                <span style="font-size:11px; opacity:0.5;">1920 &times; 1080 &middot; 标注结果预览</span>
+                            </div>
+                            <div class="media-nav prev">&lsaquo;</div>
+                            <div class="media-nav next">&rsaquo;</div>
+                            <div class="media-dots">
+                                <span class="media-dot"></span>
+                                <span class="media-dot active"></span>
+                                <span class="media-dot"></span>
+                                <span class="media-dot"></span>
+                                <span class="media-dot"></span>
+                            </div>
+                        </div>
+                        <div class="media-controls-bar">
+                            <div class="media-controls-left">
+                                <span style="color:rgba(255,255,255,0.4); font-size:12px; font-family:var(--font-mono);">2 / 23</span>
+                            </div>
+                            <div class="media-controls-center"></div>
+                            <div class="media-controls-right">
+                                <button class="ctrl-btn" title="放大 (Z)">&oplus;</button>
+                                <button class="ctrl-btn" title="适应窗口 (0)">&#x21F1;</button>
+                                <button class="ctrl-btn" title="下载 (Ctrl+D)">&darr;</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="info-panel">
+                        <div class="info-panel-header">
+                            <div class="info-panel-header-top">
+                                <span class="info-file-name">annotated_warehouse_01.jpg</span>
+                                <span class="info-file-index">2 / 23</span>
+                            </div>
+                            <div class="info-meta-row">
+                                <span class="info-meta-item"><span class="label">模型</span> <span class="value">YOLOv8-Fire</span></span>
+                                <span class="info-meta-item"><span class="label">通道</span> <span class="value">RGB</span></span>
+                                <span class="info-meta-item"><span class="label">分辨率</span> <span class="value">1920&times;1080</span></span>
+                            </div>
+                        </div>
+                        <div class="info-panel-body">
+                            <div class="info-section">
+                                <div class="section-header">
+                                    <span class="section-title"><span class="icon-dot"></span>检测概览</span>
+                                </div>
+                                <div class="stats-grid">
+                                    <div class="stat-card accent">
+                                        <div class="value">5</div>
+                                        <div class="label">当前帧目标</div>
+                                    </div>
+                                    <div class="stat-card success">
+                                        <div class="value">47</div>
+                                        <div class="label">累计目标数</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="info-section">
+                                <div class="section-header">
+                                    <span class="section-title"><span class="icon-dot"></span>当前帧类别</span>
+                                    <span class="section-badge">3 类</span>
+                                </div>
+                                <div class="tag-cloud">
+                                    <span class="tag-item"><span class="tag-label">火焰</span><span class="tag-count">2</span></span>
+                                    <span class="tag-item"><span class="tag-label">烟雾</span><span class="tag-count">2</span></span>
+                                    <span class="tag-item"><span class="tag-label">人员</span><span class="tag-count">1</span></span>
+                                </div>
+                            </div>
+                            <div class="info-section">
+                                <div class="section-header">
+                                    <span class="section-title"><span class="icon-dot"></span>累计类别分布</span>
+                                </div>
+                                <div class="category-list">
+                                    <div class="category-item">
+                                        <span class="category-name">火焰</span>
+                                        <div class="category-bar-bg"><div class="category-bar" style="width:65%"></div></div>
+                                        <span class="category-count">28</span>
+                                    </div>
+                                    <div class="category-item">
+                                        <span class="category-name">烟雾</span>
+                                        <div class="category-bar-bg"><div class="category-bar" style="width:42%"></div></div>
+                                        <span class="category-count">15</span>
+                                    </div>
+                                    <div class="category-item">
+                                        <span class="category-name">人员</span>
+                                        <div class="category-bar-bg"><div class="category-bar" style="width:12%"></div></div>
+                                        <span class="category-count">4</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="info-panel-footer">
+                            <button class="footer-btn">&darr; 当前结果</button>
+                            <button class="footer-btn primary">&darr; 全部 ZIP</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== VIDEO TASK ==================== -->
+        <div class="variant-panel" id="panel-video">
+            <div class="mockup-window">
+                <div class="window-titlebar">
+                    <div class="window-titlebar-left">
+                        <h2>园区监控-日间录像分析</h2>
+                        <span class="task-type-badge video">VIDEO</span>
+                        <span class="status-indicator">
+                            <span class="status-dot completed"></span>已完成
+                        </span>
+                    </div>
+                    <div class="window-titlebar-right">
+                        <div class="titlebar-btn" title="全屏 (F)">&#x26F6;</div>
+                        <div class="titlebar-btn" title="关闭 (Esc)">&times;</div>
+                    </div>
+                </div>
+                <div class="window-body">
+                    <div class="media-panel">
+                        <div class="media-viewport">
+                            <div class="media-placeholder">
+                                <div class="icon-placeholder">&#x25B6;</div>
+                                <span>annotated_parking_lot_03.mp4</span>
+                                <span style="font-size:11px; opacity:0.5;">1920 &times; 1080 &middot; H.264 &middot; 05:12</span>
+                            </div>
+                            <div class="media-nav prev">&lsaquo;</div>
+                            <div class="media-nav next">&rsaquo;</div>
+                            <div class="media-dots">
+                                <span class="media-dot"></span>
+                                <span class="media-dot active"></span>
+                                <span class="media-dot"></span>
+                            </div>
+                        </div>
+                        <div class="seekbar-container">
+                            <div class="seekbar-label">
+                                <span>02:34.200</span>
+                                <span>05:12.000</span>
+                            </div>
+                            <div class="seekbar-track">
+                                <div class="seekbar-segments">
+                                    <div class="seekbar-segment" style="width:15%"></div>
+                                    <div class="seekbar-segment" style="width:10%; margin-left:20%"></div>
+                                    <div class="seekbar-segment" style="width:25%; margin-left:15%"></div>
+                                </div>
+                                <div class="seekbar-fill" style="width:48%"></div>
+                            </div>
+                        </div>
+                        <div class="media-controls-bar">
+                            <div class="media-controls-left">
+                                <span style="color:rgba(255,255,255,0.4); font-size:12px; font-family:var(--font-mono);">1 / 3</span>
+                            </div>
+                            <div class="media-controls-center">
+                                <button class="ctrl-btn primary" title="播放/暂停 (Space)">&#x25B6;</button>
+                            </div>
+                            <div class="media-controls-right">
+                                <button class="ctrl-btn" title="音量 (M)">&#x266B;</button>
+                                <button class="ctrl-btn" title="下载 (Ctrl+D)">&darr;</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="info-panel">
+                        <div class="info-panel-header">
+                            <div class="info-panel-header-top">
+                                <span class="info-file-name">annotated_parking_lot_03.mp4</span>
+                                <span class="info-file-index">1 / 3</span>
+                            </div>
+                            <div class="info-meta-row">
+                                <span class="info-meta-item"><span class="label">模型</span> <span class="value">YOLOv8-Fire</span></span>
+                                <span class="info-meta-item"><span class="label">通道</span> <span class="value">RGB + IR</span></span>
+                                <span class="info-meta-item"><span class="label">时长</span> <span class="value">05:12</span></span>
+                            </div>
+                        </div>
+                        <div class="info-panel-body">
+                            <div class="info-section">
+                                <div class="section-header">
+                                    <span class="section-title"><span class="icon-dot"></span>检测概览</span>
+                                </div>
+                                <div class="stats-grid">
+                                    <div class="stat-card accent">
+                                        <div class="value">12</div>
+                                        <div class="label">当前帧框</div>
+                                    </div>
+                                    <div class="stat-card success">
+                                        <div class="value">156</div>
+                                        <div class="label">累计帧框</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="info-section">
+                                <div class="section-header">
+                                    <span class="section-title"><span class="icon-dot"></span>当前帧类别</span>
+                                    <span class="section-badge">2 类</span>
+                                </div>
+                                <div class="tag-cloud">
+                                    <span class="tag-item"><span class="tag-label">火焰</span><span class="tag-count">8</span></span>
+                                    <span class="tag-item"><span class="tag-label">烟雾</span><span class="tag-count">4</span></span>
+                                </div>
+                            </div>
+                            <div class="info-section">
+                                <div class="section-header">
+                                    <span class="section-title"><span class="icon-dot"></span>累计类别分布</span>
+                                </div>
+                                <div class="category-list">
+                                    <div class="category-item">
+                                        <span class="category-name">火焰</span>
+                                        <div class="category-bar-bg"><div class="category-bar" style="width:72%"></div></div>
+                                        <span class="category-count">98</span>
+                                    </div>
+                                    <div class="category-item">
+                                        <span class="category-name">烟雾</span>
+                                        <div class="category-bar-bg"><div class="category-bar" style="width:38%"></div></div>
+                                        <span class="category-count">52</span>
+                                    </div>
+                                    <div class="category-item">
+                                        <span class="category-name">人员</span>
+                                        <div class="category-bar-bg"><div class="category-bar" style="width:5%"></div></div>
+                                        <span class="category-count">6</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="info-panel-footer">
+                            <button class="footer-btn">&darr; 当前结果</button>
+                            <button class="footer-btn primary">&darr; 全部 ZIP</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== STREAM TASK ==================== -->
+        <div class="variant-panel" id="panel-stream">
+            <div class="mockup-window">
+                <div class="window-titlebar">
+                    <div class="window-titlebar-left">
+                        <h2>车间实时监控-RTSP-01</h2>
+                        <span class="task-type-badge stream">STREAM</span>
+                        <span class="status-indicator">
+                            <span class="status-dot running"></span>运行中
+                        </span>
+                    </div>
+                    <div class="window-titlebar-right">
+                        <div class="titlebar-btn" title="全屏 (F)">&#x26F6;</div>
+                        <div class="titlebar-btn" title="关闭 (Esc)">&times;</div>
+                    </div>
+                </div>
+                <div class="window-body">
+                    <div class="media-panel">
+                        <div class="media-viewport">
+                            <div class="media-placeholder">
+                                <div class="icon-placeholder">&#x25C9;</div>
+                                <span>rtsp://192.168.1.100:554/stream</span>
+                                <span style="font-size:11px; opacity:0.5;">HLS &middot; 实时检测框叠加 &middot; 12.5 FPS</span>
+                            </div>
+                        </div>
+                        <div class="seekbar-container">
+                            <div class="seekbar-label">
+                                <span>01:23:45</span>
+                                <span>02:15:30</span>
+                            </div>
+                            <div class="seekbar-track">
+                                <div class="seekbar-segments">
+                                    <div class="seekbar-segment" style="width:20%"></div>
+                                    <div class="seekbar-segment" style="width:15%; margin-left:10%"></div>
+                                    <div class="seekbar-segment" style="width:30%; margin-left:5%"></div>
+                                </div>
+                                <div class="seekbar-fill" style="width:65%"></div>
+                            </div>
+                        </div>
+                        <div class="media-controls-bar">
+                            <div class="media-controls-left">
+                                <span class="live-badge"><span class="dot"></span>LIVE</span>
+                            </div>
+                            <div class="media-controls-center">
+                                <button class="ctrl-btn" title="暂停 (Space)">&#x23F8;</button>
+                                <button class="ctrl-btn" title="返回直播 (L)" style="margin-left:6px;">&#x27F2;</button>
+                                <button class="ctrl-btn" title="切换通道 (C)" style="margin-left:6px;">&#x21C4;</button>
+                            </div>
+                            <div class="media-controls-right">
+                                <span style="color:rgba(255,255,255,0.3); font-size:11px; font-family:var(--font-mono);">HLS</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="info-panel">
+                        <div class="info-panel-header">
+                            <div class="info-panel-header-top">
+                                <span class="info-file-name">实时检测事件</span>
+                                <span class="info-file-index" style="color:var(--green-500); border-color:rgba(82,196,26,0.2); background:var(--green-50);">运行中</span>
+                            </div>
+                            <div class="info-meta-row">
+                                <span class="info-meta-item"><span class="label">已运行</span> <span class="value">01:23:45</span></span>
+                                <span class="info-meta-item"><span class="label">FPS</span> <span class="value">12.5</span></span>
+                                <span class="info-meta-item"><span class="label">协议</span> <span class="value">HLS</span></span>
+                            </div>
+                        </div>
+                        <div class="info-panel-body">
+                            <div class="info-section">
+                                <div class="section-header">
+                                    <span class="section-title"><span class="icon-dot"></span>实时检测事件</span>
+                                    <span class="section-badge">128 条</span>
+                                </div>
+                                <div class="detection-events">
+                                    <div class="event-item">
+                                        <span class="event-time">14:32:05</span>
+                                        <div class="event-content">
+                                            <div class="event-tags">
+                                                <span class="event-tag high">火焰 96.2%</span>
+                                                <span class="event-tag">烟雾 88.5%</span>
+                                            </div>
+                                            <span class="event-confidence">Track #42 &middot; 置信度 0.96</span>
+                                        </div>
+                                    </div>
+                                    <div class="event-item">
+                                        <span class="event-time">14:32:03</span>
+                                        <div class="event-content">
+                                            <div class="event-tags">
+                                                <span class="event-tag">烟雾 72.1%</span>
+                                            </div>
+                                            <span class="event-confidence">Track #38 &middot; 置信度 0.72</span>
+                                        </div>
+                                    </div>
+                                    <div class="event-item">
+                                        <span class="event-time">14:32:01</span>
+                                        <div class="event-content">
+                                            <div class="event-tags">
+                                                <span class="event-tag high">火焰 91.8%</span>
+                                                <span class="event-tag">人员 65.3%</span>
+                                            </div>
+                                            <span class="event-confidence">Track #35 &middot; 置信度 0.92</span>
+                                        </div>
+                                    </div>
+                                    <div class="event-item">
+                                        <span class="event-time">14:31:58</span>
+                                        <div class="event-content">
+                                            <div class="event-tags">
+                                                <span class="event-tag">烟雾 58.4%</span>
+                                            </div>
+                                            <span class="event-confidence">Track #31 &middot; 置信度 0.58</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="event-pagination">
+                                    <button class="page-btn">&lsaquo;</button>
+                                    <button class="page-btn active">1</button>
+                                    <button class="page-btn">2</button>
+                                    <button class="page-btn">3</button>
+                                    <button class="page-btn">&hellip;</button>
+                                    <button class="page-btn">7</button>
+                                    <button class="page-btn">&rsaquo;</button>
+                                </div>
+                            </div>
+                            <div class="info-section">
+                                <div class="section-header">
+                                    <span class="section-title"><span class="icon-dot"></span>累计统计</span>
+                                </div>
+                                <div class="stats-grid three-col">
+                                    <div class="stat-card accent">
+                                        <div class="value">128</div>
+                                        <div class="label">总事件</div>
+                                    </div>
+                                    <div class="stat-card warning">
+                                        <div class="value">42</div>
+                                        <div class="label">高置信</div>
+                                    </div>
+                                    <div class="stat-card success">
+                                        <div class="value">3</div>
+                                        <div class="label">类别数</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="info-section">
+                                <div class="section-header">
+                                    <span class="section-title"><span class="icon-dot"></span>类别分布</span>
+                                </div>
+                                <div class="category-list">
+                                    <div class="category-item">
+                                        <span class="category-name">火焰</span>
+                                        <div class="category-bar-bg"><div class="category-bar" style="width:58%"></div></div>
+                                        <span class="category-count">74</span>
+                                    </div>
+                                    <div class="category-item">
+                                        <span class="category-name">烟雾</span>
+                                        <div class="category-bar-bg"><div class="category-bar" style="width:35%"></div></div>
+                                        <span class="category-count">45</span>
+                                    </div>
+                                    <div class="category-item">
+                                        <span class="category-name">人员</span>
+                                        <div class="category-bar-bg"><div class="category-bar" style="width:7%"></div></div>
+                                        <span class="category-count">9</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="info-panel-footer">
+                            <button class="footer-btn">&#x27F3; 刷新</button>
+                            <button class="footer-btn danger">&#x23F9; 停止任务</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== DESIGN DECISIONS ==================== -->
+        <div class="design-notes">
+            <div class="design-notes-header">设计决策说明 (Design Decisions)</div>
+            <div class="design-notes-body">
+                <div class="note-card">
+                    <h4><span class="dot-indicator blue"></span>色彩体系 (Color Palette)</h4>
+                    <p>采用 Gray-Blue 工业色板，以冷灰中性色为主调，蓝色作为功能强调色。状态色沿用行业标准：绿=正常/完成，红=告警/高置信，橙=警告/运行中。</p>
+                    <div class="color-palette">
+                        <div class="color-swatch" style="background:#2f54eb" title="Primary Blue"></div>
+                        <div class="color-swatch" style="background:#52c41a" title="Success Green"></div>
+                        <div class="color-swatch" style="background:#fa8c16" title="Warning Orange"></div>
+                        <div class="color-swatch" style="background:#ff4d4f" title="Danger Red"></div>
+                        <div class="color-swatch" style="background:#f9fafb" title="Bg Gray-50"></div>
+                        <div class="color-swatch" style="background:#fff" title="Card White"></div>
+                        <div class="color-swatch" style="background:#101828" title="Text Gray-900"></div>
+                    </div>
+                </div>
+                <div class="note-card">
+                    <h4><span class="dot-indicator green"></span>布局结构 (Layout)</h4>
+                    <ul>
+                        <li>左侧媒体区 flex:1 自适应，黑色背景最大化内容沉浸感</li>
+                        <li>右侧信息面板固定 380px（比 v1 的 340px 更宽松），可滚动</li>
+                        <li>顶部标题栏：任务名称 + 类型徽章 + 状态指示灯 + 操作按钮</li>
+                        <li>底部操作栏：主次按钮分层，危险操作（停止）使用红色警示</li>
+                        <li>信息面板分区：概览统计 &rarr; 当前帧类别 &rarr; 累计分布 &rarr; 事件列表</li>
+                    </ul>
+                </div>
+                <div class="note-card">
+                    <h4><span class="dot-indicator orange"></span>交互优化 (Interaction)</h4>
+                    <ul>
+                        <li>图像/视频：轮播导航 + 圆点指示器 + 键盘左右切换（&larr; &rarr;）</li>
+                        <li>视频流：LIVE 实时标识 + 脉冲动画 + 历史回放切换 + 进度条分段</li>
+                        <li>检测事件：时间倒序 + 分页 + 高置信度红色高亮 + hover 行背景</li>
+                        <li>全屏按钮：一键沉浸，隐藏右侧信息面板</li>
+                        <li>键盘快捷键提示：Space 播放/暂停，F 全屏，Esc 关闭</li>
+                    </ul>
+                </div>
+                <div class="note-card">
+                    <h4><span class="dot-indicator red"></span>工业规范对齐 (Standards)</h4>
+                    <ul>
+                        <li>等宽字体 (SF Mono / JetBrains Mono) 显示文件名、时间戳、数值</li>
+                        <li>状态指示灯 + 外发光脉冲动画表示运行中任务</li>
+                        <li>类别分布条形图统一比例，渐变填充增强视觉层次</li>
+                        <li>检测事件时间精确到秒，符合安防监控行业标准</li>
+                        <li>危险操作（停止任务）使用红色警示按钮，防止误操作</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== FEATURES ==================== -->
+        <div class="design-features">
+            <div class="design-features-header">v2 核心设计升级</div>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">&#x25A7;</div>
+                    <h4>左右分栏优化</h4>
+                    <p>右侧面板从 340px 扩展至 380px，信息密度更舒适，分区层次更清晰</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">&#x25C9;</div>
+                    <h4>统计可视化增强</h4>
+                    <p>渐变条形图 + 标签云 + 三列统计卡片，数据对比一目了然</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">&#x26A1;</div>
+                    <h4>实时反馈升级</h4>
+                    <p>LIVE 标识 + 外发光脉冲状态灯 + 检测事件 hover 高亮 + 高置信红色标记</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">&#x26F6;</div>
+                    <h4>全屏沉浸模式</h4>
+                    <p>一键全屏隐藏信息面板，专注媒体内容；Esc 退出，符合操作习惯</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">&#x21C4;</div>
+                    <h4>多通道切换</h4>
+                    <p>RGB / IR 双通道一键切换，支持多模态模型任务，按钮状态即时反馈</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">&#x229E;</div>
+                    <h4>进度分段可视化</h4>
+                    <p>绿色标记录制片段，hover 显示缩略图，支持精准 seek 跳转</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== COMPARISON ==================== -->
+        <div class="comparison-table">
+            <div class="comparison-table-header">v1 &rarr; v2 改进对比</div>
+            <div class="comparison-table-body">
+                <table class="comp-table">
+                    <thead>
+                        <tr>
+                            <th style="width:20%">维度</th>
+                            <th style="width:35%">v1 (当前方案)</th>
+                            <th style="width:45%">v2 (优化方案)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td style="font-weight:700">色彩体系</td>
+                            <td>Ant Design 蓝 + 基础灰阶</td>
+                            <td class="improvement">Gray-Blue 工业色板，9 级灰阶 + 语义化状态色，更专业克制</td>
+                        </tr>
+                        <tr>
+                            <td style="font-weight:700">字体系统</td>
+                            <td>Plus Jakarta Sans + Noto Sans SC</td>
+                            <td class="improvement">DM Sans + Noto Sans SC，更现代的几何无衬线，数字可读性更优</td>
+                        </tr>
+                        <tr>
+                            <td style="font-weight:700">右侧面板</td>
+                            <td>340px 固定宽度</td>
+                            <td class="improvement">380px，信息密度更舒适，分区间距更合理</td>
+                        </tr>
+                        <tr>
+                            <td style="font-weight:700">统计卡片</td>
+                            <td>2 列网格，统一蓝色数值</td>
+                            <td class="improvement">2/3 列自适应，语义化颜色（蓝=当前，绿=累计，橙=高置信），hover 微交互</td>
+                        </tr>
+                        <tr>
+                            <td style="font-weight:700">状态指示</td>
+                            <td>基础圆点 + 脉冲动画</td>
+                            <td class="improvement">圆点 + 外发光扩散动画 + 文字标签，视觉层次更丰富</td>
+                        </tr>
+                        <tr>
+                            <td style="font-weight:700">进度条</td>
+                            <td>纯色填充 + 圆点拖拽柄</td>
+                            <td class="improvement">渐变填充 + hover 显示拖拽柄 + 绿色分段标记，交互反馈更明确</td>
+                        </tr>
+                        <tr>
+                            <td style="font-weight:700">底部操作栏</td>
+                            <td>统一样式按钮</td>
+                            <td class="improvement">主次分层（主按钮实色，次按钮线框），危险操作用红色警示</td>
+                        </tr>
+                        <tr>
+                            <td style="font-weight:700">键盘快捷键</td>
+                            <td>无提示</td>
+                            <td class="improvement">按钮 title 属性标注快捷键（Space/F/Esc），专业监控软件标配</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function switchTab(tab) {
+            document.querySelectorAll('.variant-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.variant-panel').forEach(p => p.classList.remove('active'));
+            document.querySelector(`.variant-tab[onclick*="${tab}"]`).classList.add('active');
+            document.getElementById(`panel-${tab}`).classList.add('active');
+        }
+    </script>
+</body>
+</html>

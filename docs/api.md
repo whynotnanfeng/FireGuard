@@ -1,4 +1,4 @@
-# API 文档 (FireGuard v1.2.5)
+# API 文档 (FireGuard v1.9.0)
 
 ## 基础信息
 
@@ -78,7 +78,64 @@
 ### 创建检测任务
 - **Method**: `POST /tasks`
 - **Success Status**: `201 Created`
-- **Request (form-data)**: `name`, `task_type`, `model_id`, `rgb_files`
+- **Request (form-data)**: `name`, `task_type`, `model_id`, `rgb_files`, `use_gpu` (optional, boolean, default `False`)
+
+### 检查 GPU 状态 [v1.9.0 新增]
+- **Method**: `GET /tasks/gpu-status`
+- **Auth**: JWT Bearer Token
+- **Success Status**: `200 OK`
+- **Description**: 检查当前系统 GPU 环境是否可用于推理。前端在启用 GPU 任务前应先调用此接口验证。
+- **Response**:
+```json
+{
+  "data": {
+    "available": true,
+    "cuda_available": true,
+    "onnx_gpu_available": true,
+    "device_name": "NVIDIA GeForce RTX 3060",
+    "message": "GPU 推理环境就绪"
+  }
+}
+```
+- **Error Response (GPU 不可用)**:
+```json
+{
+  "data": {
+    "available": false,
+    "cuda_available": false,
+    "onnx_gpu_available": false,
+    "device_name": null,
+    "message": "CUDA 驱动未安装或 onnxruntime-gpu 不可用"
+  }
+}
+```
+
+### 查看配置中心状态 [v1.9.0 新增]
+- **Method**: `GET /tasks/registry/status`
+- **Auth**: JWT Bearer Token
+- **Success Status**: `200 OK`
+- **Description**: 查看 Redis 配置中心的当前状态，包括已注册服务、配置项和 go2rtc 路径。
+- **Response**:
+```json
+{
+  "services": {
+    "backend": {
+      "name": "backend",
+      "pid": 12345,
+      "started_at": 1714500000.0,
+      "last_heartbeat": 1714500030.0
+    }
+  },
+  "config": {
+    "go2rtc_rtsp_port": "8554",
+    "go2rtc_api_port": "1984",
+    "go2rtc_webrtc_port": "8555",
+    "backend_port": "8000",
+    "simulator_port": "8001"
+  },
+  "go2rtc_paths": ["cam_001", "cam_002"]
+}
+```
 
 ### 执行任务
 - **Method**: `POST /tasks/{id}/execute`
@@ -137,6 +194,62 @@
 }
 ```
 
+### 时间同步消息 (v2.1.0 新增)
+- **Type**: `time_sync`
+- **Direction**: 后端 → 前端
+- **Frequency**: 每 50 帧发送一次
+- **Message Format**:
+```json
+{
+  "type": "time_sync",
+  "server_time_ms": 1715673600000,
+  "video_pts_ms": 12345,
+  "clock_offset_ms": 0
+}
+```
+- **Description**: 用于 NTP 式时钟同步。前端接收后使用指数移动平均（EMA）计算时钟偏移，公式：`clockOffset = prevOffset * 0.9 + newOffset * 0.1`。同步精度目标 <50ms。
+- **前端处理**：
+```javascript
+case 'time_sync':
+  if (data.server_time_ms && data.video_pts_ms) {
+    const t1 = Date.now();
+    const serverTime = data.server_time_ms;
+    const newOffset = serverTime - t1;
+    const prevOffset = clockOffset;
+    clockOffset = Math.round(prevOffset * 0.9 + newOffset * 0.1);
+  }
+  break;
+```
+
+### 检测结果消息 (v2.1.1 更新)
+- **Type**: `detection`
+- **Direction**: 后端 → 前端
+- **Message Format**:
+```json
+{
+  "task_id": "uuid",
+  "timestamp": 1778811210500,
+  "timestamp_ms": 1778811210500,
+  "boxes": [
+    {
+      "x": 100.5,
+      "y": 200.3,
+      "w": 50.0,
+      "h": 80.0,
+      "conf": 0.95,
+      "label": "fire"
+    }
+  ],
+  "is_history": false,
+  "inference_time_ms": 45.2
+}
+```
+- **Description**: 
+  - `timestamp` / `timestamp_ms`: Unix 绝对时间戳（毫秒），用于五位一体同步。v2.1.1 修复后，后端使用 `stream._session_start_time + timestamp` 计算真正的绝对时间戳，确保前后端时间基准统一。
+  - `boxes`: 检测框数组，坐标基于视频原始分辨率
+  - `inference_time_ms`: 推理耗时，用于前端补偿延迟
+- **前端使用**：前端使用 `timestamp_ms` 与 `videoAbsTime` 进行时间匹配，通过 EWMA 校准算法实现 <50ms 的同步精度。
+
 ---
 
 ## 5. 视频流交付 (HLS)
@@ -184,7 +297,33 @@
 
 ---
 
-## 6. 模拟器 API (Simulator)
+## 6. 系统日志 (System Logs)
+
+### 前端批量上报日志
+- **Method**: `POST /tasks/logs/batch`
+- **Auth**: 无 (支持匿名上报以确保诊断链路通畅)
+- **Request Body**:
+```json
+{
+  "logs": [
+    {
+      "timestamp": "2026-04-24T12:00:00Z",
+      "level": "error",
+      "category": "playback",
+      "message": "HLS sync drift detected",
+      "details": { "drift_ms": 1500 },
+      "userAgent": "Mozilla/5.0...",
+      "url": "http://localhost:5173/tasks/1"
+    }
+  ]
+}
+```
+- **Description**: 将前端发生的诊断日志、异常、播放状态等批量写入后端的 `logs/frontend.log` 中。
+- **Response**: `{"status": "ok", "received": 1}`
+
+---
+
+## 7. 模拟器 API (Simulator)
 
 模拟器服务独立运行于 `http://localhost:8001`，用于仿真 RTSP 视频流推送，支持全维度参数自定义与画质评估。
 
@@ -256,7 +395,7 @@
 |------|------|--------|------|
 | `file_id` | string | 必填 | 视频文件 ID |
 | `stream_path` | string | 必填 | RTSP 推流路径 |
-| `vcodec` | string | `"copy"` | 视频编码：`copy`, `libx264`, `libx265` |
+| `vcodec` | string | `"copy"` | 视频编码：`copy`, `h264_nvenc`, `h264_qsv`, `h264_amf` |
 | `acodec` | string | `"copy"` | 音频编码：`copy`, `aac`, `none` |
 | `resolution` | string | `"original"` | 分辨率：`original`, `3840x2160`, `1920x1080`, `1280x720` 等 |
 | `fps` | float | `0` | 帧率：`0` 为原始帧率 |

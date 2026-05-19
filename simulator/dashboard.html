@@ -468,6 +468,7 @@
             </button>
         </div>
 
+
         <!-- Active Streams (Priority Status) -->
         <div class="section-header">
             <h2><i class="bi bi-activity"></i> 活动推流状态 <span class="badge" id="activeCount">0</span></h2>
@@ -532,13 +533,14 @@
                                 <i class="bi bi-copy" style="cursor:pointer;" onclick="copyUrl('${s.rtsp_url}', this)"></i>
                             </div>
                             <div class="tag-pool">
-                                <div class="tag-item"><i class="bi bi-camera-reels"></i> ${s.vcodec}</div>
+                                <div class="tag-item"><i class="bi bi-camera-reels"></i> ${s.final_vcodec || s.vcodec}</div>
                                 <div class="tag-item"><i class="bi bi-soundwave"></i> ${s.acodec}</div>
                                 <div class="tag-item"><i class="bi bi-aspect-ratio"></i> ${s.resolution}</div>
                                 <div class="tag-item"><i class="bi bi-speedometer2"></i> ${s.fps > 0 ? s.fps + 'fps' : '原帧率'}</div>
                                 <div class="tag-item"><i class="bi bi-lightning"></i> ${s.bitrate}</div>
                                 <div class="tag-item"><i class="bi bi-cpu"></i> ${s.preset}</div>
                                 <div class="tag-item" style="color: var(--primary); font-weight: 700;">${s.transport.toUpperCase()}</div>
+                                ${s.hw_accel_used ? '<div class="tag-item" style="color: var(--success); font-weight: 700;"><i class="bi bi-gpu-card"></i> HW</div>' : ''}
                             </div>
                         </div>
                     `).join('');
@@ -578,11 +580,23 @@
                                             </select>
                                         </div>
                                         <div class="field-v">
+                                            <label>硬件编码器 <span class="hint" id="hw_hint_${v.file_id}">自动检测</span></label>
+                                            <select id="hw_accel_${v.file_id}">
+                                                <option value="auto" selected>自动选择 (推荐)</option>
+                                                <option value="nvenc">NVIDIA NVENC</option>
+                                                <option value="qsv">Intel QuickSync</option>
+                                                <option value="amf">AMD AMF</option>
+                                                <option value="cpu">CPU (libx264)</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="config-row-v">
+                                        <div class="field-v">
                                             <label>视频编码 <span class="hint">原:${v.codec}</span></label>
                                             <select id="vcodec_${v.file_id}">
-                                                <option value="copy" selected>Original (Copy)</option>
-                                                <option value="libx264">H.264 (libx264)</option>
-                                                <option value="libx265">H.265 (libx265)</option>
+                                                <option value="libx264">H.264</option>
+                                                <option value="libx265">H.265 (HEVC)</option>
+                                                <option value="copy">Original (Copy)</option>
                                             </select>
                                         </div>
                                     </div>
@@ -701,6 +715,7 @@
                 file_id: fileId,
                 stream_path: document.getElementById('path_' + fileId).value,
                 transport: document.getElementById('transport_' + fileId).value,
+                hw_accel: document.getElementById('hw_accel_' + fileId).value,
                 vcodec: document.getElementById('vcodec_' + fileId).value,
                 acodec: document.getElementById('acodec_' + fileId).value,
                 resolution: document.getElementById('res_' + fileId).value,
@@ -744,7 +759,7 @@
 
         async function init() {
             refresh();
-            setInterval(refresh, 8000);
+            setInterval(refresh, 20000);
             setInterval(updateClock, 1000);
             updateClock();
         }

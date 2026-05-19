@@ -1,15 +1,21 @@
-# FireGuard (火灾监测系统) v1.4.0 "Industrial Refactor"
+# FireGuard (火灾监测系统) v2.6.0 "Monitoring Dashboard Edition"
 
-FireGuard 是一个基于深度学习（ONNX 核心）的智能火灾目标监测系统。它提供了从模型管理、视频/视频流实时检测任务配置，到结果可视化查询的完整闭环功能。
+FireGuard 是一个基于深度学习（ONNX 核心）的智能火灾目标监测系统。它提供了从模型管理、视频/视频流实时检测任务配置，到结果可视化查询、大屏多路监控的完整闭环功能。
 
-## 项目特点 (v1.4.0 Industrial Refactor)
+## 项目特点 (v2.6.0)
 
-1. **分布式推理架构**：引入多进程推理池 (`InferenceWorker`)，彻底打破 Python GIL 瓶颈，支持 1080P/4K 高清流的高频检测。
-2. **多模态 RGBT 对齐**：业界领先的 `RGBTAlignmentBuffer` 算法，实现可见光与红外画面的毫秒级时空对齐，精准融合多模态特征。
-3. **流媒体网关化 (MediaMTX)**：采用 MediaMTX 作为核心分发网关，支持动态代理、命名空间隔离及高并发 HLS 分发。
-4. **工业级 DVR 体验**：基于“后端动态快照 + 前端滑动窗口”技术，实现直播与历史回放的无缝秒切，支持精准的时间轴 AI 框同步。
-5. **高性能数据查询**：针对数十万级检测记录优化的索引结构与内存聚合算法，确保历史追溯零延迟。
-6. **全参数自定义模拟器**：支持对 RTSP 流的各种参数进行全维度自定义，极大提升开发测试效率。
+1. **零计算分发推理 (Zero-Compute Dispatch)**：采用 Raw Numpy IPC 传输架构，主进程 100% 卸载图像压缩开销，彻底解决 8Mbps+ 高码率流的抓取延迟。
+2. **工业级比特流稳定性**：基于 4MB 内核精密缓冲与全速同步解码技术，完美吸收 AI 模型加载时的 CPU 冲击，实现 RTSP 流 0 报错运行。
+3. **多模态 RGBT 对齐**：业界领先的 `RGBTAlignmentBuffer` 算法，实现可见光与红外画面的毫秒级时空对齐。
+4. **MediaMTX 流媒体网关 (v2.0.0/v2.1.2)**：MediaMTX v1.18.1 统一分发，RTSP/HLS/WebRTC/API 端口全分离，动态流拉取路径显式注册与优雅清理，解决通道占用和初始化卡死问题。
+5. **FFmpeg 视频采集器 (v2.0.0)**：引入 FFmpegCapture 模块替代 OpenCV VideoCapture，彻底解决 Windows 环境下视频流不稳定问题，支持 PTS 循环感知同步。
+6. **结构化诊断体系**：全栈 JSON 日志，内置前端同步漂移监控与批量异步上报，全链路可追溯。
+7. **全参数自定义模拟器**：支持对 RTSP 流的各种参数进行全维度自定义，极大提升开发测试效率。
+8. **统一配置中心 (v1.9.0)**：基于 Redis 的轻量级配置中心，动态管理服务端口、服务注册发现与 MediaMTX 路径，一处修改全局生效。
+9. **GPU 加速推理 (v1.9.0)**：支持 CPU/GPU 双模式推理，任务级 GPU 选择，CUDA 加速大幅降低 CPU 负载，前端环境检测确保 GPU 可用性。
+10. **初始化状态管理 (v1.9.4)**：新增 `initializing` 任务状态，统一管理视频源连接、模型加载、HLS 生成等初始化工作。用户仅在任务完全就绪后可查看，确保五位一体画面同步呈现。
+11. **五位一体时间同步 (v1.9.5/v2.1.0)**：画面、进度条时间/位置、检测框/记录 100% 对齐。通过 NTP 式时钟同步配合 EMA 平滑，同步精度达 <50ms。
+12. **全新大屏监控看板 (v2.6.0)**：新增多路实时监控聚合网格（支持 4 列流体平铺）。借助 `ResizeObserver` + CSS `transform: scale()` 对播放器进行完美微缩渲染，首创 16:10 黑边防遮挡设计，以及基于 `@time-update` 的独立秒级跳动运行时长，体验丝滑。
 
 ## 📚 详细文档 (Documentation)
 
@@ -19,15 +25,17 @@ FireGuard 是一个基于深度学习（ONNX 核心）的智能火灾目标监�
 - **[架构设计](./docs/architecture.md)**: 深入了解推理引擎与任务调度。
 - **[开发者指南](./docs/DEVELOPER_GUIDE.md)**: 核心业务逻辑与二次开发说明。
 - **[API 文档](./docs/api.md)**: 后端接口规范。
+- **[初始化状态重构方案](./docs/REFACTOR_INITIALIZING_STATUS.md)**: `initializing` 状态设计与实施记录。
 
 ## 服务架构
 
 *   **Core Platform**:
     *   **Frontend**: Vue 3 + Vite + Ant Design Vue
-    *   **Backend**: Python + FastAPI + SQLModel + ONNXRuntime
+    *   **Backend**: Python + FastAPI + SQLModel + ONNXRuntime (CPU/GPU)
     *   **Database**: SQLite (`fire_detection.db`)
+    *   **Config Center**: Redis (统一配置中心、服务注册、go2rtc 路径管理)
 *   **Auxiliary Tool (Optional)**:
-    *   **Simulator**: 基于 MediaMTX + FFmpeg 的流媒体模拟推流服务，仅供无现成监控流测试时使用。
+    *   **Simulator**: 基于 go2rtc + FFmpeg 的流媒体模拟推流服务，仅供无现成监控流测试时使用。
 
 ## 快速启动 (Detection Platform)
 
@@ -69,6 +77,19 @@ uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 - **一键复制**: 快捷复制 RTSP URL 到剪贴板，带 UI 反馈。
 - **元数据解析**: 自动调用 `ffprobe` 提取分辨率、帧率、码率等 8 项关键数据。
 - **BPP 画质评估**: 基于 Bits Per Pixel 自动评级 (POOR/FAIR/GOOD/EXCELLENT)。
+- **go2rtc 集成 (v1.9.7)**: 使用 `PUT /api/streams` API 动态注册流路径，确保 FFmpeg 推流稳定。
+
+### 端口配置 (v2.6.0)
+| 服务 | 端口 | 说明 |
+|------|------|------|
+| MediaMTX RTSP | 8554 | RTSP 推流/拉流端口 |
+| MediaMTX HLS | 8888 | HLS 视频切片分发端口 |
+| MediaMTX WebRTC | 8889 | WebRTC 低延迟播放端口 |
+| MediaMTX API | 9997 | REST API 管理端口 |
+| Redis | 6379 | 统一配置中心 & 注册中心端口 |
+| Simulator | 8001 | 模拟器 Web 服务端口 |
+| Backend | 8000 | 平台后端 API 服务端口 |
+| Frontend | 5173 | 平台前端 Web 服务端口 |
 
 ### 配置选项速查
 
@@ -89,6 +110,9 @@ uvicorn main:app --host 0.0.0.0 --port 8001 --reload
     - **响应式筛选栏**：第一行固定显示核心筛选（任务名称/类型/状态），高级筛选（模型/描述/创建时间）折叠展开
     - **前端分页**：支持快速跳转，删除数据后自动补位
     - **文本溢出**：长文本列自动省略号截断，悬停查看完整内容
+    - **GPU 推理选择 (v1.9.0)**：创建任务时可选择 CPU 或 GPU 推理模式，GPU 环境检测确保可用性
+    - **初始化状态 (v1.9.4)**：执行后进入 `initializing` 状态，初始化完成才变为 `running`，确保查看时五位一体画面完整
+    - **独立运行时长 (v1.9.4)**：续播时时间显示基于后端累计运行秒数，不受 HLS 时间轴影响
     - 快速创建/执行图片、视频及实时视频流任务
 - **模型库 (Model Management)**:
     - **响应式筛选栏**：第一行固定显示核心筛选（模型名称/格式/输入类型），高级筛选（状态/描述/创建时间）折叠展开
@@ -99,6 +123,7 @@ uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 - **检测结果 (ResultViewer & VideoPlayer)**:
     - **双 URL HLS 架构**：直播使用 FFmpeg 直接 m3u8，回放使用合并 session 的 VOD 流。
     - **Session 录制**：跨时段录制无缝拼接，支持 DISCONTINUITY 标记回放。
-    - **进度条双驱动**：直播用 elapsed time，回放用 video.duration。
+    - **进度条双驱动**：直播用独立运行时长计时器 (v1.9.4)，回放用 video.duration。
+    - **检测数据同步 (v1.9.4)**：检测框与检测记录始终同步，移除状态转换时的缓存清空。
     - **独立滚动区**：针对多类别模型优化，支持当前统计与累计分布的局部滚动。
     - **断线重连**：`VideoPlayer` 支持智能脉冲式重连与手动立即恢复。

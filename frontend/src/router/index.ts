@@ -6,6 +6,7 @@ const Login = () => import('@/views/Login.vue')
 const Layout = () => import('@/views/Layout.vue')
 const TaskList = () => import('@/views/TaskList.vue')
 const ModelList = () => import('@/views/ModelList.vue')
+const MonitorDashboard = () => import('@/views/MonitorDashboard.vue')
 
 const router = createRouter({
   history: createWebHistory(),
@@ -20,6 +21,7 @@ const router = createRouter({
       component: Layout,
       children: [
         { path: '', redirect: '/tasks' },
+        { path: 'monitor', component: MonitorDashboard },
         { path: 'tasks', component: TaskList },
         { path: 'models', component: ModelList },
       ],

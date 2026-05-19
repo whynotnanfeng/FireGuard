@@ -4,8 +4,28 @@ FireGuard 流模拟控制台是一个独立的 RTSP 视频流仿真服务，用�
 
 **v2 重大更新**：
 - **设计语言**：全面采用 **Industrial Light (明亮工业风)**，基于 OKLCH 色彩空间，具备极高的视觉专业度与对比度。
-- **布局重构**：采用“监控优先”逻辑，将活动流置于顶部，资源库置于下方。
+- **布局重构**：采用"监控优先"逻辑，将活动流置于顶部，资源库置于下方。
 - **自定义 UI**：重构了文件上传控件，告别原生样式，支持拖拽反馈。
+
+**v2.0.0 更新**：
+- **流媒体网关迁移**：从 go2rtc 迁移至 **MediaMTX v1.18.1**，提供更稳定的 RTSP/HLS/WebRTC 流管理。
+- **端口分离**：RTSP (8554)、HLS (8888)、WebRTC (8889) 端口完全分离，消除协议冲突。
+- **流注册机制**：使用 `POST /api/v1/paths` API 动态注册流路径，确保推流稳定。
+
+**v2.1.0 更新**：
+- **FFmpeg 编码参数优化**：增强 GOP 控制和缓冲区管理，消除画面撕裂问题。
+  - 固定关键帧间隔：`-g 30 -keyint_min 30 -x264-params no-scenecut=1:keyint=30:min-keyint=30`
+  - 提高场景切换阈值：`-sc_threshold 100`
+  - 增加缓冲区：`-bufsize 16M -maxrate 8M`
+  - 零延迟调优：`-tune zerolatency -bf 0`
+- **MediaMTX 所有者注册**：通过 Redis 统一管理 MediaMTX 进程所有权，防止后端与模拟器同时启动导致端口冲突。
+
+**v2.1.2 更新**：
+- **MediaMTX 流生命周期管理**：后端 `register_stream()` 通过 `/v3/config/paths/add/{stream_path}` API 注册拉流路径，配置 `source` 为原始 RTSP 地址。解决第二次任务执行时 MediaMTX 无流可拉导致卡死在初始化的问题。
+
+**v2.3.0 更新**：
+- **GPU 硬解支持**：推流命令新增 `-hwaccel cuda -c:v h264_cuvid`。当 `hw_accel=auto` 且检测到 NVENC 时，输入视频文件解码从 CPU 移至 GPU。显著降低 CPU 占用（1080p H.264 视频 CPU 软解约 10-15%，GPU 硬解仅 ~2%）。
+- 仅在 `hw_accel != "cpu"` 时启用，`cpu` 模式保持纯 CPU 编解码。
 
 ---
 
@@ -40,8 +60,9 @@ uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 │       │                                                    │
 │       v                                                    │
 │  ┌──────────┐                                             │
-│  │MediaMTX  │                                             │
-│  │ RTSP 服务 │                                             │
+│  │ MediaMTX │                                             │
+│  │ RTSP/    │                                             │
+│  │ HLS/WebRTC│                                            │
 │  └──────────┘                                             │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
@@ -89,7 +110,7 @@ BPP = 总码率(bps) / (宽 × 高 × 帧率)
 
 不再受限于固定档位，用户可以对每一个推流任务进行精细化配置：
 
-- **视频编码 (vcodec)**: 支持 `Copy` (原样转发)、`libx264` (H.264) 和 `libx265` (H.265)。
+- **视频编码 (vcodec)**: 支持 `Copy` (原样转发) 和硬件编码 `h264_nvenc` / `h264_qsv` / `h264_amf`。软编码已移除。
 - **音频编码 (acodec)**: 支持 `Copy`、`AAC` 转码或 `None` (静音)。
 - **分辨率 (Resolution)**: 提供从 4K 到 240P 的 8 档预设，支持一键切换。
 - **帧率 (FPS)**: 支持 60 到 5 FPS，满足高清流畅或窄带延时模拟。
@@ -172,23 +193,51 @@ BPP = 总码率(bps) / (宽 × 高 × 帧率)
 
 | 文件 | 职责 |
 |---|---|
-| `simulator/main.py` | FastAPI 服务入口，包含上传、解析、画质评估逻辑 |
-| `simulator/manager.py` | StreamManager，管理 FFmpeg 推流进程 |
-| `simulator/bin/mediamtx.exe` | MediaMTX RTSP 服务器 |
-| `simulator/bin/ffmpeg.exe` | FFmpeg 视频处理工具 |
+| `simulator/main.py` | FastAPI 服务入口，包含上传、解析、画质评估逻辑。v1.9.0 起集成配置中心，动态获取 MediaMTX 端口。 |
+| `simulator/manager.py` | StreamManager，管理 FFmpeg 推流进程。v2.0.0 起使用 MediaMTX `POST /api/v1/paths` API 注册流路径，v2.1.2 起后端通过 `/v3/config/paths/add/{stream_path}` API 管理拉流路径。 |
+| `bin/mediamtx.yml` | MediaMTX 配置文件（v2.0.0 起使用此路径，替代 `simulator/bin/mediamtx.yml`） |
+| `bin/ffmpeg.exe` | FFmpeg 视频处理工具 |
+| `bin/ffprobe.exe` | FFprobe 视频元数据探测工具 |
 
 ### 关键函数
 
 - `probe_video(video_path)`: 调用 ffprobe 提取完整元数据
 - `evaluate_quality(bpp)`: 基于 BPP 计算画质评级
-- `StreamManager.start_stream()`: 启动 FFmpeg 推流进程，支持全维度参数自定义（vcodec/acodec/resolution/fps/bitrate 等）
+- `StreamManager.start_stream()`: 启动 FFmpeg 推流进程，支持全维度参数自定义（vcodec/acodec/resolution/fps/bitrate 等）。推流前自动通过 MediaMTX `POST /api/v1/paths` API 注册流路径（v2.1.2 起由后端统一管理拉流路径）。
+- `StreamManager._ensure_mediamtx_path(path_name)`: 确保流路径已在 MediaMTX 中注册，使用 `POST /api/v1/paths` API（v2.1.2 起由后端通过 `/v3/config/paths/add/{stream_path}` API 管理）。
+
+### 配置中心集成 (v1.9.0+)
+
+模拟器在启动时自动从 Redis 配置中心读取 MediaMTX 端口配置：
+- 优先从 `fireguard:config` Hash 读取 `mediamtx_rtsp_port` 和 `mediamtx_api_port`
+- Redis 不可用时降级为模式默认值（development/production: 8554/9997）
+- 启动时自动注册为 `simulator` 服务，支持心跳保活
+- 推流路径通过 `StreamManager._ensure_mediamtx_path()` 统一管理，使用 MediaMTX REST API
+
+### 动态端口发现 (v2.0.0+)
+
+后端服务通过 Redis 配置中心实现 Simulator 端口的动态发现：
+- Simulator 启动时将自身端口信息注册到 Redis `fireguard:registry` Hash 中
+- 后端 `MediaServerManager` 启动时通过 `ServiceRegistry.get_simulator_ports()` 查询 Simulator 实际运行端口
+- 消除硬编码问题，支持多实例部署
+
+### 端口配置 (v1.9.7 更新)
+
+| 服务 | 端口 | 说明 |
+|---|---|---|
+| go2rtc RTSP | 8554 | RTSP 推流/拉流端口 |
+| go2rtc WebRTC | 8555/tcp | WebRTC 低延迟播放端口 |
+| go2rtc API | 1984 | REST API 管理端口 |
+| Simulator | 8001 | 模拟器 Web 服务端口 |
+
+> **重要**：v1.9.7 之前 RTSP 和 WebRTC 共用 8555 端口，导致 FFmpeg 推流失败（Broken pipe）。现已分离为 8554 (RTSP) 和 8555 (WebRTC)。
 
 ### 依赖
 
 - Python 3.9+
 - FastAPI + Uvicorn
 - FFmpeg (内置)
-- MediaMTX (内置)
+- go2rtc (内置, v1.9.12)
 
 ---
 
@@ -208,4 +257,4 @@ A:
 
 ### Q: 推流后检测端画面撕裂怎么办？
 
-A: 优先尝试使用 **Copy 模式**，直接转发源编码，零损耗零延迟。如果源编码不兼容，再选择转码模式。
+A: v2.1.0 已优化 FFmpeg 编码参数，固定关键帧间隔并增强缓冲区管理。若仍有问题，优先尝试使用 **Copy 模式**，直接转发源编码，零损耗零延迟。如果源编码不兼容，再选择转码模式。

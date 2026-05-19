@@ -29,5 +29,9 @@ export const useTaskStore = defineStore('task', () => {
     total.value--
   }
 
-  return { tasks, total, loading, fetchTasks, createTask, deleteTask }
+  async function checkGpuStatus() {
+    return await tasksApi.checkGpuStatus()
+  }
+
+  return { tasks, total, loading, fetchTasks, createTask, deleteTask, checkGpuStatus }
 })

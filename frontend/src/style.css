@@ -32,7 +32,9 @@ body {
   background: var(--bg-primary);
   min-height: 100vh;
   overflow-x: hidden;
+  margin: 0;
 }
+
 
 .ant-btn-primary {
   background-color: var(--primary-blue);

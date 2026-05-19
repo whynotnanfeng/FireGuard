@@ -2,24 +2,26 @@
 Unified inference engine supporting:
   - ONNX .onnx via onnxruntime (YOLOv8 format)
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import traceback
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+
 logger = logging.getLogger("detector")
 
-# 鈹€鈹€ Detection result dataclass 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── Detection result dataclass ───────────────────────────────────────────
+
 
 @dataclass
 class Detection:
-    box: List[int]          # [x1, y1, x2, y2]
+    box: List[int]  # [x1, y1, x2, y2]
     confidence: float
     class_name: str
 
@@ -36,29 +38,32 @@ class Detection:
 _model_cache: Dict[str, "Detector"] = {}
 
 
-def get_detector(model_path: str) -> "Detector":
-    """Singleton model engine management."""
-    if model_path not in _model_cache:
-        _model_cache[model_path] = Detector(model_path)
-    return _model_cache[model_path]
+def get_detector(model_path: str, use_gpu: bool = False) -> "Detector":
+    """Singleton model engine management with GPU awareness."""
+    cache_key = f"{model_path}_gpu_{use_gpu}"
+    if cache_key not in _model_cache:
+        _model_cache[cache_key] = Detector(model_path, use_gpu=use_gpu)
+    return _model_cache[cache_key]
 
 
 # 鈹€鈹€ Detector 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+
 
 class Detector:
     """Unified inference interface for .onnx models."""
 
     INPUT_SIZE = 640
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, use_gpu: bool = False):
         self.model_path = model_path
+        self.use_gpu = use_gpu
         self.backend: str = ""
         self.is_rgbir: bool = False
         self.input_names: List[str] = []
         self.class_names: List[str] = []
         self.metadata_label_map: Dict[str, str] = {}
+        self._diag_counter = 0
         self._load(model_path)
-
 
     # 鈹€鈹€ Loading 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
@@ -68,26 +73,128 @@ class Detector:
         else:
             raise ValueError(f"Unsupported model format: {path}")
 
-
-
     def _load_onnx(self, path: str) -> None:
         try:
             import onnxruntime as ort
+
             opts = ort.SessionOptions()
-            opts.log_severity_level = 3
-            providers = self._get_providers()
-            self.session = ort.InferenceSession(path, sess_options=opts, providers=providers)
+            opts.log_severity_level = 4
+            opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            if self.use_gpu:
+                opts.enable_mem_pattern = True
+                opts.enable_mem_reuse = True
+            else:
+                opts.enable_mem_pattern = True
+                opts.enable_mem_reuse = True
+            opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+
+            providers = self._get_providers(self.use_gpu)
+            self.session = ort.InferenceSession(
+                path, sess_options=opts, providers=providers
+            )
             self.backend = "onnxruntime"
-            
+
             inputs = self.session.get_inputs()
             self.input_names = [i.name for i in inputs]
             self.input_name = self.input_names[0]
-            
+
+            actual_providers = self.session.get_providers()
+            logger.info(f"[Detector] Actual execution providers: {actual_providers}")
+
+            self._use_io_binding = False
+            if self.use_gpu:
+                gpu_active = False
+                if "CUDAExecutionProvider" not in actual_providers and "DmlExecutionProvider" not in actual_providers:
+                    logger.error(
+                        f"[Detector-GPU] GPU requested but NO GPU provider is active! "
+                        f"Actual providers: {actual_providers}. "
+                        f"Check CUDA/cuDNN/DirectML installation."
+                    )
+                elif "CUDAExecutionProvider" in actual_providers:
+                    gpu_active = True
+                    try:
+                        dummy = np.zeros((1, 3, self.INPUT_SIZE, self.INPUT_SIZE), dtype=np.float32)
+                        test_outputs_run = self.session.run(None, {self.input_name: dummy})
+                        test_ref_sum = sum(float(np.sum(o)) for o in test_outputs_run)
+                        
+                        io_binding = self.session.io_binding()
+                        io_binding.bind_cpu_input(self.input_name, dummy)
+                        for out in self.session.get_outputs():
+                            io_binding.bind_output(out.name, device="cpu")
+                        self.session.run_with_iobinding(io_binding)
+                        test_outputs_iob = [io_binding.get_output(i).numpy() for i in range(len(self.session.get_outputs()))]
+                        test_iob_sum = sum(float(np.sum(o)) for o in test_outputs_iob)
+                        
+                        if abs(test_ref_sum - test_iob_sum) > 1e-3 and abs(test_ref_sum) > 1e-6:
+                            logger.warning(
+                                f"[Detector-GPU] IO Binding output mismatch! "
+                                f"session.run sum={test_ref_sum:.6f}, io_binding sum={test_iob_sum:.6f}. "
+                                f"Disabling IO Binding for safety."
+                            )
+                        else:
+                            self._use_io_binding = True
+                            logger.info(
+                                f"[Detector-GPU] CUDA io_binding test passed (run_sum={test_ref_sum:.4f}, iob_sum={test_iob_sum:.4f}). "
+                                f"GPU is active. IO Binding enabled with explicit CPU output."
+                            )
+                        try:
+                            import subprocess
+                            result = subprocess.run(
+                                ['nvidia-smi', '--query-gpu=name,memory.total,memory.free,memory.used', '--format=csv,nounits,noheader'],
+                                capture_output=True, text=True, timeout=5
+                            )
+                            if result.returncode == 0:
+                                logger.info(f"[Detector-GPU] GPU Info: {result.stdout.strip()}")
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        logger.warning(
+                            f"[Detector-GPU] CUDA io_binding test failed: {e}. Will use session.run() instead."
+                        )
+                elif "DmlExecutionProvider" in actual_providers:
+                    gpu_active = True
+                    logger.info("[Detector-GPU] DirectML GPU provider active.")
+
+                if gpu_active:
+                    try:
+                        dummy_input = np.zeros((1, 3, self.INPUT_SIZE, self.INPUT_SIZE), dtype=np.float32)
+                        dummy_output = self.session.run(None, {self.input_name: dummy_input})
+                        has_nan = any(np.any(np.isnan(o)) for o in dummy_output)
+                        has_inf = any(np.any(np.isinf(o)) for o in dummy_output)
+                        logger.info(
+                            f"[Detector-GPU] Warm-up inference: output_shapes={[o.shape for o in dummy_output]}, "
+                            f"has_nan={has_nan}, has_inf={has_inf}, "
+                            f"output_ranges={[f'({np.nanmin(o):.4f}, {np.nanmax(o):.4f})' for o in dummy_output]}"
+                        )
+                        if has_nan or has_inf:
+                            logger.error(
+                                f"[Detector-GPU] Warm-up inference produced NaN/Inf! "
+                                f"This indicates a fundamental GPU inference problem. "
+                                f"Providers: {actual_providers}, Model: {path}"
+                            )
+                        all_zero = all(np.all(o == 0) for o in dummy_output)
+                        if all_zero:
+                            logger.error(
+                                f"[Detector-GPU] Warm-up inference produced ALL-ZERO outputs! "
+                                f"This indicates GPU inference is silently failing. "
+                                f"Providers: {actual_providers}, Model: {path}, "
+                                f"Output shapes: {[o.shape for o in dummy_output]}"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"[Detector-GPU] Warm-up inference failed: {e}. "
+                            f"Providers: {actual_providers}, Model: {path}"
+                        )
+
             # Detect RGB-IR Multi-modal model
-            if len(self.input_names) == 2 and "rgb" in self.input_names and "ir" in self.input_names:
+            if (
+                len(self.input_names) == 2
+                and "rgb" in self.input_names
+                and "ir" in self.input_names
+            ):
                 self.is_rgbir = True
                 logger.info(f"Detected RGB-IR Multimodal model: {path}")
-            
+
             # Try to read class names from metadata
             meta = self.session.get_modelmeta().custom_metadata_map
             found_names = False
@@ -97,98 +204,211 @@ class Detector:
                         val = json.loads(meta[key])
                         if isinstance(val, dict):
                             # Store both the full mapping and the ordered list
-                            self.metadata_label_map = {str(k): str(v) for k, v in val.items()}
+                            self.metadata_label_map = {
+                                str(k): str(v) for k, v in val.items()
+                            }
                             # Sort by keys to get consistent class_names list if keys are numeric strings
                             try:
                                 sorted_keys = sorted(val.keys(), key=lambda x: int(x))
                                 self.class_names = [str(val[k]) for k in sorted_keys]
-                            except Exception:
+                            except Exception as e:
+                                logger.debug(
+                                    f"[Detector] Numeric key sort failed, using default order: {e}"
+                                )
                                 self.class_names = list(val.values())
                         elif isinstance(val, list):
                             self.class_names = [str(v) for v in val]
-                            self.metadata_label_map = {str(i): str(v) for i, v in enumerate(val)}
+                            self.metadata_label_map = {
+                                str(i): str(v) for i, v in enumerate(val)
+                            }
                         found_names = True
                         break
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"[Detector] Metadata entry parse error: {e}")
                         continue
-            
+
             if not found_names:
                 self.class_names = []
-            
-            logger.info(f"Loaded ONNX model: {path} classes detected: {len(self.class_names)}")
+
+            logger.info(
+                f"Loaded ONNX model: {path} classes detected: {len(self.class_names)}"
+            )
         except ImportError:
-            raise RuntimeError("onnxruntime is not installed. Run: pip install onnxruntime")
+            raise RuntimeError(
+                "onnxruntime is not installed. Run: pip install onnxruntime"
+            )
         except Exception as e:
             raise RuntimeError(f"Failed to load ONNX model: {e}")
 
     @staticmethod
-    def _get_providers() -> List[str]:
+    def _get_providers(use_gpu: bool = False) -> List:
         try:
             import onnxruntime as ort
+
             available = ort.get_available_providers()
-            if "CUDAExecutionProvider" in available:
-                return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        except Exception:
-            pass
+            if use_gpu:
+                if "CUDAExecutionProvider" in available:
+                    cuda_options = {
+                        "device_id": 0,
+                        "arena_extend_strategy": "kNextPowerOfTwo",
+                        "cudnn_conv_algo_search": "HEURISTIC",
+                        "do_copy_in_default_stream": True,
+                    }
+                    # GPU 推理不降级：不附带 CPUExecutionProvider 作为后备
+                    return [
+                        ("CUDAExecutionProvider", cuda_options),
+                    ]
+                elif "DmlExecutionProvider" in available:
+                    logger.info("[Detector] Using DirectML GPU provider (Windows)")
+                    return ["DmlExecutionProvider"]
+                else:
+                    raise RuntimeError(
+                        "[Detector] GPU inference requested but no GPU provider "
+                        "(CUDA/DirectML) is available. Verify CUDA toolkit, cuDNN, "
+                        "and onnxruntime-gpu are correctly installed."
+                    )
+        except Exception as e:
+            logger.error(f"[Detector] Provider resolution error: {e}")
+            raise
         return ["CPUExecutionProvider"]
 
     # 鈹€鈹€ Inference 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-    def detect(self, image: np.ndarray | List[np.ndarray], conf: float = 0.25, task_id: str = "", label_mapping: Optional[dict] = None) -> List[Detection]:
+    def detect(
+        self,
+        image: np.ndarray | List[np.ndarray],
+        conf: float = 0.25,
+        task_id: str = "",
+        label_mapping: Optional[dict] = None,
+    ) -> List[Detection]:
         """Run detection on a single image (or pair of images for multi-modal)."""
         return self._detect_onnx(image, conf, task_id, label_mapping)
 
-
-    def detect_batch(self, images: List[np.ndarray | List[np.ndarray]], conf: float = 0.25, task_id: str = "", label_mapping: Optional[dict] = None) -> List[List[Detection]]:
+    def detect_batch(
+        self,
+        images: List[np.ndarray | List[np.ndarray]],
+        conf: float = 0.25,
+        task_id: str = "",
+        label_mapping: Optional[dict] = None,
+    ) -> List[List[Detection]]:
         """Batch inference."""
         return [self.detect(img, conf, task_id, label_mapping) for img in images]
 
-
-    def _detect_onnx(self, image: np.ndarray | List[np.ndarray], conf: float, task_id: str = "", label_mapping: Optional[dict] = None) -> List[Detection]:
+    def _detect_onnx(
+        self,
+        image: np.ndarray | List[np.ndarray],
+        conf: float,
+        task_id: str = "",
+        label_mapping: Optional[dict] = None,
+    ) -> List[Detection]:
         """ONNX inference with diagnostic logging and preprocessing."""
         if self.is_rgbir and isinstance(image, list) and len(image) >= 2:
             # Multi-modal RGB-IR logic
             rgb_img, ir_img = image[0], image[1]
             orig_h, orig_w = rgb_img.shape[:2]
-            
+
             # Preprocess both
             rgb_tensor, ratio, pad = self._preprocess_multi(rgb_img, mode="rgb")
             ir_tensor, _, _ = self._preprocess_multi(ir_img, mode="ir")
-            
+
             # Run inference
             input_feed = {"rgb": rgb_tensor, "ir": ir_tensor}
-            outputs = self.session.run(None, input_feed)
-            
+            if self._use_io_binding:
+                io_binding = self.session.io_binding()
+                io_binding.bind_cpu_input("rgb", rgb_tensor)
+                io_binding.bind_cpu_input("ir", ir_tensor)
+                for out in self.session.get_outputs():
+                    io_binding.bind_output(out.name, device="cpu")
+                self.session.run_with_iobinding(io_binding)
+                outputs = [io_binding.get_output(i).numpy() for i in range(len(self.session.get_outputs()))]
+            else:
+                outputs = self.session.run(None, input_feed)
+
             # RT-DETR variant post-processing
             # Guide says: Output 1: pred_scores (Batch, 300, 3), Output 2: pred_boxes (Batch, 300, 4)
-            # Usually Index 0 is pred_boxes, Index 1 is pred_scores or vice-versa. 
+            # Usually Index 0 is pred_boxes, Index 1 is pred_scores or vice-versa.
             # We check shapes to be sure.
             pred_boxes, pred_scores = None, None
             for out in outputs:
-                if out.shape[-1] == 4: pred_boxes = out
-                if out.shape[-1] == 3: pred_scores = out # 3 classes as per guide
-            
+                if out.shape[-1] == 4:
+                    pred_boxes = out
+                if out.shape[-1] == 3:
+                    pred_scores = out  # 3 classes as per guide
+
             if pred_boxes is not None and pred_scores is not None:
-                return self._postprocess_rgbir(pred_boxes, pred_scores, orig_w, orig_h, ratio, pad, conf, label_mapping)
+                return self._postprocess_rgbir(
+                    pred_boxes,
+                    pred_scores,
+                    orig_w,
+                    orig_h,
+                    ratio,
+                    pad,
+                    conf,
+                    label_mapping,
+                )
             else:
-                logger.error(f"[Detector] RGB-IR output shapes mismatch. Outputs: {[o.shape for o in outputs]}")
+                logger.error(
+                    f"[Detector] RGB-IR output shapes mismatch. Outputs: {[o.shape for o in outputs]}"
+                )
                 return []
-        
+
         # Standard single-input logic
-        if isinstance(image, list): image = image[0]
+        if isinstance(image, list):
+            image = image[0]
         orig_h, orig_w = image.shape[:2]
         input_tensor, ratio, pad = self._preprocess(image)
-        
+
         output_names = [out.name for out in self.session.get_outputs()]
-        outputs = self.session.run(None, {self.input_name: input_tensor})
-        
-        # Diagnostic logging for user debugging
-        for i, out in enumerate(outputs):
-            logger.info(f"[ONNX Diagnostic] Output {i} ({output_names[i]}): shape={out.shape}")
-            if i == 0 and out.size > 0:
-                # Flatten to find first detection row regardless of batching
-                sample = out.reshape(-1, out.shape[-1])[0] if out.ndim >= 2 else out
-                logger.info(f"[ONNX Diagnostic] Sample first row: {sample.tolist()[:10]}")
+
+        if self._use_io_binding:
+            io_binding = self.session.io_binding()
+            io_binding.bind_cpu_input(self.input_name, input_tensor)
+            for out_name in output_names:
+                io_binding.bind_output(out_name, device="cpu")
+            self.session.run_with_iobinding(io_binding)
+            outputs = [io_binding.get_output(i).numpy() for i in range(len(output_names))]
+        else:
+            outputs = self.session.run(None, {self.input_name: input_tensor})
+
+        self._diag_counter += 1
+
+        if self.use_gpu:
+            has_nan = any(np.any(np.isnan(o)) for o in outputs)
+            has_inf = any(np.any(np.isinf(o)) for o in outputs)
+            if has_nan or has_inf:
+                logger.warning(
+                    f"[Detector-GPU] Inference output contains NaN={has_nan}, Inf={has_inf}! "
+                    f"Providers: {self.session.get_providers()}, "
+                    f"Output shapes: {[o.shape for o in outputs]}, "
+                    f"Model: {self.model_path}"
+                )
+                for i, out in enumerate(outputs):
+                    nan_cnt = int(np.sum(np.isnan(out)))
+                    inf_cnt = int(np.sum(np.isinf(out)))
+                    if nan_cnt > 0 or inf_cnt > 0:
+                        logger.warning(
+                            f"[Detector-GPU] Output[{i}] ({output_names[i]}): "
+                            f"shape={out.shape}, NaN={nan_cnt}, Inf={inf_cnt}, "
+                            f"min={np.nanmin(out):.6f}, max={np.nanmax(out):.6f}"
+                        )
+
+        if self._diag_counter <= 5 or self._diag_counter % 50 == 0:
+            log_level = logging.INFO if self.use_gpu else logging.DEBUG
+            for i, out in enumerate(outputs):
+                logger.log(
+                    log_level,
+                    f"[Detector-Diag] Output[{i}] ({output_names[i]}): "
+                    f"shape={out.shape}, dtype={out.dtype}, "
+                    f"min={np.min(out):.6f}, max={np.max(out):.6f}, "
+                    f"mean={np.mean(out):.6f}, has_nan={np.any(np.isnan(out))}, "
+                    f"provider={self.session.get_providers()}"
+                )
+                if i == 0 and out.size > 0:
+                    sample = out.reshape(-1, out.shape[-1])[0] if out.ndim >= 2 else out
+                    logger.log(
+                        log_level,
+                        f"[Detector-Diag] Sample first row: {sample.tolist()[:10]}"
+                    )
 
         # Determine effective primary output
         primary_out = outputs[0]
@@ -197,15 +417,28 @@ class Detector:
         if len(outputs) >= 3:
             b, s, c = outputs[0], outputs[1], outputs[2]
             # Squeeze batch if present [1, N, 4] -> [N, 4]
-            if b.ndim == 3: b = b[0]
-            if s.ndim == 2: s = s[0]
-            if c.ndim == 2: c = c[0]
-            
-            if b.ndim == 2 and b.shape[1] == 4 and s.ndim == 1 and c.ndim == 1 and b.shape[0] == s.shape[0]:
-                primary_out = np.column_stack((b, s, c))
-                logger.info(f"[Detector] Identified 3-output pattern. Unified into {primary_out.shape} matrix.")
+            if b.ndim == 3:
+                b = b[0]
+            if s.ndim == 2:
+                s = s[0]
+            if c.ndim == 2:
+                c = c[0]
 
-        return self._postprocess(primary_out, orig_w, orig_h, ratio, pad, conf, task_id, label_mapping)
+            if (
+                b.ndim == 2
+                and b.shape[1] == 4
+                and s.ndim == 1
+                and c.ndim == 1
+                and b.shape[0] == s.shape[0]
+            ):
+                primary_out = np.column_stack((b, s, c))
+                logger.info(
+                    f"[Detector] Identified 3-output pattern. Unified into {primary_out.shape} matrix."
+                )
+
+        return self._postprocess(
+            primary_out, orig_w, orig_h, ratio, pad, conf, task_id, label_mapping
+        )
 
     def _preprocess(
         self, image: np.ndarray
@@ -219,10 +452,10 @@ class Detector:
         pad_h = (size - new_h) // 2
         pad_w = (size - new_w) // 2
         padded = np.full((size, size, 3), 114, dtype=np.uint8)
-        padded[pad_h:pad_h + new_h, pad_w:pad_w + new_w] = resized
+        padded[pad_h : pad_h + new_h, pad_w : pad_w + new_w] = resized
         # BGR 鈫?RGB, normalize, NCHW
         rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        tensor = np.transpose(rgb, (2, 0, 1))[np.newaxis]
+        tensor = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1))[np.newaxis])
         return tensor, ratio, (pad_w, pad_h)
 
     def _preprocess_multi(
@@ -237,22 +470,22 @@ class Detector:
         pad_h = (size - new_h) // 2
         pad_w = (size - new_w) // 2
         padded = np.full((size, size, 3), 114, dtype=np.uint8)
-        padded[pad_h:pad_h + new_h, pad_w:pad_w + new_w] = resized
-        
+        padded[pad_h : pad_h + new_h, pad_w : pad_w + new_w] = resized
+
         # RGB Conversion & 0~1 range
         img_f = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        
+
         # Apply Mean/Std normalization
         if mode == "rgb":
             mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
             std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        else: # ir
+        else:  # ir
             mean = np.array([0.323, 0.323, 0.323], dtype=np.float32)
             std = np.array([0.1281, 0.1281, 0.1281], dtype=np.float32)
-            
+
         img_f = (img_f - mean) / std
-        
-        tensor = np.transpose(img_f, (2, 0, 1))[np.newaxis]
+
+        tensor = np.ascontiguousarray(np.transpose(img_f, (2, 0, 1))[np.newaxis])
         return tensor, ratio, (pad_w, pad_h)
 
     def _postprocess(
@@ -264,18 +497,18 @@ class Detector:
         pad: Tuple[int, int],
         conf_thresh: float,
         task_id: str = "",
-        label_mapping: Optional[dict] = None
+        label_mapping: Optional[dict] = None,
     ) -> List[Detection]:
         """Parse YOLO architecture outputs and apply NMS."""
         try:
             # Squeeze batch dimension if present
             if output.ndim == 3:
                 output = output[0]
-            
+
             # YOLOv8 standard: [rows x cols] usually [class+4 x 8400]
             # Some models export as [8400 x class+4]
-            # We want [N, 4+nc] format. 
-            # We ONLY transpose if the column count is high (>100), 
+            # We want [N, 4+nc] format.
+            # We ONLY transpose if the column count is high (>100),
             # indicating it's likely the "points" dimension of a YOLO output.
             if output.shape[0] < output.shape[1] and output.shape[1] > 100:
                 pred = output.T
@@ -283,40 +516,62 @@ class Detector:
                 pred = output
 
             cols = pred.shape[1]
-            logger.info(f"[Detector] Post-processing matrix shape: {pred.shape}")
-            
+            if self._diag_counter % 100 == 0:
+                logger.debug(f"[Detector] Post-processing matrix shape: {pred.shape}")
+
             # Identify format
-            is_standard_6col = (cols == 6) # Common for [x1, y1, x2, y2, conf, cls]
-            
+            is_standard_6col = cols == 6  # Common for [x1, y1, x2, y2, conf, cls]
+
             if is_standard_6col:
-                # Format: [x1, y1, x2, y2, conf, cls]
                 boxes_raw = pred[:, :4]
                 confidences = pred[:, 4]
                 class_ids = pred[:, 5].astype(int)
             else:
-                # YOLO Format: [cx, cy, w, h, (obj_conf), cls...]
                 scores = pred[:, 4:]
                 confidences = np.max(scores, axis=1)
                 class_ids = np.argmax(scores, axis=1)
 
+            if self.use_gpu:
+                nan_in_conf = np.any(np.isnan(confidences))
+                nan_in_boxes = np.any(np.isnan(pred[:, :4]))
+                inf_in_conf = np.any(np.isinf(confidences))
+                if nan_in_conf or nan_in_boxes or inf_in_conf:
+                    logger.warning(
+                        f"[Detector-GPU] Postprocess detected abnormal values: "
+                        f"NaN_in_conf={nan_in_conf}, NaN_in_boxes={nan_in_boxes}, Inf_in_conf={inf_in_conf}. "
+                        f"pred shape={pred.shape}, conf range=[{np.nanmin(confidences):.4f}, {np.nanmax(confidences):.4f}], "
+                        f"box range=[{np.nanmin(pred[:, :4]):.4f}, {np.nanmax(pred[:, :4]):.4f}], "
+                        f"Providers: {self.session.get_providers()}"
+                    )
+                    if nan_in_conf or inf_in_conf:
+                        confidences = np.nan_to_num(confidences, nan=0.0, posinf=1.0, neginf=0.0)
+                    if nan_in_boxes or np.any(np.isinf(pred[:, :4])):
+                        pred[:, :4] = np.nan_to_num(pred[:, :4], nan=0.0, posinf=0.0, neginf=0.0)
+
             mask = confidences >= conf_thresh
-            logger.info(f"[Detector] {np.sum(mask)}/{len(confidences)} detections cross threshold {conf_thresh}")
-            if np.sum(mask) == 0:
-                logger.info(f"[Detector] Max conf: {np.max(confidences) if confidences.size > 0 else 0}")
-                return []
+            if self._diag_counter <= 5 or self._diag_counter % 50 == 0:
+                log_level = logging.INFO if self.use_gpu else logging.DEBUG
+                above_thresh = int(np.sum(mask))
+                total = len(confidences)
+                max_conf = float(np.nanmax(confidences)) if confidences.size > 0 else 0.0
+                logger.log(
+                    log_level,
+                    f"[Detector-Diag] Postprocess: {above_thresh}/{total} above threshold {conf_thresh}, "
+                    f"max_conf={max_conf:.4f}, pred_shape={pred.shape}, "
+                    f"provider={self.session.get_providers() if self.use_gpu else 'CPU'}"
+                )
 
             pred = pred[mask]
             class_ids = class_ids[mask]
             confidences = confidences[mask]
 
-
             if is_standard_6col:
-                 # Already in x1, y1, x2, y2
-                 boxes_xyxy = pred[:, :4]
-                 # For NMSBoxes, we MUST use [x, y, w, h]
-                 boxes_for_nms = np.copy(boxes_xyxy)
-                 boxes_for_nms[:, 2] = boxes_xyxy[:, 2] - boxes_xyxy[:, 0] # w = x2 - x1
-                 boxes_for_nms[:, 3] = boxes_xyxy[:, 3] - boxes_xyxy[:, 1] # h = y2 - y1
+                # Already in x1, y1, x2, y2
+                boxes_xyxy = pred[:, :4]
+                # For NMSBoxes, we MUST use [x, y, w, h]
+                boxes_for_nms = np.copy(boxes_xyxy)
+                boxes_for_nms[:, 2] = boxes_xyxy[:, 2] - boxes_xyxy[:, 0]  # w = x2 - x1
+                boxes_for_nms[:, 3] = boxes_xyxy[:, 3] - boxes_xyxy[:, 1]  # h = y2 - y1
             else:
                 # cx, cy, w, h 鈫?x1,y1,x2,y2
                 cx, cy, bw, bh = pred[:, 0], pred[:, 1], pred[:, 2], pred[:, 3]
@@ -332,7 +587,8 @@ class Detector:
                 boxes_for_nms.tolist(), confidences.tolist(), conf_thresh, 0.45
             )
             if len(indices) == 0:
-                logger.info("[Detector] NMS suppressed all detections")
+                if self._diag_counter % 100 == 0:
+                    logger.debug("[Detector] NMS suppressed all detections")
                 return []
 
             # Flatten indices into a simple list/array
@@ -351,7 +607,7 @@ class Detector:
                 bx1, by1 = max(0, bx1), max(0, by1)
                 bx2, by2 = min(orig_w, bx2), min(orig_h, by2)
                 cls_idx = int(class_ids[idx])
-                
+
                 # Priority 1: User defined mapping
                 if label_mapping and cls_idx in label_mapping:
                     cls_name = label_mapping[cls_idx]
@@ -360,16 +616,29 @@ class Detector:
                     cls_name = label_mapping[str(cls_idx)]
                 else:
                     # Priority 2: Model metadata or fallback
-                    cls_name = self.class_names[cls_idx] if cls_idx < len(self.class_names) else f"Class {cls_idx}"
-                
-                detections.append(Detection(
-                    box=[bx1, by1, bx2, by2],
-                    confidence=float(confidences[idx]),
-                    class_name=cls_name,
-                ))
+                    cls_name = (
+                        self.class_names[cls_idx]
+                        if cls_idx < len(self.class_names)
+                        else f"Class {cls_idx}"
+                    )
+
+                detections.append(
+                    Detection(
+                        box=[bx1, by1, bx2, by2],
+                        confidence=float(confidences[idx]),
+                        class_name=cls_name,
+                    )
+                )
                 # Explicitly log mapping result for verification
-                logger.info(f"[Detector] Result: ID {cls_idx} -> Mapped to '{cls_name}' (conf: {confidences[idx]:.4f})")
-            logger.info(f"[Detector] Success: Found {len(detections)} valid detections")
+                if self._diag_counter % 100 == 0:
+                    logger.debug(
+                        f"[Detector] Result: ID {cls_idx} -> Mapped to '{cls_name}' (conf: {confidences[idx]:.4f})"
+                    )
+
+            if self._diag_counter % 100 == 0:
+                logger.debug(
+                    f"[Detector] Success: Found {len(detections)} valid detections"
+                )
             return detections
 
         except Exception as e:
@@ -378,31 +647,33 @@ class Detector:
             return []
 
     def _postprocess_rgbir(
-        self, 
-        pred_boxes: np.ndarray, 
-        pred_scores: np.ndarray, 
-        orig_w: int, 
-        orig_h: int, 
-        ratio: float, 
-        pad: Tuple[int, int], 
+        self,
+        pred_boxes: np.ndarray,
+        pred_scores: np.ndarray,
+        orig_w: int,
+        orig_h: int,
+        ratio: float,
+        pad: Tuple[int, int],
         conf_thresh: float,
-        label_mapping: Optional[dict] = None
+        label_mapping: Optional[dict] = None,
     ) -> List[Detection]:
         """Post-process for RT-DETR variant (No NMS)."""
-        if pred_boxes.ndim == 3: pred_boxes = pred_boxes[0]
-        if pred_scores.ndim == 3: pred_scores = pred_scores[0]
-        
+        if pred_boxes.ndim == 3:
+            pred_boxes = pred_boxes[0]
+        if pred_scores.ndim == 3:
+            pred_scores = pred_scores[0]
+
         detections = []
         pad_w, pad_h = pad
-        
+
         for i in range(len(pred_scores)):
             scores = pred_scores[i]
             cls_idx = int(np.argmax(scores))
             conf = float(scores[cls_idx])
-            
+
             if conf >= conf_thresh:
                 cx, cy, bw, bh = pred_boxes[i]
-                
+
                 # Inverse Normalization (to 640x640 scale)
                 # x_center = cx * 640
                 # x_min = (x_center - half_w - pad_x) / ratio
@@ -410,25 +681,30 @@ class Detector:
                 by1 = int(((cy - bh / 2) * self.INPUT_SIZE - pad_h) / ratio)
                 bx2 = int(((cx + bw / 2) * self.INPUT_SIZE - pad_w) / ratio)
                 by2 = int(((cy + bh / 2) * self.INPUT_SIZE - pad_h) / ratio)
-                
+
                 # Clamp
                 bx1, by1 = max(0, bx1), max(0, by1)
                 bx2, by2 = min(orig_w, bx2), min(orig_h, by2)
-                
+
                 # Mapping
                 cls_name = f"Class {cls_idx}"
                 if label_mapping:
-                    cls_name = label_mapping.get(cls_idx, label_mapping.get(str(cls_idx), cls_name))
+                    cls_name = label_mapping.get(
+                        cls_idx, label_mapping.get(str(cls_idx), cls_name)
+                    )
                 elif cls_idx < len(self.class_names):
                     cls_name = self.class_names[cls_idx]
 
-                detections.append(Detection(
-                    box=[bx1, by1, bx2, by2],
-                    confidence=conf,
-                    class_name=cls_name
-                ))
-        
-        logger.info(f"[Detector] RGB-IR post-process success: {len(detections)} detections")
+                detections.append(
+                    Detection(
+                        box=[bx1, by1, bx2, by2], confidence=conf, class_name=cls_name
+                    )
+                )
+
+        if self._diag_counter % 100 == 0:
+            logger.debug(
+                f"[Detector] RGB-IR post-process success: {len(detections)} detections"
+            )
         return detections
 
     # 鈹€鈹€ Drawing helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -439,33 +715,42 @@ class Detector:
         img = image.copy()
         # BGR Colors
         colors = {
-            "fire": (0, 60, 255),      # Red-Orange
-            "smoke": (80, 80, 80),     # Dark Gray
-            "person": (255, 165, 0),   # Blue
-            "car": (255, 0, 255),      # Purple
+            "fire": (0, 60, 255),  # Red-Orange
+            "smoke": (80, 80, 80),  # Dark Gray
+            "person": (255, 165, 0),  # Blue
+            "car": (255, 0, 255),  # Purple
         }
-        
+
         for det in detections:
             x1, y1, x2, y2 = det.box
             cls_name = det.class_name.lower()
-            color = colors.get(cls_name, (0, 165, 255)) # Default Orange
-            
+            color = colors.get(cls_name, (0, 165, 255))  # Default Orange
+
             # 1. Draw main rectangle
             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-            
+
             # 2. Draw label background (filled tab)
             label = f"{det.class_name} {det.confidence:.2f}"
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.5
             thickness = 1
-            
+
             (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-            
+
             # Ensure label doesn't go off top of image
             ty1 = max(y1, th + 10)
             cv2.rectangle(img, (x1, ty1 - th - 10), (x1 + tw + 10, ty1), color, -1)
-            
+
             # 3. Draw text
-            cv2.putText(img, label, (x1 + 5, ty1 - 5), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
-            
+            cv2.putText(
+                img,
+                label,
+                (x1 + 5, ty1 - 5),
+                font,
+                font_scale,
+                (255, 255, 255),
+                thickness,
+                cv2.LINE_AA,
+            )
+
         return img

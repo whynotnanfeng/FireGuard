@@ -36,8 +36,8 @@
           <a-select-option value="creating">创建中</a-select-option>
           <a-select-option value="pending">待执行</a-select-option>
           <a-select-option value="queued">排队中</a-select-option>
+          <a-select-option value="initializing">初始化中</a-select-option>
           <a-select-option value="running">执行中</a-select-option>
-          <a-select-option value="paused">已暂停</a-select-option>
           <a-select-option value="completed">已完成</a-select-option>
           <a-select-option value="failed">失败</a-select-option>
         </a-select>
@@ -135,7 +135,7 @@
               
               <a-button 
                  type="link"
-                 :disabled="record.status !== 'running' || record.task_type !== 'stream'"
+                 :disabled="!['running', 'initializing'].includes(record.status) || record.task_type !== 'stream'"
                  @click="handleStop(record)"
               >停止</a-button>
 
@@ -187,24 +187,24 @@
        @success="showConfig = false" 
     />
     
-    <a-modal 
-       v-model:open="showResult" 
-       title="任务结果" 
-       width="1200px" 
+    <a-modal
+       v-model:open="showResult"
+       title=""
+       width="1280px"
        :footer="null"
        :maskClosable="true"
-       :bodyStyle="{ padding: '20px', maxHeight: '85vh', overflowY: 'auto' }"
+       :closable="false"
+       :bodyStyle="{ padding: 0, maxHeight: '85vh', overflow: 'hidden' }"
        @after-close="handleModalAfterClose"
        :destroyOnClose="true"
     >
        <template v-if="currentResultRow && renderReady">
-         <ResultViewer v-if="currentResultRow.task_type !== 'stream'" :task-id="currentResultRow.id" :key="'result-' + currentResultRow.id" />
-         <VideoPlayer 
-            v-if="currentResultRow.task_type === 'stream'"
-            :task-id="currentResultRow.id" 
-            ws-url="ws://localhost:8000/ws/stream" 
+         <ResultViewer
+            :task-id="currentResultRow.id"
+            :task-type="currentResultRow.task_type"
+            :ws-url="wsStreamUrl"
+            :key="'result-' + currentResultRow.id"
             @close="showResult = false"
-            :key="'stream-' + currentResultRow.id"
          />
        </template>
     </a-modal>
@@ -220,7 +220,6 @@ import TaskStatus from '@/components/TaskStatus.vue'
 import TaskCreate from './TaskCreate.vue'
 import DetectionConfig from '@/components/DetectionConfig.vue'
 import ResultViewer from '@/components/ResultViewer.vue'
-import VideoPlayer from '@/components/VideoPlayer.vue'
 import CustomPagination from '@/components/CustomPagination.vue'
 import { message } from 'ant-design-vue'
 import { PlusOutlined, ReloadOutlined, DownOutlined, UpOutlined } from '@ant-design/icons-vue'
@@ -274,7 +273,9 @@ function formatDate(ds: string) {
 
 function canView(record: any): boolean {
   if (record.task_type === 'stream') {
-    return record.status === 'running' || record.has_history === true
+    if (record.status === 'running') return true
+    if (record.has_history === true && !['initializing'].includes(record.status)) return true
+    return false
   }
   return record.status === 'completed'
 }
@@ -369,15 +370,32 @@ onUnmounted(() => {
 
 function startNotifications() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${protocol}//${window.location.hostname}:8000/ws/notifications`
+    const host = window.location.host // 自动包含端口
+    const url = `${protocol}//${host}/ws/notifications`
     notificationWs = new WebSocket(url)
     
+    let lastNotificationTime = 0
+    const NOTIFICATION_THROTTLE_MS = 5000
+
     notificationWs.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data)
-            console.log('Task Status Update Received:', data)
             if (data.type === 'task_status_update') {
-                loadData()
+                const TASK_STATUSES = ['creating', 'pending', 'queued', 'initializing', 'running', 'completed', 'failed', 'exception']
+                const normalizedStatus = data.status === 'error' ? 'exception' : data.status
+                const task = taskStore.tasks.find(t => t.id === data.task_id)
+                if (task) {
+                    if (TASK_STATUSES.includes(normalizedStatus)) {
+                        task.status = normalizedStatus
+                    }
+                    if (data.message) task.error_msg = data.message
+                    task.updated_at = new Date().toISOString()
+                }
+                const now = Date.now()
+                if (now - lastNotificationTime >= NOTIFICATION_THROTTLE_MS) {
+                    lastNotificationTime = now
+                    loadData()
+                }
             }
         } catch(e) {}
     }
@@ -408,7 +426,7 @@ async function handleExecute(row: any) {
   const oldStatus = row.status
   try {
     await tasksApi.execute(row.id)
-    message.success('任务已加入执行队列')
+    message.success('任务已启动，正在连接视频源...')
     loadData()
   } catch(e) {
     row.status = oldStatus
@@ -442,6 +460,12 @@ async function handleViewResult(row: any) {
   await nextTick()
   renderReady.value = true
 }
+
+const wsStreamUrl = computed(() => {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host = window.location.host
+  return `${protocol}//${host}/ws/stream`
+})
 
 function handleModalAfterClose() {
   currentResultRow.value = null

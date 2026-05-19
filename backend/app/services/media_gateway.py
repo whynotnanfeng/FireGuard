@@ -1,87 +1,138 @@
+"""
+媒体网关管理器
+
+使用流媒体服务抽象层，支持 MediaMTX 流媒体服务。
+"""
 import logging
-import httpx
+import asyncio
+from typing import Optional
+
 from app.config import config
+from app.services.stream_service import StreamService, create_stream_service
 
 logger = logging.getLogger(__name__)
 
-class MediaGatewayManager:
-    """管理 MediaMTX 动态 RTSP 代理通道 (带命名空间隔离)"""
 
-    def __init__(self):
-        # 使用连接池复用 HTTP 连接，提升性能
-        self.client = httpx.Client(timeout=3.0)
-        # 增加统一前缀，实现租户/业务隔离，防止误删用户自定义的 MediaMTX 静态流
+class MediaGatewayManager:
+    """管理流媒体动态代理通道 (带命名空间隔离)"""
+
+    def __init__(self, service_type: Optional[str] = None):
+        self.service_type = service_type or "mediamtx"
+        self._service: Optional[StreamService] = None
         self.PREFIX = "fg_"
 
+    @property
+    def service(self) -> StreamService:
+        """懒加载流媒体服务实例"""
+        if self._service is None:
+            self._service = create_stream_service(self.service_type)
+            logger.info(f"[Gateway] Stream service initialized: {self.service_type}")
+        return self._service
+
     def register_proxy(self, task_id: str, raw_url: str, channel_idx: int = 0) -> str:
-        """注册代理流，返回本地高可用 RTSP 地址"""
+        """注册代理流
+
+        Args:
+            task_id: 任务 ID
+            raw_url: 原始流 URL
+            channel_idx: 通道索引 (0=RGB, 1=IR)
+
+        Returns:
+            str: 代理后的流 URL
+        """
         if not raw_url.startswith(("rtsp://", "http://", "https://", "rtmp://")):
             return raw_url
 
-        channel_name = "rgb" if channel_idx == 0 else "ir"
-        # 加上 fg_ 前缀
-        stream_path = f"{self.PREFIX}{task_id}_{channel_name}"
-        api_endpoint = f"{config.MEDIAMTX_API_URL}{stream_path}"
-        
-        payload = {
-            "source": raw_url,
-            "sourceOnDemand": True,
-            "runOnDemandRestart": True
-        }
-
-        try:
-            resp = self.client.post(api_endpoint, json=payload)
-            if resp.status_code not in (200, 201):
-                logger.error(f"[CRITICAL] Gateway registration failed ({resp.status_code}) for {stream_path}. Fallback to raw: {raw_url}")
-                return raw_url
-            
-            proxy_url = f"{config.MEDIAMTX_RTSP_BASE}{stream_path}"
-            logger.info(f"[Gateway] Proxied {raw_url} -> {proxy_url}")
-            return proxy_url
-        except Exception as e:
-            logger.error(f"[CRITICAL] Gateway API unreachable: {e}. Fallback to raw: {raw_url}")
+        if self._is_local_stream(raw_url):
+            logger.info(f"[Gateway] Local stream detected, skipping proxy: {raw_url}")
             return raw_url
 
-    def unregister_proxy(self, task_id: str, channel_count: int = 2):
-        """任务停止时，清理网关通道"""
+        channel_name = "rgb" if channel_idx == 0 else "ir"
+        stream_path = f"{self.PREFIX}{task_id}_{channel_name}"
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # V1.3.1: 在线程中调用且 Loop 已在运行时，必须阻塞等待结果，否则 FFmpeg 会比注册更早启动
+                from concurrent.futures import TimeoutError
+                future = asyncio.run_coroutine_threadsafe(
+                    self.service.register_stream(stream_path, raw_url), loop
+                )
+                try:
+                    success = future.result(timeout=5.0)
+                except TimeoutError:
+                    logger.error(f"[Gateway] Registration timeout for {stream_path}")
+                    success = False
+            else:
+                success = loop.run_until_complete(
+                    self.service.register_stream(stream_path, raw_url)
+                )
+        except RuntimeError:
+            # 这种情况下通常是没有 loop，尝试直接 run
+            success = asyncio.run(
+                self.service.register_stream(stream_path, raw_url)
+            )
+
+        if success:
+            proxy_url = f"{config.MEDIAMTX_RTSP_BASE}/{stream_path}"
+            logger.info(f"[Gateway] Proxied {raw_url} -> {proxy_url}")
+            return proxy_url
+
+        logger.warning(
+            f"[Gateway] Stream registration failed. Fallback to raw: {raw_url}"
+        )
+        return raw_url
+
+    def unregister_proxy(self, task_id: str, channel_count: int = 1):
+        """注销代理流
+
+        Args:
+            task_id: 任务 ID
+            channel_count: 通道数量
+        """
+        import asyncio
+
         for i in range(channel_count):
             channel_name = "rgb" if i == 0 else "ir"
             stream_path = f"{self.PREFIX}{task_id}_{channel_name}"
-            api_endpoint = f"{config.MEDIAMTX_API_URL}{stream_path}"
+
             try:
-                self.client.delete(api_endpoint)
-                logger.info(f"[Gateway] Unregistered path: {stream_path}")
-            except Exception as e:
-                logger.warning(f"[Gateway] Failed to unregister {stream_path}: {e}")
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    async def _unregister():
+                        return await self.service.unregister_stream(stream_path)
+                    asyncio.ensure_future(_unregister())
+                else:
+                    loop.run_until_complete(
+                        self.service.unregister_stream(stream_path)
+                    )
+            except RuntimeError:
+                asyncio.run(self.service.unregister_stream(stream_path))
+
+            logger.info(f"[Gateway] Unregistered path: {stream_path}")
 
     def clear_all_proxies(self):
-        """全局清理逻辑：安全清空本系统创建的代理路径"""
-        try:
-            resp = self.client.get(config.MEDIAMTX_API_URL)
-            if resp.status_code == 200:
-                data = resp.json()
-                # 适配 MediaMTX API v3 格式：items 是一个数组
-                items = data.get("items", [])
-                
-                deleted_count = 0
-                for item in items:
-                    name = item.get("name")
-                    # 安全拦截：只有以 fg_ 开头的动态路径才会被清理
-                    if name and name.startswith(self.PREFIX):
-                        delete_url = f"{config.MEDIAMTX_API_URL}{name}"
-                        self.client.delete(delete_url)
-                        deleted_count += 1
-                if deleted_count > 0:
-                    logger.info(f"[Gateway] Cleanup: Cleared {deleted_count} 'fg_' prefix proxies.")
-        except Exception as e:
-            logger.warning(f"[Gateway] Cleanup failed (MediaMTX may be offline): {e}")
+        """清理所有代理流"""
+        logger.warning(
+            "[Gateway] clear_all_proxies() is deprecated. "
+            "Use stream service's individual unregister methods."
+        )
 
     def close(self):
-        """优雅释放 httpx 连接池池"""
-        try:
-            self.client.close()
-            logger.info("[Gateway] HTTP client closed gracefully.")
-        except Exception as e:
-            logger.error(f"[Gateway] Error closing HTTP client: {e}")
+        """关闭网关管理器"""
+        self._service = None
+        logger.info("[Gateway] MediaGatewayManager closed gracefully.")
+
+    def _is_local_stream(self, url: str) -> bool:
+        """检测是否为本地流
+
+        Args:
+            url: 流 URL
+
+        Returns:
+            bool: 是否为本地流
+        """
+        return "127.0.0.1" in url or "localhost" in url
+
 
 media_gateway = MediaGatewayManager()

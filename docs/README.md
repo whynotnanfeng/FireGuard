@@ -30,9 +30,23 @@
 |---|---|
 | **前端** | Vue 3 + Ant Design Vue 4 + Vite + Pinia + hls.js |
 | **后端** | FastAPI + SQLModel + Python 3.9+ |
-| **AI 推理** | ONNX Runtime |
+| **AI 推理** | ONNX Runtime (CPU + GPU/CUDA) |
+| **配置中心** | Redis (统一配置、服务注册、路径管理) |
 | **视频交付** | HLS (Session 录制 + 双 URL 架构) |
+| **流媒体网关** | MediaMTX v1.18.1 (RTSP/HLS/WebRTC) |
+| **视频采集器** | FFmpegCapture (子进程采集) |
 | **数据存储** | SQLite (本地化引擎) |
+
+---
+
+## 📢 最新更新 (v2.6.0)
+
+- **全新大屏监控看板 (v2.6.0)**：新增多路自适应监控网格，采用 `ResizeObserver` + CSS `transform: scale()` 对播放器进行组件等比微缩渲染，首创 `16:10` 比例黑边防遮挡悬浮文字卡片，通过 `@time-update` 实现秒级运行时长同步。
+- **生命周期拉流管理 (v2.1.2)**：显式注册拉流路径，配置 `source` 为原始 RTSP 地址，任务停止时彻底清理路径配置，解决第二次启动卡死在初始化的问题。
+- **流媒体网关迁移 (v2.0.0)**：从 go2rtc 迁移至 **MediaMTX v1.18.1**，实现 RTSP (8554)、HLS (8888)、WebRTC (8889) 端口完全分离，消除协议冲突。
+- **FFmpeg 视频采集器 (v2.0.0)**：引入 `FFmpegCapture` 模块替代 OpenCV VideoCapture，彻底解决 Windows 视频流不稳定问题。
+- **时间同步 & 独立计时 (v1.9.5)**：画面、进度条时间/位置、检测框/记录 100% 对齐。通过 NTP 式时钟同步配合 EMA 平滑，同步精度达 <50ms。
+
 
 ---
 

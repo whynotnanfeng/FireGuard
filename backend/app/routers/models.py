@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import shutil
 from datetime import datetime
 from typing import List, Optional
 
@@ -185,6 +184,8 @@ async def create_model(
     try:
         detector = get_detector(str(file_path))
         dm.class_names = json.dumps(detector.class_names)
+        if detector.metadata_label_map:
+            dm.label_config = json.dumps(detector.metadata_label_map)
             
         if hasattr(detector, 'model') and hasattr(detector.model, 'conf_thresh'):
             dm.default_threshold = float(detector.model.conf_thresh)

@@ -11,6 +11,10 @@
         </div>
       </div>
       <nav class="nav-menu">
+        <router-link to="/monitor" class="nav-item" active-class="active">
+          <span class="nav-icon"><DashboardOutlined /></span>
+          <span class="nav-label">监控看板</span>
+        </router-link>
         <router-link to="/tasks" class="nav-item" active-class="active">
           <span class="nav-icon"><UnorderedListOutlined /></span>
           <span class="nav-label">任务管理</span>
@@ -27,7 +31,7 @@
 
     <div class="main-content">
       <header class="header">
-        <div class="page-title">{{ route.path === '/models' ? '模型库' : '任务管理' }}</div>
+        <div class="page-title">{{ route.path === '/monitor' ? '监控看板' : (route.path === '/models' ? '模型库' : '任务管理') }}</div>
         <div class="user-info">
           <a-dropdown :trigger="['click']">
             <span class="dropdown-link" @click.prevent>
@@ -48,6 +52,21 @@
           </transition>
         </router-view>
       </main>
+
+      <nav class="mobile-nav">
+        <router-link to="/monitor" class="mobile-nav-item" active-class="active">
+          <DashboardOutlined />
+          <span>监控</span>
+        </router-link>
+        <router-link to="/tasks" class="mobile-nav-item" active-class="active">
+          <UnorderedListOutlined />
+          <span>任务</span>
+        </router-link>
+        <router-link to="/models" class="mobile-nav-item" active-class="active">
+          <AppstoreOutlined />
+          <span>模型</span>
+        </router-link>
+      </nav>
     </div>
   </div>
 </template>
@@ -55,7 +74,7 @@
 <script setup lang="ts">
 import { useAuthStore } from '@/stores/auth'
 import { useRoute } from 'vue-router'
-import { UnorderedListOutlined, AppstoreOutlined, UserOutlined, FireOutlined } from '@ant-design/icons-vue'
+import { DashboardOutlined, UnorderedListOutlined, AppstoreOutlined, UserOutlined, FireOutlined } from '@ant-design/icons-vue'
 
 const authStore = useAuthStore()
 const route = useRoute()
@@ -251,6 +270,50 @@ function handleCommand(cmd: string) {
   display: flex;
   height: 100vh;
   background: var(--bg-card);
+}
+
+.mobile-nav {
+  display: none;
+  height: 64px;
+  background: #ffffff;
+  border-top: 1px solid #e8ecf0;
+  justify-content: space-around;
+  align-items: center;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.mobile-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  color: #64748b;
+  text-decoration: none;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.mobile-nav-item span {
+  font-size: 10px;
+}
+
+.mobile-nav-item.active {
+  color: var(--primary-blue);
+}
+
+@media (max-width: 992px) {
+  .sidebar {
+    display: none;
+  }
+  .mobile-nav {
+    display: flex;
+  }
+  .header {
+    padding: 0 16px;
+  }
+  .content-body {
+    padding: 16px;
+  }
 }
 
 .fade-enter-active,

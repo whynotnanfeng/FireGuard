@@ -1,42 +1,74 @@
 import os
+# 【V1.4.6 终极净化】：在任何 OpenCV 导入前禁止其输出任何日志到 stderr
+# 此设置必须位于入口文件的最顶端
+os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
 # 全局强制 OpenCV 走 TCP 拉流，解决 UDP 丢包导致的花屏和模型掉帧问题
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|threads;1"
 
 import cv2  # 确保环境变量设置后，系统的后续模块再去 import cv2
-import asyncio
-import json
-import logging
+# 【V1.4.7 性能优化】：主进程限制 OpenCV 线程
+cv2.setNumThreads(1)
+import asyncio  # noqa: E402
+import json  # noqa: E402
+import logging  # noqa: E402
 
-from pathlib import Path
-
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.exceptions import RequestValidationError
-from jose import JWTError
-from starlette.responses import Response
-from starlette.types import Scope
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Path  # noqa: E402
+from fastapi.responses import PlainTextResponse  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
+from jose import JWTError  # noqa: E402
+from starlette.responses import Response  # noqa: E402
+from starlette.types import Scope  # noqa: E402
+from starlette import requests as starlette_requests  # noqa: E402
 
 class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope: Scope) -> Response:
+        if path.endswith(".m3u8"):
+            from pathlib import Path
+            from starlette.responses import StreamingResponse
+            full_path = None
+            for d in self.all_directories:
+                candidate = Path(d) / path
+                if candidate.is_file():
+                    full_path = candidate
+                    break
+            if full_path:
+                async def iter_file():
+                    with open(full_path, "rb") as f:
+                        while True:
+                            chunk = f.read(8192)
+                            if not chunk:
+                                break
+                            yield chunk
+                return StreamingResponse(
+                    iter_file(),
+                    media_type="application/vnd.apple.mpegurl",
+                    headers={
+                        "Cache-Control": "no-cache, no-store, must-revalidate",
+                        "Pragma": "no-cache",
+                        "Expires": "0",
+                    },
+                )
+
         response = await super().get_response(path, scope)
-        if path.endswith(".m3u8") or path.endswith(".ts"):
+        if path.endswith(".ts"):
             response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
-            # Remove ETag and Last-Modified to force 200 OK and prevent 304
             if "etag" in response.headers:
                 del response.headers["etag"]
             if "last-modified" in response.headers:
                 del response.headers["last-modified"]
         return response
 
-from app.config import config
-from app.database import create_db_and_tables
-from app.routers import auth, models, tasks
-from app.services.notifier import notifier
-from app.utils.logger import setup_logging
-from app.schemas.exceptions import (
+from app.config import config  # noqa: E402
+from app.database import create_db_and_tables  # noqa: E402
+from app.routers import auth, models, tasks  # noqa: E402
+from app.services.notifier import notifier  # noqa: E402
+from app.utils.logger import setup_logging  # noqa: E402
+from app.schemas.exceptions import (  # noqa: E402
     validation_exception_handler,
     jwt_exception_handler,
 )
@@ -47,28 +79,90 @@ logger = logging.getLogger("app")
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-from contextlib import asynccontextmanager
-from app.services.media_gateway import media_gateway
+from contextlib import asynccontextmanager  # noqa: E402
+from app.services.media_gateway import media_gateway  # noqa: E402
+from app.services.media_server import media_server  # noqa: E402
+from app.services.redis_server import redis_server  # noqa: E402
+from app.services.broker import broker  # noqa: E402
+from app.utils.clock_monitor import clock_monitor  # noqa: E402
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- Startup ---
-    create_db_and_tables()
-    from app.services.task_runner import task_runner, stream_manager
+    # 【V2 优化】：启动前清理可能残留的孤儿进程 (针对 Windows 热重载优化)
+    import psutil
+    current_pid = os.getpid()
+    try:
+        parent = psutil.Process(current_pid)
+        # 寻找所有名为 python 的子进程并清理
+        for child in parent.children(recursive=True):
+            try:
+                # 仅清理非当前进程的 python 进程
+                if 'python' in child.name().lower() and child.pid != current_pid:
+                    logger.info(f"[Lifespan] Cleaning orphan child process: {child.pid}")
+                    child.terminate()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 自动启动内置基础设施 (Redis)
+    await redis_server.start()
     
+    # 初始化总线连接 (Redis 模式下会建立连接池)
+    await broker.connect()
+    
+    # 初始化配置中心：写入默认配置 + 注册后端服务
+    from app.services.registry import registry
+    registry.apply_mode_overrides(config.FIREGUARD_MODE)
+    registry.register_service("backend", {
+        "port": 8000,
+        "mode": config.FIREGUARD_MODE,
+    })
+    
+    # 为内存总线注入事件循环 (兼容 InMemoryBroker 模式)
+    if hasattr(broker, 'set_loop'):
+        broker.set_loop(asyncio.get_running_loop())
+
+    # [V3 修复]：移除 HIGH_PRIORITY_CLASS，避免饿死模拟器 FFmpeg 进程
+    # 推理 Worker 已是独立进程（不受 GIL），无需主进程抢占 CPU
+    # 开发环境下保持 NORMAL 优先级即可确保各进程公平调度
+
+    create_db_and_tables()
+    
+    # 启动内置 MediaMTX 网关
+    await media_server.start()
+    
+    # 启动时钟偏移监控（纯Python SNTP，不修改系统时钟）
+    clock_monitor.start()
+    
+    from app.services.task_runner import task_runner, stream_manager
+
     # 清理上一次非正常退出遗留的 fg_ 动态路径
     media_gateway.clear_all_proxies()
-    
-    # [新增] 启动全局推理进程池
-    stream_manager.start_inference_pool(worker_count=2)
+
+    # [新增] 启动全局推理进程池 (以 1 个进程作为种子启动，后续根据任务量扩容)
+    stream_manager.start_inference_pool(worker_count=1)
     
     # 启动后台任务和监控器
     asyncio.create_task(task_runner.start())
     stream_manager.start_monitor()
     
     logger.info("🔥 Fire Detection API started")
+    
+    # [V1.8.10] 优化心跳：频率降至 60s，并增加活跃指标监控
+    async def heartbeat():
+        from app.services.task_runner import stream_manager
+        while True:
+            try:
+                active_tasks = len(stream_manager._streams)
+                worker_count = len(stream_manager.workers)
+                logger.debug(f"[Heartbeat] Event loop alive | Tasks: {active_tasks} | Workers: {worker_count}")
+            except Exception:
+                pass
+            await asyncio.sleep(60)
+    asyncio.create_task(heartbeat())
     
     yield
     
@@ -77,11 +171,29 @@ async def lifespan(app: FastAPI):
     
     # [新增] 停止并清理推理池
     stream_manager.stop_inference_pool()
+    stream_manager.stop_monitor()
     
     # 清理当前正在运行的网关路径
     media_gateway.clear_all_proxies()
     # 释放 httpx 资源池
     media_gateway.close()
+    
+    # 停止内置 MediaMTX 网关
+    media_server.stop()
+    
+    # 停止时钟偏移监控
+    clock_monitor.stop()
+    
+    # [新增] 断开消息总线连接
+    await broker.disconnect()
+    
+    # 注销服务并关闭配置中心
+    from app.services.registry import registry
+    registry.unregister_service()
+    registry.close()
+    
+    # [新增] 停止内置 Redis
+    redis_server.stop()
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -109,30 +221,12 @@ app.add_middleware(
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(JWTError, jwt_exception_handler)
 
-# ── Global Monitor Middleware ───────────────────────────────────────────────
-@app.middleware("http")
-async def log_requests(request, call_next):
-    import time
-    start_time = time.time()
-    
-    # Process request
-    response = await call_next(request)
-    
-    # Log after completion
-    process_time = (time.time() - start_time) * 1000
-    client = request.client.host if request.client else "unknown"
-    
-    # Only log meaningful requests (exclude static files if needed, or log all to logger)
-    if not request.url.path.startswith(("/api/results", "/api/storage")):
-        logger.info(f"ACCESS: {client} - {request.method} {request.url.path} - {response.status_code} ({process_time:.2f}ms)")
-    
-    return response
-
 # ── Routers ───────────────────────────────────────────────────────────────────
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(models.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")
+app.include_router(tasks.system_router, prefix="/api")
 
 # ── Static files for results ──────────────────────────────────────────────────
 
@@ -140,6 +234,74 @@ config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/api/results", StaticFiles(directory=str(config.RESULTS_DIR)), name="results")
 
 # --- RT Storage Mounting ---
+# --- Live HLS endpoint: 截断 m3u8 避免无限增长导致 hls.js 性能恶化 ---
+@app.get("/api/streams/{task_id}/live.m3u8")
+async def live_m3u8(
+    task_id: str = Path(...),
+    limit: int = Query(30, ge=5, le=500, description="保留最近 N 个分片"),
+):
+    """返回截断版 m3u8（仅最近 N 个 TS 分片），用于直播流播放。
+    全量 m3u8 仍通过 /storage 静态路径提供，用于历史回放。
+    """
+    m3u8_path = config.VIDEO_STORAGE_DIR / task_id / "stream_annotated.m3u8"
+    if not m3u8_path.exists():
+        return PlainTextResponse("", status_code=404)
+    try:
+        content = m3u8_path.read_text(encoding="utf-8")
+    except Exception:
+        return PlainTextResponse("", status_code=500)
+
+    lines = content.splitlines()
+    header: list[str] = []
+    segments: list[list[str]] = []  # each segment: optional DISCONTINUITY + EXTINF + PDT + ts line
+    current_seg: list[str] = []
+    pending_discont = False
+
+    for line in lines:
+        if line.startswith("#EXT-X-DISCONTINUITY"):
+            pending_discont = True
+            continue
+        if line.startswith("#"):
+            if line.startswith("#EXTINF:") or line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+                if pending_discont:
+                    current_seg.append("#EXT-X-DISCONTINUITY")
+                    pending_discont = False
+                current_seg.append(line)
+            else:
+                header.append(line)
+        elif line.endswith(".ts"):
+            current_seg.append(line)
+            segments.append(current_seg)
+            current_seg = []
+        # else: skip empty lines etc.
+
+    if len(segments) <= limit:
+        return PlainTextResponse(content, media_type="application/vnd.apple.mpegurl")
+
+    kept = segments[-limit:]
+    result_lines: list[str] = []
+    for line in header:
+        # 更新 MEDIA-SEQUENCE 以匹配截断后的首个分片
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            try:
+                orig_seq = int(line.split(":", 1)[1])
+            except ValueError:
+                orig_seq = 0
+            skipped = len(segments) - limit
+            result_lines.append(f"#EXT-X-MEDIA-SEQUENCE:{orig_seq + skipped}")
+        elif line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE:"):
+            # 截断后该标签不再准确，跳过（hls.js 不需要它）
+            continue
+        else:
+            result_lines.append(line)
+    for seg in kept:
+        result_lines.extend(seg)
+
+    return PlainTextResponse(
+        "\n".join(result_lines),
+        media_type="application/vnd.apple.mpegurl",
+    )
+
 # 新架构：DirectHLSWriter 生成的 m3u8/ts 文件通过静态文件服务直接提供
 # 前端访问路径: /storage/{task_id}/stream_rgb.m3u8
 config.VIDEO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -171,20 +333,16 @@ async def websocket_stream(
     token: str = Query(...),
 ):
     # V10.1: ENSURE SCOPE SAFETY - Move crucial imports to top to avoid UnboundLocalError
-    from app.services.task_runner import stream_manager
     from app.database import engine
     from app.models.task import Task
     from sqlmodel import Session
-    from app.models.model import DetectionModel
-    from starlette.websockets import WebSocketState # V1.2.19: Import for state checking
+    from starlette.websockets import WebSocketState
     
     await websocket.accept()
 
     # Validate token and get user
     try:
         from app.dependencies import decode_token
-        from app.models.user import User
-
         payload = decode_token(token)
         user_id = payload.get("sub")
         if not user_id:
@@ -193,120 +351,70 @@ async def websocket_stream(
             return
 
         with Session(engine) as session:
-            # V12: 首先做快速权限检查
             task = session.get(Task, task_id)
             if not task or task.user_id != user_id:
-                if websocket.client_state == WebSocketState.CONNECTED:
-                    await websocket.send_text('{"type":"error","message":"Forbidden: Task unreachable"}')
-                    await websocket.close()
-                return
-
-            # V12: 任务已暂停(pending)但有历史记录 → 发送特殊消息让前端展示历史模式
-            if task.status == "pending" and task.has_history:
-                await websocket.send_text(json.dumps({
-                    "type": "paused_with_history",
-                    "message": "任务已暂停，可查看历史检测记录。重新执行以继续。"
-                }))
+                await websocket.send_text('{"type":"error","message":"Forbidden: Task unreachable"}')
                 await websocket.close()
                 return
-
-            # V12: 任务不在运行状态
-            if task.status != "running":
-                if websocket.client_state == WebSocketState.CONNECTED:
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": f"任务状态为 {task.status}，无法连接视频流"
-                    }))
-                    await websocket.close()
-                return
-
-            # V12: 任务 running，等待后端流对象就绪（最多 12s）
-            stream = None
-            for i in range(40):
-                task = session.get(Task, task_id)
-                stream = stream_manager.get_stream(task_id)
-                if stream and task and task.status == "running":
-                    logger.info(f"[WS Handshake] OK: Stream ready for {task_id}")
-                    break
-                if i % 10 == 0:
-                    logger.warning(f"[WS Handshake] Waiting {i+1}/40 for {task_id}")
-                await asyncio.sleep(0.3)
-
-            if not stream:
-                logger.error(f"[WS Handshake] TIMEOUT for {task_id}. Stream not initialized.")
-                if websocket.client_state == WebSocketState.CONNECTED:
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": "后端视频引擎初始化超时，请重新执行任务"
-                    }))
-                    await websocket.close()
-                return
-
-            dm = session.get(DetectionModel, task.model_id)
-            if not dm:
-                await websocket.send_text('{"type":"error","message":"Model not found"}')
-                await websocket.close()
-                return
-
-            source = task.source_path
-            model_path = dm.file_path
-            detection_config = {}
-            if task.detection_config:
-                try:
-                    detection_config = json.loads(task.detection_config)
-                except Exception:
-                    pass
 
     except Exception as e:
-        logger.error(f"[WS Handshake] Critical Failure for {task_id}: {e}")
-        if websocket.client_state == WebSocketState.CONNECTED:
-            try:
-                await websocket.send_text(f'{{"type":"error","message":"{str(e)}"}}')
-                await websocket.close()
-            except:
-                pass
+        logger.error(f"[WS] Auth Failure for {task_id}: {e}")
+        await websocket.close()
         return
 
-    # Run video stream
-    try:
-        from app.services.detector import get_detector
-        from app.services.video_stream import VideoStream
-        
-        stream = stream_manager.get_stream(task_id)
-        if not stream:
-            # Fallback: If for some reason Execute wasn't called or stream died
-            await websocket.send_text(json.dumps({"type": "error", "message": "Stream not initialized. Please click Execute first."}))
-            return
-
-        # Continuous run using the pre-heated stream
-        await stream.run(websocket, detection_config=detection_config)
-
-        # After run finishes, if it stopped due to internal error (e.g. max retries)
-        # V51: CRITICAL FIX - Check if this stream instance is still the active one
-        is_current = stream_manager.get_stream(task_id) is stream
-        if stream._error_msg and is_current:
-             with Session(engine) as session:
-                db_task = session.get(Task, task_id)
-                if db_task and db_task.status == "running":
-                    db_task.status = "exception"
-                    db_task.error_msg = stream._error_msg
-                    session.add(db_task)
-                    session.commit()
-                    logger.error(f"Stream {task_id} failed and updated DB: {stream._error_msg}")
-        elif stream._error_msg:
-             logger.info(f"Zombie stream for {task_id} finished but blocked from poisoning DB.")
-
-    except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for task {task_id}")
-    except Exception as e:
-        logger.error(f"WebSocket error for task {task_id}: {e}")
+    # Subscribe to the broker for this task's detections
+    channel = f"detections:{task_id}"
+    logger.info(f"[WS] Client connected to stream {task_id}, subscribing to {channel}")
+    
+    q = await broker.subscribe(channel)
+    
+    async def receive_loop():
         try:
-            await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
+            while True:
+                data = await websocket.receive_text()
+                msg = json.loads(data)
+                if msg.get("type") == "restart_detection":
+                    from app.services.task_runner import stream_manager
+                    stream = stream_manager.get_stream(task_id)
+                    if stream:
+                        logger.info(f"[WS] Client requested detection restart for {task_id}")
+                        stream.restart_dispatcher()
         except Exception:
             pass
-    finally:
+    
+    async def send_loop():
         try:
-            await websocket.close()
+            while True:
+                data = await q.get()
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_text(json.dumps(data))
+                else:
+                    logger.info(f"[WS] Client state not CONNECTED for task {task_id}, breaking send_loop")
+                    break
+        except WebSocketDisconnect:
+            logger.info(f"[WS] send_loop: Client disconnected from task {task_id}")
+        except Exception as e:
+            logger.error(f"[WS] send_loop error for task {task_id}: {type(e).__name__}: {e}")
+    
+    receive_task = asyncio.create_task(receive_loop())
+    send_task = asyncio.create_task(send_loop())
+    
+    try:
+        done, pending = await asyncio.wait(
+            [receive_task, send_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    except WebSocketDisconnect:
+        logger.info(f"[WS] Client disconnected from task {task_id}")
+    except Exception as e:
+        logger.error(f"[WS] WebSocket error for task {task_id}: {e}")
+    finally:
+        receive_task.cancel()
+        send_task.cancel()
+        await broker.unsubscribe(channel, q)
+        try:
+            if websocket.client_state != WebSocketState.DISCONNECTED:
+                await websocket.close()
         except Exception:
             pass
 
@@ -320,3 +428,49 @@ def read_root():
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "Fire Detection API"}
+
+
+# ── WebRTC Proxy ──────────────────────────────────────────────────────────────
+
+@app.post("/api/webrtc")
+async def webrtc_proxy(request: starlette_requests.Request, stream: str = Query(...)):
+    """
+    代理前端 WebRTC 信令请求到 MediaMTX。
+    前端发送 SDP offer，后端转发给 MediaMTX 并返回 SDP answer。
+    """
+    from fastapi.responses import Response as FastAPIResponse
+
+    try:
+        import httpx
+    except ImportError:
+        return FastAPIResponse(
+            content='{"error":"httpx not installed"}',
+            status_code=500,
+            media_type="application/json",
+        )
+
+    mediamtx_url = f"{config.MEDIAMTX_API_URL}/api/webrtc?stream={stream}"
+
+    try:
+        sdp_offer = await request.body()
+        content_type = request.headers.get("content-type", "application/sdp")
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                mediamtx_url,
+                content=sdp_offer,
+                headers={"Content-Type": content_type},
+            )
+
+            return FastAPIResponse(
+                content=resp.content,
+                status_code=resp.status_code,
+                media_type=resp.headers.get("content-type", "application/sdp"),
+            )
+    except Exception as e:
+        logger.error(f"[WebRTC Proxy] Error: {e}")
+        return FastAPIResponse(
+            content=f'{{"error":"{str(e)}"}}',
+            status_code=502,
+            media_type="application/json",
+        )

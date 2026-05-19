@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import List, Dict, Set
+from typing import Dict, Set
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
@@ -23,18 +23,20 @@ class Notifier:
             self._active_connections.remove(websocket)
             logger.info(f"Notification client disconnected. Remaining: {len(self._active_connections)}")
 
-    async def broadcast_status(self, task_id: str, status: str, message: str = ""):
+    async def broadcast_status(self, task_id: str, status: str, message: str = "", force: bool = False):
         """Broadcast status change to all connected clients (Filtered)."""
         if not self._active_connections:
             return
 
         # V45: Global State Wall - Only broadcast if CONTENT truly changes
         state_key = f"{status}:{message}"
-        if self._last_states.get(task_id) == state_key:
+        if not force and self._last_states.get(task_id) == state_key:
             return
         
         self._last_states[task_id] = state_key
-        logger.info(f"[Notifier] Broadcasting update for {task_id}: {status} ({message})")
+        # 改造：仅在非 running 状态或强制更新时打印日志，避免秒级刷屏
+        if status != "running" or force:
+            logger.info(f"[Notifier] Broadcasting update for {task_id}: {status} ({message})")
 
         payload = json.dumps({
             "type": "task_status_update",

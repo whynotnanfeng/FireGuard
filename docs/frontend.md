@@ -126,6 +126,16 @@ interface ConfigState {
 - 所有文件检测目标总数
 - 所有文件各类别汇总
 
+### 监控看板 (MonitorDashboard)
+**文件**: `frontend/src/views/MonitorDashboard.vue`
+
+用于将系统中正在运行的多个实时监控任务集中展示的四列自适应网格大屏页面。
+
+**特性**:
+- **等比微缩嵌入**：利用 `ResizeObserver` 动态计算每个小网格宽度，并通过 CSS `transform: scale()` 对庞大的 `VideoPlayer` 组件进行硬核缩放，避免 Flexbox 强制挤压产生的内部排版崩溃与字体巨大等问题。
+- **防止遮挡的设计哲学**：外层容器锁定 `16:10` 比例，使嵌套进去的 `16:9` 视频在垂直居中时天然留下顶部和底部的黑边。将看板中的任务名称与时间等文字卡片绝对定位悬浮在底部黑边区域，实现 100% 避开画面，零遮挡。
+- **秒级时长同步**：无需高频轮询接口，直接通过传递底层 `VideoPlayer` 的 `@time-update` 事件来维护本地计时器跳动映射。
+
 ### 视频流播放器 (VideoPlayer)
 **文件**: `frontend/src/components/VideoPlayer.vue`
 
@@ -138,10 +148,35 @@ interface ConfigState {
   - **进度条双驱动**：直播模式使用 `elapsed time` 驱动（始终在最右端），回放模式使用 `video.duration` 驱动。
   - **liveVideoReady 标志**：HLS 视频首次播放后隐藏加载遮罩，避免白色画面闪烁。
 - WebSocket 实时状态接收（连接、重试、运行、异常）
-- 检测框叠加显示（支持 Letterbox 投影对齐）
+- **V5.1 服务端帧嵌入**: 检测框由后端 `AnnotatedHLSWriter` 嵌入视频帧（720p@10fps NVENC），前端播放 `stream_annotated.m3u8`。框与画面帧精确对齐。V5.0 Canvas overlay 已废弃。
 - 实时检测记录面板（右侧），支持分页与手动刷新。
 - **智能脉冲重连**：连接失败后延迟重试，网络错误 2s 后自动恢复。
 - **自动同步重连**：检测到后端任务重启后自动恢复 HLS 连接。
+- **五位一体同步架构 (v1.9.5)**：实现"画面、进度条左侧时间、右侧检测记录、画面检测框、进度条位置"完全对齐。所有元素向最慢的元素（画面）看齐，绝不提前显示。
+- **自动时间校准 (v1.9.5)**：前端自动收集 `playingDate - timestamp` 样本（5-20个），取中位数作为 `timeCalibrationMs`，所有时间匹配使用 `calibratedVideoTime = currentVideoAbsTime - timeCalibrationMs`，消除 HLS PTS 与系统时间的系统性偏移。
+- **NTP 式时钟同步 (v2.1.0)**：后端每 50 帧发送 `time_sync` 消息，前端使用指数移动平均（EMA）平滑时钟偏移，同步精度从 ~175ms 提升至 <50ms。公式：`clockOffset = prevOffset * 0.9 + newOffset * 0.1`。
+- **检测框绝不提前 (v1.9.5)**：匹配逻辑改为只接受 `timestamp <= calibratedVideoTime` 的检测框，fallback 也只选"过去最近"的框，彻底解决检测框提前 1 秒出现的问题。
+- **右侧记录时间对齐 (v1.9.5)**：`record_event` 统一走 `pendingRecords`，实时/历史模式均检查 `recordTime <= calibratedVideoTime` 才显示，解决右侧记录批量出现但左侧无检测框的问题。
+- **isLagging 分支时间对齐 (v1.9.5)**：视频缓冲态也使用 `calibratedVideoTime` 做时间对齐，`lastValidRecord` 检查 `recordAge >= 0 && < 5000ms`，超时则清除。
+- **Seek 进度条闪烁修复 (v1.9.5)**：`isSwitchingStream` 期间阻止 `onTimeUpdate` 更新 `currentGlobalTime`，`renderLoop` 跳过所有绘制，`initHls` 前先 `pause()`。
+- **流切换保护 (v1.9.5)**：`jumpToLive()` 清空 `detectionBuffer`、`lastValidRecord`、`liveDetectionCache`，避免残留数据污染新会话。任务重新执行前清除所有检测状态。
+- **历史检测框全量加载 (v1.9.5)**：加载范围从历史起点到目标+60s，缓冲池容量 150→300，pruning cutoff 基于画面时间而非墙钟时间。
+- **检测框持久化 (v1.9.0)**：视频缓冲期间保留最后一次有效检测结果并以半透明叠加层显示，陈旧阈值从 15s 提升至 30s，避免检测框突然消失。
+- **HLS 缓冲优化 (v1.9.0)**：增大 HLS 缓冲参数（backBuffer: 10s, maxBuffer: 30s, maxMaxBuffer: 60s），提升 CPU 负载较高时的播放流畅度。
+- **加载遮罩稳定窗口 (v1.9.2)**：引入 `lastConfirmedPlayingTime` 时间戳和 3 秒稳定窗口机制。HLS 切片切换时浏览器会短暂触发 `waiting` 事件导致 `isVideoActuallyPlaying = false`，稳定窗口确保最近确认过播放的情况下不误显示"画面加载中"遮罩。同时应用于 `buffering` 状态，防止正常缓冲过渡时的遮罩闪烁。
+- **直播边缘播放 (v1.9.2)**：实时模式 `initHls` 不再传 `startPosition = 0`，改为 `startPosition = -1`（HLS.js 直播边缘）。`MANIFEST_PARSED` 事件中使用 `trySeekToLive()` 轮询等待 `liveSyncPosition` 就绪（最多 25 次 × 200ms = 5 秒），避免 fallback 到位置 0 导致播放旧画面。超时后降级为简单 `play()`。
+
+- **MANIFEST_PARSED 模式判断修复 (v2.3.0)**：之前当 `currentTask.status` 非 `'running'` 时（如 snapshot 未返回时 `taskStatus` 为 `undefined`），前端错切历史模式，`frozenDuration` 定死导致时间轴冻结。修复后仅终态任务 (`pending`/`failed`/`exception`) 进入历史模式，其余全部按直播处理。
+
+- **时间轴独立定时器 (v2.3.0)**：新增 200ms 独立定时器直接从 `video.currentTime` 读取并更新 `currentGlobalTime`，不依赖 `timeupdate` 事件（hls.js 延迟控制下可能被抑制）。不区分 `playMode`，保证左侧时间始终更新。
+
+- **WebSocket running 状态同步 (v2.3.0)**：`case 'running'` 处理中更新 `currentTask.status = 'running'`，避免后续 MANIFEST_PARSED 读到过期状态。
+- **重连状态精准映射 (v1.9.3)**：`recovered` 消息映射到 `recovering` 状态（显示"网络不稳定，尝试重连中..."），`model_loading` 消息映射到 `model_loading` 状态（显示"推理引擎初始化中..."）。首次连接始终显示"推理引擎初始化"，重连过程始终显示"画面重连中"，不再混淆。
+- **统一就绪栅栏 (v1.9.3)**：Hot Start 场景下，HLS 视频流就绪但检测数据尚未到达时，进入 `loading` 状态并启动 8 秒超时等待。检测数据到达后（`checkUnifiedReady`）或超时后自动切换到 `running` 状态，实现画面、检测框、检测记录"五位一体"同步展示。兼容 `model_loading` 中间状态。
+- **检测框同步回退机制 (v1.9.3)**：主匹配窗口（实时 1500ms / 历史 500ms）未找到匹配帧时，自动使用 3000ms 宽窗口回退搜索，防止网络抖动或时钟偏移导致检测框消失。
+- **历史模式缓冲保护 (v1.9.3)**：`pruneDetectionBuffer` 在历史模式下跳过基于时间的清理逻辑，保留完整的检测帧数据，确保历史回放时检测框不丢失。
+- **组件卸载清理 (v1.9.3)**：`onUnmounted` 中清理 `pendingUnifiedReadyTimeout`，防止组件卸载后仍执行状态修改。
+- **WS 重连硬上限 (v1.9.2)**：WebSocket 重连次数达到上限后直接进入 `exception` 状态，不再无限循环重试。
 
 **布局**:
 ```
@@ -165,6 +200,11 @@ interface ConfigState {
 - 类别阈值随任务表单一起提交
 - 置信度阈值随任务表单一起提交
 
+**新增功能 (v1.9.0)**:
+- **GPU 推理选择**：新增 GPU 开关，支持在创建任务时选择 CPU 或 GPU 推理模式。
+- **GPU 环境检测按钮**：选择 GPU 时，旁边显示"检测 GPU"按钮，调用 `GET /api/tasks/gpu-status` 验证环境。环境不满足时阻止创建 GPU 任务。
+- **use_gpu 参数**：表单提交时携带 `use_gpu` 字段（布尔值），适用于所有任务类型（图片/视频/视频流）。
+
 **表单字段**:
 ```typescript
 interface TaskForm {
@@ -175,6 +215,7 @@ interface TaskForm {
   source_type: 'upload' | 'url' | 'rtsp'
   source_url?: string
   description?: string
+  use_gpu?: boolean  // v1.9.0 新增
 }
 ```
 

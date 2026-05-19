@@ -1,5 +1,5 @@
-import asyncio
 import json
+import time
 import os
 import shutil
 import logging
@@ -7,8 +7,6 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-
-logger = logging.getLogger(__name__)
 
 from fastapi import (
     APIRouter,
@@ -20,23 +18,29 @@ from fastapi import (
     BackgroundTasks,
     Query,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.config import config
-from app.database import get_session, engine
+from app.database import get_session
 from app.dependencies import check_storage_limit, get_current_user
+from app.services.broker import broker
 from app.models.model import DetectionModel
 from app.models.result import TaskResult
+from app.utils.clock_monitor import clock_monitor
 from app.models.task import Task
 from app.models.user import User
 from app.models.detection_record import DetectionRecord
+from app.models.detection_event import DetectionEvent
 from app.services.notifier import notifier
 from app.services.storage_manager import storage_manager
 from app.utils.time import now_beijing
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+system_router = APIRouter(tags=["system"])
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -56,6 +60,10 @@ class TaskResponse(BaseModel):
     error_msg: str
     detection_config: Optional[dict] = None
     has_history: bool = False
+    cumulative_running_seconds: float = 0.0
+    session_start_time: Optional[str] = None
+    resolution_width: Optional[int] = None
+    resolution_height: Optional[int] = None
     created_at: str
     updated_at: str
 
@@ -95,6 +103,10 @@ def _to_response(task: Task, session: Session) -> TaskResponse:
         error_msg=task.error_msg,
         detection_config=json.loads(task.detection_config) if task.detection_config else None,
         has_history=task.has_history,
+        cumulative_running_seconds=task.cumulative_running_seconds,
+        session_start_time=task.session_start_time.isoformat() if task.session_start_time else None,
+        resolution_width=task.resolution_width,
+        resolution_height=task.resolution_height,
         created_at=task.created_at.isoformat(),
         updated_at=task.updated_at.isoformat(),
     )
@@ -166,6 +178,7 @@ async def create_task(
     source_type: str = Form(...),         # upload | url | rtsp
     source_url: Optional[str] = Form(default=None),
     description: str = Form(default=""),
+    use_gpu: bool = Form(default=False),
     rgb_files: List[UploadFile] = File(default=[]),
     ir_files: List[UploadFile] = File(default=[]),
     # Detection Config Fields
@@ -201,36 +214,33 @@ async def create_task(
     # Process detection config from multiple Form fields
     detection_config = {}
     if threshold is not None:
-        # Front-end sends 0-1 values if already divided, or 0-100. 
-        # TaskCreate.vue sends globalThreshold / 100, which is 0-1.
-        detection_config["global_threshold"] = threshold * 100 # Internal format is 0-100 for consistency with DetectionConfig.vue
+        detection_config["global_threshold"] = threshold # Internal format unified to 0-1
 
     if enabled_classes or category_thresholds:
-        # Reconstruct categories list as expected by _apply_detection_config
         selected_ids = json.loads(enabled_classes) if enabled_classes else []
         cat_thresh_map = json.loads(category_thresholds) if category_thresholds else {}
         
-        # We need the model's class names to reconstruct the full list if possible
-        # but the minimal required for filtering is the id and selected flag.
-        categories_list = []
-        
-        # Get all available IDs from model config
-        model_classes = {}
-        if dm.label_config:
-            model_classes = json.loads(dm.label_config)
-        elif dm.class_names:
-            model_classes = {str(i): name for i, name in enumerate(json.loads(dm.class_names))}
-        
-        for cid, cat_name in model_classes.items():
-            categories_list.append({
-                "id": cid,
-                "name": cat_name,
-                "selected": cid in selected_ids,
-                "threshold": cat_thresh_map.get(cid) * 100 if cid in cat_thresh_map else None
-            })
-        
-        if categories_list:
-            detection_config["categories"] = categories_list
+        if not selected_ids and not cat_thresh_map:
+            pass
+        else:
+            categories_list = []
+            
+            model_classes = {}
+            if dm.label_config:
+                model_classes = json.loads(dm.label_config)
+            elif dm.class_names:
+                model_classes = {str(i): name for i, name in enumerate(json.loads(dm.class_names))}
+            
+            for cid, cat_name in model_classes.items():
+                categories_list.append({
+                    "id": cid,
+                    "name": cat_name,
+                    "selected": cid in selected_ids,
+                    "threshold": cat_thresh_map.get(cid) if cid in cat_thresh_map else None
+                })
+            
+            if categories_list:
+                detection_config["categories"] = categories_list
 
     # Create task record
     task = Task(
@@ -243,6 +253,7 @@ async def create_task(
         description=description,
         status="creating",
         detection_config=json.dumps(detection_config) if detection_config else "{}",
+        use_gpu=use_gpu,
     )
     session.add(task)
     session.commit()
@@ -293,7 +304,6 @@ async def create_task(
 
 
 # ── Detail ────────────────────────────────────────────────────────────────────
-
 @router.get("/{task_id}", response_model=TaskResponse)
 def get_task(
     task_id: str,
@@ -304,6 +314,64 @@ def get_task(
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
     return _to_response(task, session)
+
+
+# ── Snapshot (Hot Start) ───────────────────────────────────────────────────
+
+@router.get("/{task_id}/snapshot")
+async def get_task_snapshot(
+    task_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """前端进入监控页面的首个请求：拉取当前状态和最近检测框"""
+    task = session.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task_info = _to_response(task, session)
+    
+    last_status = broker.get_status(f"status:{task_id}")
+    
+    recent_detections = await broker.get_recent_cache(f"detections:{task_id}")
+    
+    records_stmt = select(DetectionRecord).where(DetectionRecord.task_id == task_id).order_by(DetectionRecord.detected_at.desc()).limit(50)
+    records = session.exec(records_stmt).all()
+    recent_records = [
+        {
+            "id": r.id,
+            "class_name": r.class_name,
+            "confidence": r.confidence,
+            "box": json.loads(r.box),
+            "detected_at": r.detected_at.isoformat(),
+            "timestamp_ms": int(r.detected_at.timestamp() * 1000),  # 同步时间戳
+        }
+        for r in records
+    ]
+    
+    task_dir = storage_manager.storage_dir / task_id
+    raw_recording = storage_manager.is_recording_active(task_id)
+    raw_ts = list(task_dir.glob("stream_rgb*.ts"))
+    annotated_ts = list(task_dir.glob("stream_annotated*.ts"))
+    hls_ready = raw_recording or len(raw_ts) > 0 or len(annotated_ts) > 0
+
+    m3u8_exists = (task_dir / "stream_rgb.m3u8").exists()
+    has_history = (m3u8_exists and not raw_recording) or (task.has_history and task.status != "running")
+
+    return {
+        "task": task_info,
+        "last_status": last_status,
+        "recent_detections": recent_detections if hls_ready else [],
+        "recent_records": recent_records,
+        "hls_ready": hls_ready,
+        "has_history": has_history,
+        "server_time": int(time.time() * 1000),
+        "ntp_offset_ms": clock_monitor.last_offset_ms,
+        "ntp_avg_offset_ms": clock_monitor.avg_offset_ms,
+        "ntp_synced": clock_monitor.last_offset_ms != 0.0,
+        # 【P0-3 改进】：时间审计统计
+        "ntp_offset_stats": clock_monitor.get_offset_stats(),
+    }
 
 
 # ── Update ────────────────────────────────────────────────────────────────────
@@ -440,24 +508,28 @@ async def execute_task(
         
         mapping = None
         if dm.label_config:
-            try: mapping = json.loads(dm.label_config)
-            except: pass
+            try:
+                mapping = json.loads(dm.label_config)
+            except Exception:
+                pass
 
         # V12: 强制冷启动 - 先停止旧流（如有），保证资源干净
+        old_stream = stream_manager.get_stream(task.id)
         stream_manager.stop_stream(task.id)
+        if old_stream and hasattr(old_stream, '_drain_done'):
+            # 等待旧流彻底释放资源（最多 5s），防止新旧进程冲突
+            await asyncio.to_thread(old_stream._drain_done.wait, timeout=3.0)
 
         # DB 立即置为 running，前端响应"正在连接"
-        task.status = "running"
-        task.error_msg = ""  # 清空旧错误信息（NOT NULL，必须用空字符串）
+        task.status = "initializing"
+        task.error_msg = ""
         task.updated_at = now_beijing()
         session.add(task)
         session.commit()
         
-        # 启动新流
-        stream_manager.start_stream(task.id, task.source_path, dm.file_path, mapping)
+        stream_manager.start_stream(task.id, task.source_path, dm.file_path, mapping, use_gpu=task.use_gpu)
         
-        # V12: 立即通知前端状态变更
-        await notifier.broadcast_status(task.id, "running")
+        await notifier.broadcast_status(task.id, "initializing")
         
         return {"message": "Stream execution started", "position": 0}
     else:
@@ -486,21 +558,32 @@ async def pause_task(
         raise HTTPException(status_code=404, detail="Task not found")
     if task.task_type != "stream":
         raise HTTPException(status_code=400, detail="Only stream tasks can be paused")
-    if task.status != "running":
-        logger.warning(f"USER OPERATION: Pause failed for {task_id}. Reason: Task status is '{task.status}', expected 'running'")
-        raise HTTPException(status_code=400, detail="Task is not running")
+    if task.status not in ("running", "initializing"):
+        logger.warning(f"USER OPERATION: Pause failed for {task_id}. Reason: Task status is '{task.status}', expected 'running' or 'initializing'")
+        raise HTTPException(status_code=400, detail="Task is not running or initializing")
 
     from app.services.task_runner import stream_manager
-    # V12: 物理停止流资源（包含录制封包）
-    stream_manager.stop_stream(task_id)
+    try:
+        stream = stream_manager.get_stream(task_id)
+        stream_manager.stop_stream(task_id)
+        if stream and stream._drain_done:
+            stream._drain_done.wait(timeout=10.0)
+    except Exception as e:
+        logger.error(f"stop_stream failed for {task_id}: {e}")
 
-    # V12: 暂停语义=重置为"未执行"(pending)
+    task.accumulate_running_seconds()
+
+    recorded_duration = storage_manager.get_merged_duration(task_id)
+    if recorded_duration > 0 and task.cumulative_running_seconds < recorded_duration:
+        logger.info(f"Correcting cumulative_running_seconds for {task_id}: "
+                     f"{task.cumulative_running_seconds:.1f}s -> {recorded_duration:.1f}s")
+        task.cumulative_running_seconds = recorded_duration
+
     task.status = "pending"
     task.updated_at = now_beijing()
     session.add(task)
     session.commit()
 
-    # V12: 立即通知前端状态变更
     await notifier.broadcast_status(task_id, "pending")
 
     return {"message": "Task stopped and reset to pending"}
@@ -534,7 +617,6 @@ def get_result(
         raise HTTPException(status_code=404, detail="Result not found")
 
     base_url = f"/api/results/{current_user.id}/{task_id}"
-    result_path = result.result_path
     detections = json.loads(result.detections)
 
     if task.task_type == "image":
@@ -565,8 +647,8 @@ def get_result(
 @router.get("/{task_id}/detections")
 def get_historical_detections(
     task_id: str,
-    start_time: int = Query(..., description="起始绝对时间戳(毫秒)"),
-    end_time: int = Query(..., description="结束绝对时间戳(毫秒)"),
+    start_time: float = Query(..., description="起始绝对时间戳(毫秒)"),
+    end_time: float = Query(..., description="结束绝对时间戳(毫秒)"),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -577,8 +659,10 @@ def get_historical_detections(
 
     try:
         # 1. 极速范围查询 (依靠 ix_detection_records_detected_at 索引)
-        dt_start = datetime.fromtimestamp(start_time / 1000.0)
-        dt_end = datetime.fromtimestamp(end_time / 1000.0)
+        # 【双时间戳架构】：start_time/end_time 是 Unix 绝对时间戳（毫秒），转换为本地时间查询
+        from app.utils.time import BEIJING_TZ
+        dt_start = datetime.fromtimestamp(start_time / 1000.0, tz=BEIJING_TZ).replace(tzinfo=None)
+        dt_end = datetime.fromtimestamp(end_time / 1000.0, tz=BEIJING_TZ).replace(tzinfo=None)
         
         stmt = select(DetectionRecord).where(
             DetectionRecord.task_id == task_id,
@@ -589,9 +673,10 @@ def get_historical_detections(
         records = session.exec(stmt).all()
         
         # 2. 内存聚合：将同一毫秒内的框组合在一起
-        # 使用 int(ts * 1000) 作为 key 确保毫秒级对齐
+        # 【双时间戳架构】：使用 detected_at 的 Unix 时间戳作为 key（毫秒级对齐）
         grouped_data = defaultdict(list)
         for r in records:
+            # detected_at 是北京时间（naive datetime），直接按系统本地时区转换
             ts_ms = int(r.detected_at.timestamp() * 1000)
             box_data = json.loads(r.box)
             # 格式化为前端 renderLoop 期望的 boxes 格式
@@ -606,7 +691,7 @@ def get_historical_detections(
             
         # 3. 转换为前端缓冲池期望的格式
         result = [
-            {"timestamp": ts, "boxes": boxes}
+            {"timestamp": ts, "timestamp_ms": ts, "boxes": boxes}
             for ts, boxes in sorted(grouped_data.items())
         ]
             
@@ -664,9 +749,138 @@ def get_detection_records(
                 "confidence": r.confidence,
                 "box": json.loads(r.box),
                 "detected_at": r.detected_at.isoformat(),
+                "timestamp_ms": int(r.detected_at.timestamp() * 1000),
             }
             for r in records
         ]
+    }
+
+
+# ── Detection Events (Event-Driven) ──────────────────────────────────────
+
+@router.get("/{task_id}/detection-events")
+def get_detection_events(
+    task_id: str,
+    skip: int = 0,
+    limit: int = 200,
+    event_type: Optional[str] = None,
+    class_name: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    order: str = "desc",
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    获取事件驱动的检测记录
+    
+    返回 Enter/Leave 事件，而非每帧记录。
+    适合高 FPS 场景，数据量减少 90%+
+    """
+    task = session.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    query = select(DetectionEvent).where(DetectionEvent.task_id == task_id)
+    
+    if event_type:
+        query = query.where(DetectionEvent.event_type == event_type)
+    
+    if class_name:
+        query = query.where(DetectionEvent.class_name == class_name)
+    
+    if start_time:
+        try:
+            dt_start = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+            query = query.where(DetectionEvent.entered_at >= dt_start)
+        except ValueError:
+            pass
+            
+    if end_time:
+        try:
+            dt_end = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+            query = query.where(DetectionEvent.entered_at <= dt_end)
+        except ValueError:
+            pass
+
+    if order == "asc":
+        query = query.order_by(DetectionEvent.entered_at.asc())
+    else:
+        query = query.order_by(DetectionEvent.entered_at.desc())
+
+    events = session.exec(query.offset(skip).limit(limit)).all()
+
+    return {
+        "events": [
+            {
+                "id": e.id,
+                "track_id": e.track_id,
+                "event_type": e.event_type,
+                "class_name": e.class_name,
+                "confidence": e.confidence,
+                "box": json.loads(e.box),
+                "entered_at": e.entered_at.isoformat(),
+                "left_at": e.left_at.isoformat() if e.left_at else None,
+                "duration_ms": e.duration_ms,
+                "max_confidence": e.max_confidence,
+                "avg_confidence": e.avg_confidence,
+                "update_count": e.update_count,
+            }
+            for e in events
+        ]
+    }
+
+
+@router.get("/{task_id}/detection-events/summary")
+def get_detection_events_summary(
+    task_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    获取任务的事件统计摘要
+    
+    返回：
+    - 总目标数
+    - 各类别目标数
+    - 平均持续时间
+    - 平均置信度
+    """
+    task = session.get(Task, task_id)
+    if not task or task.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    leave_events = session.exec(
+        select(DetectionEvent).where(
+            DetectionEvent.task_id == task_id,
+            DetectionEvent.event_type == "leave"
+        )
+    ).all()
+
+    total_targets = len(leave_events)
+    
+    class_stats = {}
+    for e in leave_events:
+        if e.class_name not in class_stats:
+            class_stats[e.class_name] = {
+                "count": 0,
+                "total_duration_ms": 0,
+                "total_avg_confidence": 0.0,
+            }
+        class_stats[e.class_name]["count"] += 1
+        class_stats[e.class_name]["total_duration_ms"] += e.duration_ms
+        class_stats[e.class_name]["total_avg_confidence"] += e.avg_confidence
+
+    for stats in class_stats.values():
+        count = stats["count"]
+        stats["avg_duration_ms"] = stats["total_duration_ms"] / count if count > 0 else 0
+        stats["avg_confidence"] = stats["total_avg_confidence"] / count if count > 0 else 0
+        del stats["total_duration_ms"]
+        del stats["total_avg_confidence"]
+
+    return {
+        "total_targets": total_targets,
+        "class_stats": class_stats,
     }
 
 
@@ -783,5 +997,157 @@ async def log_playback_event(
     
     with open(config.PLAYBACK_LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-    
+
     return {"status": "ok"}
+
+
+# ── Frontend Batch Logging ─────────────────────────────────────────────────
+class FrontendLogEntry(BaseModel):
+    timestamp: str
+    level: str
+    category: str
+    message: str
+    details: Optional[dict] = None
+    userAgent: Optional[str] = None
+    url: Optional[str] = None
+
+
+class BatchLogRequest(BaseModel):
+    logs: List[FrontendLogEntry]
+
+
+class DiagLogEntry(BaseModel):
+    ts: str
+    tag: str
+    msg: str
+
+
+class DiagLogRequest(BaseModel):
+    taskId: Optional[str] = None
+    logs: List[DiagLogEntry]
+
+
+@system_router.post("/logs/diag")
+async def log_diag(body: DiagLogRequest):
+    """接收前端诊断日志，写入 diag.log 文件"""
+    config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = config.LOGS_DIR / "diag.log"
+
+    with open(log_path, "a", encoding="utf-8") as f:
+        for entry in body.logs:
+            log_line = {
+                "time": datetime.now().isoformat(),
+                "client_ts": entry.ts,
+                "task_id": body.taskId,
+                "tag": entry.tag,
+                "msg": entry.msg,
+            }
+            f.write(json.dumps(log_line, ensure_ascii=False) + "\n")
+
+    return {"status": "ok", "received": len(body.logs)}
+
+
+@system_router.post("/logs/batch")
+async def log_frontend_batch(
+    body: BatchLogRequest,
+):
+    """
+    接收前端批量日志，写入专门的 frontend.log 文件
+    """
+    config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = config.LOGS_DIR / "frontend.log"
+
+    with open(log_path, "a", encoding="utf-8") as f:
+        for entry in body.logs:
+            log_line = {
+                "time": datetime.now().isoformat(),
+                "user_id": "anonymous",  # 改为匿名上报，确保护日志通畅
+                "client_time": entry.timestamp,
+                "level": entry.level,
+                "category": entry.category,
+                "message": entry.message,
+                "details": entry.details,
+                "ua": entry.userAgent,
+                "url": entry.url,
+            }
+            f.write(json.dumps(log_line, ensure_ascii=False) + "\n")
+
+    return {"status": "ok", "received": len(body.logs)}
+
+
+# ── GPU Status Check ─────────────────────────────────────────────────────────
+@router.get("/gpu/status")
+async def gpu_status(
+    current_user: User = Depends(get_current_user),
+):
+    """检查GPU部署环境是否满足GPU推理要求"""
+    checks: dict = {}
+    reason_parts: list[str] = []
+    
+    # 1. onnxruntime-gpu 安装检查
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        checks["onnx_gpu"] = "CUDAExecutionProvider" in providers
+        if not checks["onnx_gpu"]:
+            reason_parts.append("onnxruntime-gpu未安装或CUDAProvider不可用")
+    except Exception as e:
+        checks["onnx_gpu"] = False
+        reason_parts.append(f"onnxruntime导入失败: {str(e)}")
+    
+    # 2. GPU 硬件与显存检查 (使用 pynvml 代替 torch，减小依赖体积)
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        try:
+            device_count = pynvml.nvmlDeviceGetCount()
+            if device_count > 0:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                checks["cuda_available"] = True
+                name = pynvml.nvmlDeviceGetName(handle)
+                checks["device_name"] = name.decode('utf-8') if isinstance(name, bytes) else name
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                checks["vram_mb"] = mem_info.total // 1024 // 1024
+            else:
+                checks["cuda_available"] = False
+                reason_parts.append("未检测到NVIDIA显卡")
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception as e:
+        checks["cuda_available"] = False
+        reason_parts.append(f"GPU硬件检测失败: {str(e)}")
+    
+    # 3. 显存充足性检查 (至少需要 512MB)
+    checks["vram_sufficient"] = checks.get("vram_mb", 0) >= 512
+    if not checks["vram_sufficient"]:
+        reason_parts.append(f"显存不足 (当前: {checks.get('vram_mb', 0)}MB, 需要: 512MB)")
+    
+    # 综合判定
+    available = all([
+        checks.get("onnx_gpu", False),
+        checks.get("cuda_available", False),
+        checks.get("vram_sufficient", False),
+    ])
+    
+    return {
+        "available": available,
+        "checks": checks,
+        "reason": "; ".join(reason_parts) if not available else "",
+    }
+
+
+@router.get("/registry/status")
+async def registry_status(
+    current_user: User = Depends(get_current_user),
+):
+    """查看配置中心状态：已注册服务、配置项"""
+    from app.services.registry import registry
+    return {
+        "services": registry.list_services(),
+        "config": {
+            "mediamtx_rtsp_port": registry.get_config("mediamtx_rtsp_port"),
+            "mediamtx_api_port": registry.get_config("mediamtx_api_port"),
+            "backend_port": registry.get_config("backend_port"),
+            "simulator_port": registry.get_config("simulator_port"),
+        },
+    }

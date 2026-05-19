@@ -1,7 +1,12 @@
 from sqlmodel import SQLModel, create_engine, Session
 from app.config import config
 # V1.2.32: Explicitly import models to ensure registry is populated
-import app.models
+from app.models.user import User
+from app.models.task import Task
+from app.models.model import DetectionModel
+from app.models.result import TaskResult
+from app.models.detection_record import DetectionRecord
+from app.models.detection_event import DetectionEvent
 
 # Ensure data directory exists
 config.DATA_DIR.mkdir(exist_ok=True)
@@ -18,7 +23,20 @@ engine = create_engine(
 )
 
 
+def _enable_wal_mode() -> None:
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(config.DB_PATH), timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DB] WAL mode setup skipped: {e}")
+
+
 def create_db_and_tables() -> None:
+    _enable_wal_mode()
     SQLModel.metadata.create_all(engine)
     _migrate_new_columns()
 
@@ -36,6 +54,13 @@ def _migrate_new_columns() -> None:
         new_columns = [
             ("first_session_start_time", "VARCHAR"),
             ("session_count", "INTEGER DEFAULT 0"),
+            ("use_gpu", "BOOLEAN DEFAULT 0"),
+            ("has_history", "BOOLEAN DEFAULT 0"),
+            ("resolution_width", "INTEGER DEFAULT 0"),
+            ("resolution_height", "INTEGER DEFAULT 0"),
+            ("detection_config", "VARCHAR DEFAULT '{}'"),
+            ("cumulative_running_seconds", "REAL DEFAULT 0.0"),
+            ("session_start_time", "VARCHAR"),
         ]
 
         for col_name, col_type in new_columns:

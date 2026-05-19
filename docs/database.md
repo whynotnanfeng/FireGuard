@@ -44,11 +44,14 @@ erDiagram
         string source_path
         float progress
         string detection_config "JSON string"
+        bool use_gpu "是否使用 GPU 推理 (v1.9.0)"
         bool has_history
         datetime first_session_start_time "首次 session 启动时间"
         int session_count "session 计数"
         int resolution_width "视频宽度"
         int resolution_height "视频高度"
+        float cumulative_running_seconds "累计运行秒数 (v1.9.4)"
+        datetime session_start_time "本次会话开始时间 (v1.9.4)"
         datetime created_at
     }
 ```
@@ -64,15 +67,20 @@ erDiagram
 记录检测执行的实例。
 - **status**: 核心状态机。包括：
     - `pending`: 初始创建态。
-    - `running`: 正在运行（在 v1.2.0 中，包含前 5s 的物理连接宽限期）。
+    - `initializing` (v1.9.4 新增): 后端正在初始化（连接视频源+加载推理模型+生成HLS流），五要素尚未就绪，用户不可查看。
+    - `running`: 后端已就绪并持续产出五要素数据，用户点击查看可看到当前时刻的五位一体画面。
     - `completed`: 任务正常退出。
-    - `failed`: 发生致命异常。
+    - `failed`: 发生致命异常（不可恢复，通常为 image/video 类型）。
+    - `exception`: 运行时异常（可重试，通常为 stream 类型的视频源问题，可能有历史数据可供查看）。
 - **source_path**: 物理文件的存储路径或流地址。
 - **detection_config**: JSON 字符串，存储检测配置（类别阈值、启用/禁用等）。
+- **use_gpu** (v1.9.0 新增): 布尔值，标记任务是否使用 GPU 推理。默认 `False`。当设为 `True` 时，推理管线使用 `CUDAExecutionProvider`。
 - **has_history**: 标记任务是否有历史视频/检测记录。
 - **first_session_start_time**: 任务首次启动录制的时间，用于进度条时间对齐。
 - **session_count**: 任务累计启动次数，用于 session 目录命名。
 - **resolution_width / resolution_height**: 视频分辨率，用于检测框坐标映射。
+- **cumulative_running_seconds** (v1.9.4 新增): 累计运行秒数（不含停止期间），用于前端实时模式独立计时器计算直播时长。每次任务停止/异常时，将本次会话运行时间累加到此字段。
+- **session_start_time** (v1.9.4 新增): 本次会话开始时间（`initializing → running` 时记录），用于与 `cumulative_running_seconds` 配合计算当前实时运行时长。
 
 ### 2.5 检测记录表 (DetectionRecord)
 存储每次检测的结果。

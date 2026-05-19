@@ -119,7 +119,7 @@ interface CategoryItem {
 }
 
 const categories = ref<CategoryItem[]>([])
-const globalThreshold = ref<number>(0.6)
+const globalThreshold = ref<number>(0.4)
 const selectAll = ref(true)
 const submitting = ref(false)
 const searchText = ref('')
@@ -171,9 +171,7 @@ onMounted(async () => {
         const existing = existingConfig.categories.find((c: any) => c.id === cat.id)
         if (existing) {
           selected = existing.selected !== false
-          const t = existing.threshold ?? null
-          // Normalization: detect if old 0-100 values were used
-          threshold = (t !== null && t > 1) ? t / 100 : t
+          threshold = existing.threshold ?? null
         }
       }
       
@@ -185,17 +183,15 @@ onMounted(async () => {
       }
     })
     
-    // V1.4.7: Smart Defaulting - Use 0.6 only if no valid saved config exists
+    // V1.4.7: Smart Defaulting - Use 0.4 as default for better recall
     if (existingConfig?.global_threshold !== undefined && existingConfig.global_threshold !== null) {
-      const gt = existingConfig.global_threshold
-      globalThreshold.value = gt > 1 ? gt / 100 : gt
+      globalThreshold.value = existingConfig.global_threshold
     } else if (props.initialGlobalThreshold !== undefined) {
       globalThreshold.value = props.initialGlobalThreshold
     } else if (model.default_threshold !== undefined) {
-      // If model has a default but it's the "old" low value, we still suggest 0.6
-      globalThreshold.value = (model.default_threshold < 0.4) ? 0.6 : model.default_threshold
+      globalThreshold.value = (model.default_threshold < 0.4) ? 0.4 : model.default_threshold
     } else {
-      globalThreshold.value = 0.6
+      globalThreshold.value = 0.4
     }
     
 

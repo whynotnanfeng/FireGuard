@@ -70,17 +70,24 @@ logger = logging.getLogger("app")
 
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, session: Session = Depends(get_session)):
-    user = session.exec(select(User).where(User.username == body.username)).first()
-    if not user or not verify_password(body.password, user.password_hash):
-        logger.warning(f"[Auth] Login failed for user: {body.username}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-        )
-    
-    token = create_access_token({"sub": user.id, "username": user.username})
-    logger.info(f"[Auth] Login successful: {body.username}")
-    return TokenResponse(access_token=token)
+    logger.debug(f"[Auth] Login attempt for user: {body.username}")
+    try:
+        user = session.exec(select(User).where(User.username == body.username)).first()
+        logger.debug(f"[Auth] DB lookup finished for user: {body.username}")
+        
+        if not user or not verify_password(body.password, user.password_hash):
+            logger.warning(f"[Auth] Login failed for user: {body.username}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+            )
+        
+        token = create_access_token({"sub": user.id, "username": user.username})
+        logger.info(f"[Auth] Login successful: {body.username}")
+        return TokenResponse(access_token=token)
+    except Exception as e:
+        logger.error(f"[Auth] Login error for {body.username}: {e}")
+        raise
 
 
 @router.get("/me", response_model=UserResponse)

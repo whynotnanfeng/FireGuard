@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from app.models.result import TaskResult
     from app.models.user import User
     from app.models.detection_record import DetectionRecord
+    from app.models.detection_event import DetectionEvent
 
 
 class Task(SQLModel, table=True):
@@ -33,8 +34,11 @@ class Task(SQLModel, table=True):
     progress: int = Field(default=0)
     error_msg: str = Field(default="", max_length=1000)
     detection_config: str = Field(default="{}", max_length=10000)
+    use_gpu: bool = Field(default=False)
     # V12: 是否曾经成功捕获过画面（区分"初始"和"曾暂停"）
     has_history: bool = Field(default=False)
+    cumulative_running_seconds: float = Field(default=0.0)
+    session_start_time: Optional[datetime] = Field(default=None)
     resolution_width: Optional[int] = Field(default=None)
     resolution_height: Optional[int] = Field(default=None)
     first_session_start_time: Optional[datetime] = Field(default=None)
@@ -46,3 +50,11 @@ class Task(SQLModel, table=True):
     model: Optional["DetectionModel"] = Relationship(back_populates="tasks")
     result: Optional["TaskResult"] = Relationship(back_populates="task", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
     detection_records: List["DetectionRecord"] = Relationship(back_populates="task", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+    detection_events: List["DetectionEvent"] = Relationship(back_populates="task", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+
+    def accumulate_running_seconds(self) -> None:
+        if self.session_start_time:
+            elapsed = (now_beijing() - self.session_start_time).total_seconds()
+            if elapsed > 0:
+                self.cumulative_running_seconds += elapsed
+            self.session_start_time = None

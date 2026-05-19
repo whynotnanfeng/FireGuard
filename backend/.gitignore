@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.venv/
+venv/
+
+# Local Data & Logs
+logs/
+data/
+*.db
+*.log
+
+# Environment
+.env

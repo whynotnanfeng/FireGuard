@@ -75,3 +75,20 @@ testdata/
 *.swp
 *.swo
 .history/
+
+# --- Redis & Temporary States ---
+backend/dump.rdb
+*.rdb
+
+# --- Root Level Binaries & Dumps ---
+bin/
+testdata/
+
+# --- Temporary Test Scripts in backend ---
+backend/final_verify.py
+backend/test_*.py
+!backend/tests/
+
+# --- Root HTML Design Proposals & Plans ---
+/*.html
+
