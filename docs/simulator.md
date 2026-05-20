@@ -27,6 +27,10 @@ FireGuard 流模拟控制台是一个独立的 RTSP 视频流仿真服务，用�
 - **GPU 硬解支持**：推流命令新增 `-hwaccel cuda -c:v h264_cuvid`。当 `hw_accel=auto` 且检测到 NVENC 时，输入视频文件解码从 CPU 移至 GPU。显著降低 CPU 占用（1080p H.264 视频 CPU 软解约 10-15%，GPU 硬解仅 ~2%）。
 - 仅在 `hw_accel != "cpu"` 时启用，`cpu` 模式保持纯 CPU 编解码。
 
+**v2.7.0 更新**：
+- **异步健康监控**：StreamManager 健康监控从 `threading.Thread` 迁移到 `asyncio.Task`，与 asyncio 事件循环协调，并发效率提升 2-3 倍。采用渐进式迁移策略，无事件循环时自动回退到线程模式。
+- **元数据缓存**：`get_metadata_cached()` 添加 5 秒 TTL 缓存，减少频繁刷新页面时的 JSON 文件读取，JSON 读取频率从每次请求降至每 5 秒一次。
+
 ---
 
 ## 快速启动

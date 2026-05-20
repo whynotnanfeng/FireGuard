@@ -42,6 +42,24 @@ def get_metadata():
         return {}
 
 
+# 【性能优化】：元数据缓存，TTL 5 秒，减少频繁刷新页面时的磁盘 I/O
+_metadata_cache: dict = {"data": None, "time": 0.0}
+_METADATA_CACHE_TTL = 5.0
+
+
+def get_metadata_cached() -> dict:
+    """带缓存的元数据读取，5 秒内返回缓存结果。"""
+    now = time.time()
+    if (_metadata_cache["data"] is not None
+            and now - _metadata_cache["time"] < _METADATA_CACHE_TTL):
+        return _metadata_cache["data"]
+
+    data = get_metadata()
+    _metadata_cache["data"] = data
+    _metadata_cache["time"] = now
+    return data
+
+
 def save_metadata(data):
     METADATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(METADATA_FILE, "w", encoding="utf-8") as f:
@@ -492,7 +510,7 @@ async def upload_video(file: UploadFile = File(...), device_name: str = Form("�
 @app.get("/videos")
 def list_videos():
     videos = []
-    meta = get_metadata()
+    meta = get_metadata_cached()
     active_streams = stream_manager.get_active_streams()
     active_file_ids = {Path(s["video_path"]).stem for s in active_streams}
     

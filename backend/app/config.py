@@ -73,13 +73,15 @@ class Config:
 
     @property
     def IS_WSL(self) -> bool:
-        """检测是否在 WSL/WSL2 环境中运行"""
-        try:
-            with open("/proc/version", "r") as f:
-                content = f.read().lower()
-                return "microsoft" in content or "wsl" in content
-        except (FileNotFoundError, PermissionError):
-            return False
+        """检测是否在 WSL/WSL2 环境中运行（结果缓存）。"""
+        if not hasattr(self, '_is_wsl'):
+            try:
+                with open("/proc/version", "r") as f:
+                    content = f.read().lower()
+                    self._is_wsl = "microsoft" in content or "wsl" in content
+            except (FileNotFoundError, PermissionError):
+                self._is_wsl = False
+        return self._is_wsl
     
     @property
     def HW_ACCEL_PRIORITY(self) -> list[str] | None:

@@ -62,9 +62,26 @@ class MediaServerManager:
             pass
 
     def _is_port_in_use(self, port: int) -> bool:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            return s.connect_ex(('127.0.0.1', port)) == 0
+        """检查端口是否被占用，同时支持 IPv4 和 IPv6"""
+        # 先尝试 IPv4
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                if s.connect_ex(('127.0.0.1', port)) == 0:
+                    return True
+        except Exception:
+            pass
+
+        # 再尝试 IPv6（MediaMTX 默认绑定 [::]）
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                if s.connect_ex(('::1', port)) == 0:
+                    return True
+        except Exception:
+            pass
+
+        return False
 
     def _generate_config(self):
         rtsp_port = config.MEDIAMTX_RTSP_PORT
@@ -251,9 +268,24 @@ paths:
                         f"exhausted. MediaMTX is permanently unhealthy. "
                         f"Please restart the simulator or check the system."
                     )
-                    # 不再尝试接管，但保持 Lease Mode 防止端口冲突
                     fail_count = 0
-                    time.sleep(120)  # 延长检查间隔到 2 分钟
+                    time.sleep(120)
+                    continue
+
+                # 【P0 修复】：接管前确认 MediaMTX 确实已宕机，且当前进程是所有者或无主
+                owner = None
+                try:
+                    from app.services.registry import registry
+                    owner = registry.get_mediamtx_owner()
+                except Exception:
+                    pass
+
+                if owner and owner.get("pid") != os.getpid():
+                    logger.warning(
+                        f"[MediaServer] MediaMTX owned by PID={owner['pid']}, skipping takeover. "
+                        f"Health check may have false negative."
+                    )
+                    fail_count = 0
                     continue
 
                 logger.error(

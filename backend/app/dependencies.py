@@ -69,15 +69,24 @@ def get_current_user(
 # ── Storage helpers ──────────────────────────────────────────────────────────
 
 import os
+import time
+from functools import lru_cache
 
 
 def get_dir_size(path: str) -> int:
+    """计算目录总大小，结果缓存 30 秒以避免频繁磁盘遍历。"""
+    cache_key = time.time() // 30
+    return _get_dir_size_cached(path, cache_key)
+
+
+@lru_cache(maxsize=8)
+def _get_dir_size_cached(path: str, cache_time: float) -> int:
+    """Internal cached implementation. cache_time forces TTL invalidation."""
     total = 0
     for dirpath, _, filenames in os.walk(path):
         for f in filenames:
             fp = os.path.join(dirpath, f)
-            if os.path.exists(fp):
-                total += os.path.getsize(fp)
+            total += os.path.getsize(fp)
     return total
 
 

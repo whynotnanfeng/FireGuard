@@ -3,6 +3,7 @@ import os
 import logging
 import time
 import threading
+import asyncio
 from typing import Dict, List, Optional
 from pathlib import Path
 
@@ -60,6 +61,7 @@ class StreamManager:
         self.max_stream_duration = 86400  # 单流最大运行 24 小时，-stream_loop -1 保证无缝循环
         self.consecutive_fail_threshold = 3  # 连续失败 3 次则重启
         self._health_check_thread: Optional[threading.Thread] = None
+        self._health_check_task: Optional[asyncio.Task] = None
         self._stop_health_check = threading.Event()
         
         # P0 修复：流健康监控增强
@@ -453,7 +455,19 @@ class StreamManager:
             self.stop_stream(sid)
     
     def start_health_monitor(self):
-        """启动流健康监控后台线程"""
+        """启动流健康监控（优先使用 asyncio Task，回退到线程）。"""
+        # 尝试使用 asyncio Task
+        try:
+            loop = asyncio.get_running_loop()
+            if self._health_check_task and not self._health_check_task.done():
+                return
+            self._health_check_task = loop.create_task(self._health_check_loop_async())
+            logger.info("[Simulator] Health monitor started (asyncio)")
+            return
+        except RuntimeError:
+            pass  # 没有运行中的事件循环，回退到线程
+
+        # 回退到线程
         if self._health_check_thread and self._health_check_thread.is_alive():
             return
         self._stop_health_check.clear()
@@ -461,10 +475,29 @@ class StreamManager:
             target=self._health_check_loop, daemon=True
         )
         self._health_check_thread.start()
-        logger.info("[Simulator] Health monitor started")
+        logger.info("[Simulator] Health monitor started (thread)")
     
+    async def stop_health_monitor_async(self):
+        """停止 asyncio 版本的健康监控。"""
+        if self._health_check_task and not self._health_check_task.done():
+            self._health_check_task.cancel()
+            try:
+                await self._health_check_task
+            except asyncio.CancelledError:
+                pass
+            self._health_check_task = None
+        logger.info("[Simulator] Health monitor stopped (asyncio)")
+
     def stop_health_monitor(self):
-        """停止流健康监控后台线程"""
+        """停止流健康监控后台线程。"""
+        # 先尝试取消 asyncio task
+        if self._health_check_task and not self._health_check_task.done():
+            self._health_check_task.cancel()
+            self._health_check_task = None
+            logger.info("[Simulator] Health monitor stopped (asyncio)")
+            return
+
+        # 回退到线程
         self._stop_health_check.set()
         if self._health_check_thread:
             self._health_check_thread.join(timeout=5)
@@ -472,10 +505,40 @@ class StreamManager:
         logger.info("[Simulator] Health monitor stopped")
     
     def _health_check_loop(self):
-        """后台健康检查循环"""
+        """后台健康检查循环（线程版本，用于回退）。"""
         fail_counts: Dict[str, int] = {}
         
         while not self._stop_health_check.wait(self.health_check_interval):
+            for stream_id in list(self.streams.keys()):
+                health = self.check_stream_health(stream_id)
+                
+                if not health.get("is_alive", False):
+                    fail_counts[stream_id] = fail_counts.get(stream_id, 0) + 1
+                    
+                    if fail_counts[stream_id] >= self.consecutive_fail_threshold:
+                        logger.warning(
+                            f"[Simulator] Stream {stream_id} failed health check "
+                            f"{fail_counts[stream_id]} times, restarting..."
+                        )
+                        self._auto_restart_stream(stream_id)
+                        fail_counts[stream_id] = 0
+                else:
+                    fail_counts[stream_id] = 0
+                    
+                    elapsed = health.get("elapsed_seconds", 0)
+                    if elapsed > self.max_stream_duration:
+                        logger.info(
+                            f"[Simulator] Stream {stream_id} reached max duration "
+                            f"({elapsed:.0f}s > {self.max_stream_duration}s), restarting..."
+                        )
+                        self._auto_restart_stream(stream_id)
+
+    async def _health_check_loop_async(self):
+        """后台健康检查循环（asyncio 版本）。"""
+        fail_counts: Dict[str, int] = {}
+        
+        while True:
+            await asyncio.sleep(self.health_check_interval)
             for stream_id in list(self.streams.keys()):
                 health = self.check_stream_health(stream_id)
                 

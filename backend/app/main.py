@@ -12,6 +12,7 @@ cv2.setNumThreads(1)
 import asyncio  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
+import time  # noqa: E402
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Path  # noqa: E402
 from fastapi.responses import PlainTextResponse  # noqa: E402
@@ -235,6 +236,12 @@ app.mount("/api/results", StaticFiles(directory=str(config.RESULTS_DIR)), name="
 
 # --- RT Storage Mounting ---
 # --- Live HLS endpoint: 截断 m3u8 避免无限增长导致 hls.js 性能恶化 ---
+
+# 【性能优化】：m3u8 内容内存缓存，TTL 1 秒，减少高并发下的磁盘 I/O
+_m3u8_cache: dict[str, tuple[str, float]] = {}
+_M3U8_CACHE_TTL = 1.0  # 1 秒缓存
+
+
 @app.get("/api/streams/{task_id}/live.m3u8")
 async def live_m3u8(
     task_id: str = Path(...),
@@ -243,6 +250,15 @@ async def live_m3u8(
     """返回截断版 m3u8（仅最近 N 个 TS 分片），用于直播流播放。
     全量 m3u8 仍通过 /storage 静态路径提供，用于历史回放。
     """
+    cache_key = f"{task_id}:{limit}"
+    now = time.time()
+
+    # 检查缓存
+    if cache_key in _m3u8_cache:
+        cached_content, cached_time = _m3u8_cache[cache_key]
+        if now - cached_time < _M3U8_CACHE_TTL:
+            return PlainTextResponse(cached_content, media_type="application/vnd.apple.mpegurl")
+
     m3u8_path = config.VIDEO_STORAGE_DIR / task_id / "stream_annotated.m3u8"
     if not m3u8_path.exists():
         return PlainTextResponse("", status_code=404)
@@ -276,31 +292,32 @@ async def live_m3u8(
         # else: skip empty lines etc.
 
     if len(segments) <= limit:
-        return PlainTextResponse(content, media_type="application/vnd.apple.mpegurl")
+        result = content
+    else:
+        kept = segments[-limit:]
+        result_lines: list[str] = []
+        for line in header:
+            # 更新 MEDIA-SEQUENCE 以匹配截断后的首个分片
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                try:
+                    orig_seq = int(line.split(":", 1)[1])
+                except ValueError:
+                    orig_seq = 0
+                skipped = len(segments) - limit
+                result_lines.append(f"#EXT-X-MEDIA-SEQUENCE:{orig_seq + skipped}")
+            elif line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE:"):
+                # 截断后该标签不再准确，跳过（hls.js 不需要它）
+                continue
+            else:
+                result_lines.append(line)
+        for seg in kept:
+            result_lines.extend(seg)
+        result = "\n".join(result_lines)
 
-    kept = segments[-limit:]
-    result_lines: list[str] = []
-    for line in header:
-        # 更新 MEDIA-SEQUENCE 以匹配截断后的首个分片
-        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
-            try:
-                orig_seq = int(line.split(":", 1)[1])
-            except ValueError:
-                orig_seq = 0
-            skipped = len(segments) - limit
-            result_lines.append(f"#EXT-X-MEDIA-SEQUENCE:{orig_seq + skipped}")
-        elif line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE:"):
-            # 截断后该标签不再准确，跳过（hls.js 不需要它）
-            continue
-        else:
-            result_lines.append(line)
-    for seg in kept:
-        result_lines.extend(seg)
+    # 写入缓存
+    _m3u8_cache[cache_key] = (result, now)
 
-    return PlainTextResponse(
-        "\n".join(result_lines),
-        media_type="application/vnd.apple.mpegurl",
-    )
+    return PlainTextResponse(result, media_type="application/vnd.apple.mpegurl")
 
 # 新架构：DirectHLSWriter 生成的 m3u8/ts 文件通过静态文件服务直接提供
 # 前端访问路径: /storage/{task_id}/stream_rgb.m3u8
