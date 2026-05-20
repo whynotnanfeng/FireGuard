@@ -91,10 +91,15 @@ def _get_dir_size_cached(path: str, cache_time: float) -> int:
 
 
 def check_storage_limit(user_id: str, new_file_size: int) -> bool:
+    import logging
+    logger = logging.getLogger("app")
     dirs = [
         str(config.UPLOADS_DIR / user_id),
         str(config.MODELS_DIR / user_id),
         str(config.RESULTS_DIR / user_id),
     ]
     total = sum(get_dir_size(d) for d in dirs if os.path.exists(d))
-    return (total + new_file_size) <= config.MAX_STORAGE_BYTES
+    limit = config.MAX_STORAGE_BYTES
+    allowed = (total + new_file_size) <= limit
+    logger.info(f"[StorageCheck] user={user_id} size={new_file_size} total={total} limit={limit} allowed={allowed}")
+    return allowed

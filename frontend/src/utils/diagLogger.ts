@@ -20,19 +20,16 @@ class DiagLogger {
   log(tag: string, ...args: unknown[]) {
     const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')
     this.enqueue(tag, msg)
-    console.log(`[${tag}]`, ...args)
   }
 
   warn(tag: string, ...args: unknown[]) {
     const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')
     this.enqueue(tag, msg)
-    console.warn(`[${tag}]`, ...args)
   }
 
   error(tag: string, ...args: unknown[]) {
     const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')
     this.enqueue(tag, msg)
-    console.error(`[${tag}]`, ...args)
   }
 
   private enqueue(tag: string, msg: string) {

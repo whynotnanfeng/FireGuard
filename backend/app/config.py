@@ -6,7 +6,7 @@ try:
     from dotenv import load_dotenv
     env_path = Path(__file__).resolve().parent.parent / ".env"
     if env_path.exists():
-        load_dotenv(dotenv_path=env_path)
+        load_dotenv(dotenv_path=env_path, override=True)
 except ImportError:
     pass
 except ValueError as e:
@@ -38,9 +38,9 @@ class Config:
     VIDEO_STORAGE_DIR: Path = DATA_DIR / "video_storage"
     PLAYBACK_LOG_PATH: Path = LOGS_DIR / "playback.log"
     
-    MAX_STORAGE_BYTES: int = int(os.getenv("MAX_STORAGE_BYTES", str(10 * 1024 * 1024 * 1024)))
-    MAX_FILE_SIZE_BYTES: int = int(os.getenv("MAX_FILE_SIZE_BYTES", str(10 * 1024 * 1024 * 1024)))
-    MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10240"))
+    MAX_STORAGE_BYTES: int = int(os.getenv("MAX_STORAGE_BYTES", str(20 * 1024 * 1024 * 1024)))
+    MAX_FILE_SIZE_BYTES: int = int(os.getenv("MAX_FILE_SIZE_BYTES", str(20 * 1024 * 1024 * 1024)))
+    MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20480"))
     VIDEO_SEGMENT_DURATION: int = int(os.getenv("VIDEO_SEGMENT_DURATION", "300"))
 
     # --- [SECTION 3: DETECTION ENGINE] ---

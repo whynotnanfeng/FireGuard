@@ -2,6 +2,30 @@
 
 All notable changes to the FireGuard project will be documented in this file.
 
+## [v2.9.0] - 2026-05-20 "Storage Quota Extension & UI/UX Perfection Edition"
+
+### 背景
+针对大文件上传在新建任务时长期卡死并报错 `Storage limit exceeded` 的顽疾、停止后查看历史回放状态 UI 显示不正确、视频与图片任务 UI 统计指标不一致、文本超出最大长度溢出以及调试日志泄露至浏览器 console 的问题，进行了深度底层排查与全栈级交互体验优化。
+
+### Added
+- **大文件上传配额倍增与防御性加固 (Critical)**:
+  - 将用户存储空间配额 `MAX_STORAGE_BYTES` 和单文件限制 `MAX_FILE_SIZE_BYTES` 从 1GB 提升至 **20GB**。
+  - 在 `backend/app/config.py` 中将核心默认值也直接提升为 20GB。
+  - 引入 `load_dotenv(..., override=True)` 机制，防止旧的父级操作系统进程环境变量残留导致配置拉取失败。
+  - 新增 `[StorageCheck]` 细粒度底层校验日志输出，将上传大小、已用额度、校验状态完全日志化，为存储空间排障提供 100% 透明度。
+- **历史视频回放状态精准指引 (P0)**:
+  - 在视频流任务停止后，进入历史回放页面时，右上角的状态 UI 自动由“运行中”动态切换为**“视频回放”**，提供更清晰的用户操作上下文。
+- **长文本智能截断与 Hover Tooltip 悬浮交互 (High)**:
+  - 在视频文件/图片文件任务等表格列表和详情页中，对超出最大长度的任务名称和描述字段进行 CSS `ellipsis` 智能截断。
+  - 结合 `a-tooltip` 实现了鼠标 hover 悬浮显示完整内容的交互体验，在保持界面整洁优雅的同时，不丢失任何细节。
+- **企业级 Console 日志净化与审计合规 (High)**:
+  - 对前端进行了全面扫描，排除了所有污染浏览器控制台的调试 `console.log`，将所有前端系统日志与诊断日志统一导向系统特定的日志路径（`backend/logs/`），确保前端控制台绿色无污染，符合生产级审计标准。
+
+### Aligned
+- **视频与图片任务 UI 指标与数据看板对齐 (High)**:
+  - 对齐了视频文件检测任务与图片任务的右侧 UI 统计指标、图表分布和交互设计。
+  - 删除了下方多余且重合的模块，优化了界面垂直空间的利用率，提升了整体视觉设计的“高级感”。
+
 ## [v2.8.0] - 2026-05-20 "Playback Stuttering & Timeline Clock Calibration Edition"
 
 ### 背景

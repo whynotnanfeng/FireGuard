@@ -107,6 +107,18 @@
          class="task-table"
       >
         <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'name'">
+             <span :title="record.name">{{ record.name }}</span>
+          </template>
+
+          <template v-if="column.key === 'model_name'">
+             <span :title="record.model_name">{{ record.model_name }}</span>
+          </template>
+
+          <template v-if="column.key === 'description'">
+             <span :title="record.description || ''">{{ record.description || '—' }}</span>
+          </template>
+
           <template v-if="column.key === 'task_type'">
              <span class="type-badge">{{ typeMap[record.task_type] || record.task_type }}</span>
           </template>

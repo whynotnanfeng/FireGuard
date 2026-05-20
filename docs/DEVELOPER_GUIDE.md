@@ -1,4 +1,4 @@
-# 🚀 FireGuard (火灾监测系统) - 开发者交接文档 (v2.5.1)
+# 🚀 FireGuard (火灾监测系统) - 开发者交接文档 (v2.9.0)
 
 ## 1. 架构全景与技术栈
 
@@ -157,8 +157,16 @@
   - 线程退出时设置 `_dispatcher_dead` 标志，弹性伸缩监控线程自动检测并重启。
   - **这是 v1.9.1 中 CPU 推理也开始出问题的根因修复**。
 
-### C. 存储管理 (StorageManager)
-- **文件**: `backend/app/services/storage_manager.py`
+### C. 存储管理与配额控制 (Storage & Quotas) [v2.9.0 加固]
+- **核心配置文件**: `backend/app/config.py`, `backend/app/services/storage_manager.py`, `backend/app/dependencies.py`
+- **配额上限**: 
+  - 用户存储空间配额 `MAX_STORAGE_BYTES` 调整为 **20GB**。
+  - 单文件限制 `MAX_FILE_SIZE_BYTES` 调整为 **20GB**。
+  - 最大上传限制 `MAX_UPLOAD_SIZE_MB` 调整为 **20GB (20480MB)**。
+- **环境安全覆盖机制 (Override)**:
+  - 启动阶段调用 `load_dotenv(dotenv_path=env_path, override=True)`，确保 `.env` 配置变量可以无视并强行覆盖父级操作系统或 Terminal 进程中的 stale 缓存环境变量。
+- **诊断日志控制**:
+  - `check_storage_limit()` 方法内置了 `[StorageCheck]` 细粒度审计日志输出，在每次上传校验时输出当前用户已用空间、校验文件大小、最大上限以及校验通过结果。
 - **职责**: 
   - **Session 录制**: 每次任务启动创建 `live/` 目录，FFmpeg 通过管道写入 HLS 分片
   - **Session 封包**: 任务停止时将 `live/` 重命名为 `session_N/`，计算时长并持久化元数据

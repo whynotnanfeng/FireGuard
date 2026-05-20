@@ -3,6 +3,7 @@ import time
 import os
 import shutil
 import logging
+import asyncio
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from fastapi import (
     UploadFile,
     BackgroundTasks,
     Query,
+    Request,
 )
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
@@ -171,6 +173,7 @@ def list_tasks(
 
 @router.post("", response_model=TaskResponse, status_code=201)
 async def create_task(
+    request: Request,
     name: str = Form(...),
     task_type: str = Form(...),           # image | video | stream
     input_types: str = Form(...),         # JSON array
@@ -188,6 +191,19 @@ async def create_task(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
+    # Check Content-Length header early to prevent wasting time on large failing uploads
+    content_length_str = request.headers.get("content-length")
+    if content_length_str:
+        try:
+            content_length = int(content_length_str)
+            if not check_storage_limit(current_user.id, content_length):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Storage limit exceeded. 上传大小 {content_length / 1024 / 1024:.1f}MB 已超出您的剩余配额空间。请先清理历史任务以释放存储。"
+                )
+        except ValueError:
+            pass
+
     # Validate task_type
     if task_type not in ("image", "video", "stream"):
         raise HTTPException(status_code=400, detail="task_type must be image/video/stream")
@@ -260,45 +276,62 @@ async def create_task(
     session.refresh(task)
 
     # Handle source
-    if source_type == "upload":
-        task_dir = config.UPLOADS_DIR / current_user.id / task.id
-        rgb_dir = task_dir / "rgb"
-        ir_dir = task_dir / "ir"
-        rgb_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        if source_type == "upload":
+            task_dir = config.UPLOADS_DIR / current_user.id / task.id
+            rgb_dir = task_dir / "rgb"
+            ir_dir = task_dir / "ir"
+            rgb_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check total size
-        total_size = sum([f.size or 0 for f in rgb_files + ir_files])
-        if not check_storage_limit(current_user.id, total_size):
-            session.delete(task)
-            session.commit()
-            raise HTTPException(status_code=400, detail="Storage limit exceeded.")
+            # Check total size
+            total_size = sum([f.size or 0 for f in rgb_files + ir_files])
+            if not check_storage_limit(current_user.id, total_size):
+                raise ValueError("Storage limit exceeded.")
 
-        # Save RGB files
-        for f in rgb_files:
-            out_path = rgb_dir / (f.filename or "file")
-            with open(out_path, "wb") as buffer:
-                shutil.copyfileobj(f.file, buffer)
+            # Save files in thread pool to prevent blocking the asyncio event loop
+            def save_uploaded_files():
+                for f in rgb_files:
+                    f.file.seek(0)
+                    out_path = rgb_dir / (f.filename or "file")
+                    with open(out_path, "wb") as buffer:
+                        shutil.copyfileobj(f.file, buffer)
 
-        # Save IR files
-        if ir_files:
-            ir_dir.mkdir(parents=True, exist_ok=True)
-            for f in ir_files:
-                out_path = ir_dir / (f.filename or "file")
-                with open(out_path, "wb") as buffer:
-                    shutil.copyfileobj(f.file, buffer)
+                if ir_files:
+                    ir_dir.mkdir(parents=True, exist_ok=True)
+                    for f in ir_files:
+                        f.file.seek(0)
+                        out_path = ir_dir / (f.filename or "file")
+                        with open(out_path, "wb") as buffer:
+                            shutil.copyfileobj(f.file, buffer)
 
-        task.source_path = str(task_dir)
+            await asyncio.to_thread(save_uploaded_files)
 
-    elif source_type in ("url", "rtsp"):
-        if not source_url:
-            raise HTTPException(status_code=400, detail="source_url is required")
-        task.source_path = source_url
+            task.source_path = str(task_dir)
 
-    task.status = "pending"
-    task.updated_at = now_beijing()
-    session.add(task)
-    session.commit()
-    session.refresh(task)
+        elif source_type in ("url", "rtsp"):
+            if not source_url:
+                raise ValueError("source_url is required")
+            task.source_path = source_url
+
+        task.status = "pending"
+        task.updated_at = now_beijing()
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+
+    except Exception as e:
+        logger.error(f"[Tasks] Failed to complete task creation for task {task.id}: {e}", exc_info=True)
+        task.status = "failed"
+        task.error_msg = f"创建失败: {str(e)}"
+        task.updated_at = now_beijing()
+        session.add(task)
+        session.commit()
+        # Clean up created directory if upload failed
+        if source_type == "upload":
+            task_dir = config.UPLOADS_DIR / current_user.id / task.id
+            if task_dir.exists():
+                shutil.rmtree(task_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"Task creation failed: {e}")
 
     return _to_response(task, session)
 

@@ -49,27 +49,23 @@
 
           <template v-else-if="effectiveType === 'video'">
             <div class="media-viewport video-viewport">
-              <video ref="videoRef" :src="result.url" class="result-video" controls @timeupdate="onVideoTimeUpdate" @loadedmetadata="onVideoLoaded"></video>
-            </div>
-            <div class="seekbar-container">
-              <div class="seekbar-label">
-                <span>{{ formatTime(videoCurrentTime) }}</span>
-                <span>{{ formatTime(videoDuration) }}</span>
+              <video v-if="currentImageUrl" :key="currentImageUrl" ref="videoRef" :src="currentImageUrl" class="result-video" controls @timeupdate="onVideoTimeUpdate" @loadedmetadata="onVideoLoaded"></video>
+              <div v-else class="media-placeholder">
+                <div class="icon-placeholder">▢</div>
+                <span>{{ currentImageName }}</span>
+                <span class="placeholder-sub">视频结果预览区</span>
               </div>
-              <div class="seekbar-track" @click="seekVideo">
-                <div class="seekbar-segments">
-                  <div v-for="(seg, i) in detectionSegments" :key="i" class="seekbar-segment" :style="{ left: seg.left + '%', width: seg.width + '%' }"></div>
-                </div>
-                <div class="seekbar-fill" :style="{ width: seekPercent + '%' }"></div>
+              <div class="media-nav prev" v-if="imageCount > 1" @click="prevImage">‹</div>
+              <div class="media-nav next" v-if="imageCount > 1" @click="nextImage">›</div>
+              <div class="media-dots" v-if="imageCount > 1">
+                <span v-for="(_, i) in imageCount" :key="i" class="media-dot" :class="{ active: i === currentImageIndex }" @click="goToImage(i)"></span>
               </div>
             </div>
             <div class="media-controls">
               <div class="media-controls-left">
-                <span class="media-index">视频回放</span>
+                <span class="media-index">{{ currentImageIndex + 1 }} / {{ imageCount }}</span>
               </div>
-              <div class="media-controls-center">
-                <button class="ctrl-btn primary" @click="toggleVideoPlay">▶</button>
-              </div>
+              <div class="media-controls-center"></div>
               <div class="media-controls-right">
                 <button class="ctrl-btn" title="下载" @click="downloadFile">↓</button>
               </div>
@@ -86,10 +82,9 @@
         <div class="info-panel">
           <div class="info-header">
             <div class="info-header-top">
-              <span class="info-file-name">{{ effectiveType === 'stream' ? '目标检测记录' : currentFileName }}</span>
-              <span class="info-file-index" v-if="effectiveType === 'image'">{{ currentImageIndex + 1 }} / {{ imageCount }}</span>
-              <span class="info-file-index" v-else-if="effectiveType === 'stream'">运行中</span>
-              <span class="info-file-index" v-else>视频回放</span>
+              <span class="info-file-name" :title="effectiveType === 'stream' ? '目标检测记录' : currentFileName">{{ effectiveType === 'stream' ? '目标检测记录' : currentFileName }}</span>
+              <span class="info-file-index" v-if="effectiveType === 'image' || effectiveType === 'video'">{{ currentImageIndex + 1 }} / {{ imageCount }}</span>
+              <span class="info-file-index" v-else-if="effectiveType === 'stream'">{{ (result?.status === 'running' || result?.status === 'initializing' || !result) ? '运行中' : '视频回放' }}</span>
             </div>
             <div class="info-meta-row">
               <template v-if="effectiveType === 'stream'">
@@ -149,53 +144,15 @@
               <div class="info-section">
                 <div class="section-header"><span class="section-title"><span class="icon">◈</span> 检测概览</span></div>
                 <div class="stats-grid">
-                  <div class="stat-card"><div class="value">{{ currentBoxCount }}</div><div class="label">{{ effectiveType === 'image' ? '当前目标' : '当前帧框' }}</div></div>
-                  <div class="stat-card success"><div class="value">{{ totalRecords }}</div><div class="label">{{ effectiveType === 'image' ? '累计目标' : '累计帧框' }}</div></div>
+                  <div class="stat-card"><div class="value">{{ currentBoxCount }}</div><div class="label">{{ (effectiveType === 'image' || effectiveType === 'video') ? '当前目标' : '当前帧框' }}</div></div>
+                  <div class="stat-card success"><div class="value">{{ totalRecords }}</div><div class="label">{{ (effectiveType === 'image' || effectiveType === 'video') ? '累计目标' : '累计帧框' }}</div></div>
                 </div>
               </div>
 
               <div class="info-section" v-if="Object.keys(currentCategoryCounts).length > 0">
-                <div class="section-header"><span class="section-title"><span class="icon">◈</span> 当前{{ effectiveType === 'image' ? '帧' : '' }}类别</span><span class="section-badge">{{ Object.keys(currentCategoryCounts).length }} 类</span></div>
+                <div class="section-header"><span class="section-title"><span class="icon">◈</span> 当前{{ (effectiveType === 'image' || effectiveType === 'video') ? '目标' : '帧' }}类别</span><span class="section-badge">{{ Object.keys(currentCategoryCounts).length }} 类</span></div>
                 <div class="tag-cloud">
                   <span v-for="(count, cls) in currentCategoryCounts" :key="cls" class="tag-item"><span class="tag-label">{{ cls }}</span><span class="tag-count">{{ count }}</span></span>
-                </div>
-              </div>
-
-              <div class="info-section" v-if="effectiveType === 'video' && detectionRecords.length > 0">
-                <div class="section-header"><span class="section-title"><span class="icon">◈</span> 目标检测记录</span><span class="section-badge">{{ totalRecords }} 条</span></div>
-                <table class="detection-table">
-                  <thead><tr><th>目标</th><th>出现</th><th>消失</th><th>时长</th><th>最大置信度</th><th>状态</th></tr></thead>
-                  <tbody>
-                    <tr v-for="rec in pagedRecords" :key="rec.id || rec.track_id">
-                      <td>
-                        <span class="track-id">
-                          <span class="track-id-main">#{{ rec.track_id }}</span>
-                          <span class="track-label">{{ rec.label || rec.class_name }}</span>
-                        </span>
-                      </td>
-                      <td>
-                        <span class="time-cell">
-                          <span class="date-part">{{ fmtDate(rec.enter_time || rec.entered_at) }}</span>
-                          <span class="time-part">{{ fmtTime(rec.enter_time || rec.entered_at) }}</span>
-                        </span>
-                      </td>
-                      <td>
-                        <span class="time-cell" v-if="rec.leave_time || rec.left_at">
-                          <span class="date-part">{{ fmtDate(rec.leave_time || rec.left_at) }}</span>
-                          <span class="time-part">{{ fmtTime(rec.leave_time || rec.left_at) }}</span>
-                        </span>
-                        <span v-else>-</span>
-                      </td>
-                      <td class="duration-cell">{{ fmtDuration(rec.duration_ms || rec.duration_seconds || 0, (rec.status === 'active')) }}</td>
-                      <td class="confidence-cell">{{ fmtConfidence(rec.max_confidence || rec.confidence) }}</td>
-                      <td><span class="status-badge" :class="rec.status || (rec.left_at || rec.leave_time ? 'completed' : 'active')">{{ rec.status === 'active' || (!rec.left_at && !rec.leave_time) ? '活跃' : '结束' }}</span></td>
-                    </tr>
-                  </tbody>
-                </table>
-                <div class="table-pagination" v-if="totalPages > 1">
-                  <button class="page-btn" @click="recPage=Math.max(1,recPage-1)">‹</button>
-                  <button v-for="p in visiblePages" :key="p" class="page-btn" :class="{active:p===recPage}" @click="recPage=p">{{ p }}</button>
-                  <button class="page-btn" @click="recPage=Math.min(totalPages,recPage+1)">›</button>
                 </div>
               </div>
             </template>
@@ -271,12 +228,13 @@ onMounted(async () => {
         model_name: taskDetail.model_name,
         fps: actualFps,
         _session_start_time: taskDetail.session_start_time,
-        started_at: taskDetail.created_at
+        started_at: taskDetail.created_at,
+        status: taskDetail.status
       }
       loadDetectionRecords()
       startAutoRefresh()
     } catch (e) {
-      result.value = { type: 'stream' }
+      result.value = { type: 'stream', status: 'stopped' }
       loadDetectionRecords()
       startAutoRefresh()
     }
@@ -355,7 +313,7 @@ const mergedRecords = computed(() => {
 
 const taskName = computed(() => result.value?.task_name || result.value?.name || props.taskId?.slice(0, 8) || '任务结果')
 const taskStatus = computed(() => {
-  if (effectiveType.value === 'stream') return 'running'
+  if (effectiveType.value === 'stream') return result.value?.status || 'running'
   return result.value?.status || 'completed'
 })
 const typeLabel = computed(() => {
@@ -376,7 +334,7 @@ const imageCount = computed(() => {
 const currentImageName = computed(() => result.value?.filenames?.[currentImageIndex.value] || '')
 const currentImageUrl = computed(() => result.value?.urls?.[currentImageIndex.value] || '')
 const currentFileName = computed(() => {
-  if (effectiveType.value === 'image') return currentImageName.value || '标注结果'
+  if (effectiveType.value === 'image' || effectiveType.value === 'video') return currentImageName.value || '标注结果'
   return result.value?.filename || result.value?.name || '结果'
 })
 
@@ -387,14 +345,14 @@ const currentImageDetections = computed(() => {
   return result.value.detections[target] || result.value.detections[base] || result.value.detections['annotated_' + base] || []
 })
 const currentBoxCount = computed(() => {
-  if (effectiveType.value === 'image') {
+  if (effectiveType.value === 'image' || effectiveType.value === 'video') {
     const d = currentImageDetections.value
     return Array.isArray(d) ? d.length : 0
   }
   return mergedRecords.value.filter(r => r.status === 'active' || (!r.left_at && !r.leave_time)).length
 })
 const totalRecords = computed(() => {
-  if (effectiveType.value === 'image') {
+  if (effectiveType.value === 'image' || effectiveType.value === 'video') {
     const dets = result.value?.detections
     if (!dets) return 0
     return Object.values(dets).reduce((sum: number, arr: any) => sum + (Array.isArray(arr) ? arr.length : 0), 0)
@@ -418,6 +376,18 @@ const elapsedDisplay = computed(() => {
 
 const currentCategoryCounts = computed(() => {
   const counts: Record<string, number> = {}
+  if (effectiveType.value === 'image' || effectiveType.value === 'video') {
+    const dets = currentImageDetections.value
+    if (Array.isArray(dets)) {
+      dets.forEach((d: any) => {
+        if (!d) return
+        const cls = d.class_name || 'Unknown'
+        counts[cls] = (counts[cls] || 0) + 1
+      })
+    }
+    return counts
+  }
+
   const sourceEvents = (effectiveType.value === 'stream' && currentPlaybackAbsoluteTime.value > 0)
     ? detectionRecords.value.filter((rec: any) => {
         const enterTimeStr = rec.entered_at || rec.enter_time
@@ -427,7 +397,7 @@ const currentCategoryCounts = computed(() => {
       })
     : detectionRecords.value
 
-  const dets = effectiveType.value === 'image' ? currentImageDetections.value : sourceEvents.filter(r => !r.left_at)
+  const dets = sourceEvents.filter(r => !r.left_at)
   if (Array.isArray(dets)) {
     dets.forEach((d: any) => {
       if (!d) return
@@ -440,7 +410,7 @@ const currentCategoryCounts = computed(() => {
 
 const categoryDistribution = computed(() => {
   const dist: Record<string, number> = {}
-  if (effectiveType.value === 'image') {
+  if (effectiveType.value === 'image' || effectiveType.value === 'video') {
     const dets = result.value?.detections || {}
     Object.values(dets).forEach((arr: any) => {
       if (!Array.isArray(arr)) return

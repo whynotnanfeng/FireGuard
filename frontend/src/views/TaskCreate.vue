@@ -383,6 +383,14 @@ function onFileChange(e: Event, type: 'rgb'|'ir') {
     const target = e.target as HTMLInputElement
     if (target.files) {
         const files = Array.from(target.files)
+        const maxFileSize = 20 * 1024 * 1024 * 1024 // 20GB limit
+        for (const file of files) {
+            if (file.size > maxFileSize) {
+                message.error(`文件 "${file.name}" 大小 ${(file.size / 1024 / 1024).toFixed(1)}MB 已超出 20GB 系统最大文件大小限制！`)
+                target.value = ''
+                return
+            }
+        }
         if (type === 'rgb') rgbFiles.value = files
         else irFiles.value = files
     }

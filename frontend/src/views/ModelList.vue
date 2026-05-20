@@ -100,6 +100,14 @@
          class="model-table"
       >
         <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'name'">
+            <span :title="record.name">{{ record.name }}</span>
+          </template>
+
+          <template v-if="column.key === 'description'">
+            <span :title="record.description || ''">{{ record.description || '—' }}</span>
+          </template>
+
           <template v-if="column.key === 'format'">
             <a-tag>{{ record.format }}</a-tag>
           </template>
