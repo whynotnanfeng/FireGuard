@@ -78,7 +78,7 @@
 
           <template v-else-if="effectiveType === 'stream'">
             <div class="media-viewport stream-viewport">
-              <VideoPlayer v-if="taskId && wsUrl" :task-id="taskId" :ws-url="wsUrl" :show-records-panel="false" :key="'vp-' + taskId" @close="$emit('close')" @time-update="handleTimeUpdate" />
+              <VideoPlayer v-if="taskId && wsUrl" :task-id="taskId" :ws-url="wsUrl" :show-records-panel="false" :key="'vp-' + taskId" @close="$emit('close')" @time-update="handleTimeUpdate" @playback-absolute-time="handlePlaybackAbsoluteTime" />
             </div>
           </template>
         </div>
@@ -243,6 +243,21 @@ const detectionRecords = ref<DetectionEvent[]>([])
 const recPage = ref(1)
 const pageSize = 10
 const streamRunningTime = ref(0)
+const currentPlaybackAbsoluteTime = ref<number>(0)
+
+function handlePlaybackAbsoluteTime(absTime: number) {
+  currentPlaybackAbsoluteTime.value = absTime
+}
+
+// 统一将不带时区后缀的北京时间 (naive) 强制追加时区偏移量，与 HLS 携带的 UTC 时间戳达成基准物理对齐
+const parseAbsoluteTime = (timeStr: string | null | undefined): number => {
+  if (!timeStr) return 0
+  let formatted = timeStr.trim().replace(' ', 'T')
+  if (!formatted.match(/(Z|[+-]\d{2}:?\d{2})$/)) {
+    formatted += '+08:00'
+  }
+  return new Date(formatted).getTime()
+}
 
 onMounted(async () => {
   error.value = false
@@ -307,7 +322,16 @@ onUnmounted(() => {
 
 const mergedRecords = computed(() => {
   const trackMap = new Map<number, any>()
-  detectionRecords.value.forEach((rec: any) => {
+  const sourceRecords = (effectiveType.value === 'stream' && currentPlaybackAbsoluteTime.value > 0)
+    ? detectionRecords.value.filter((rec: any) => {
+        const enterTimeStr = rec.entered_at || rec.enter_time
+        if (!enterTimeStr) return true
+        const recordTime = parseAbsoluteTime(enterTimeStr)
+        return recordTime <= currentPlaybackAbsoluteTime.value
+      })
+    : detectionRecords.value
+
+  sourceRecords.forEach((rec: any) => {
     const tid = rec.track_id ?? rec.id
     if (!trackMap.has(tid)) {
       trackMap.set(tid, { ...rec })
@@ -394,7 +418,16 @@ const elapsedDisplay = computed(() => {
 
 const currentCategoryCounts = computed(() => {
   const counts: Record<string, number> = {}
-  const dets = effectiveType.value === 'image' ? currentImageDetections.value : detectionRecords.value.filter(r => !r.left_at)
+  const sourceEvents = (effectiveType.value === 'stream' && currentPlaybackAbsoluteTime.value > 0)
+    ? detectionRecords.value.filter((rec: any) => {
+        const enterTimeStr = rec.entered_at || rec.enter_time
+        if (!enterTimeStr) return true
+        const recordTime = parseAbsoluteTime(enterTimeStr)
+        return recordTime <= currentPlaybackAbsoluteTime.value
+      })
+    : detectionRecords.value
+
+  const dets = effectiveType.value === 'image' ? currentImageDetections.value : sourceEvents.filter(r => !r.left_at)
   if (Array.isArray(dets)) {
     dets.forEach((d: any) => {
       if (!d) return
@@ -418,7 +451,16 @@ const categoryDistribution = computed(() => {
       })
     })
   } else {
-    detectionRecords.value.forEach(r => {
+    const sourceEvents = (effectiveType.value === 'stream' && currentPlaybackAbsoluteTime.value > 0)
+      ? detectionRecords.value.filter((rec: any) => {
+          const enterTimeStr = rec.entered_at || rec.enter_time
+          if (!enterTimeStr) return true
+          const recordTime = parseAbsoluteTime(enterTimeStr)
+          return recordTime <= currentPlaybackAbsoluteTime.value
+        })
+      : detectionRecords.value
+
+    sourceEvents.forEach(r => {
       const cls = r.class_name || 'Unknown'
       dist[cls] = (dist[cls] || 0) + 1
     })

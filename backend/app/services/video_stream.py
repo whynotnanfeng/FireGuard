@@ -97,7 +97,9 @@ class VideoStream:
         self._stop_event = threading.Event()
         self._latest_frames: List[Optional[np.ndarray]] = [None] * len(self.sources)
         self._latest_frame_timestamps: List[float] = [0.0] * len(self.sources)
-        self._latest_frame_wall_clocks: List[float] = [0.0] * len(self.sources)  # V5.0: 帧采集墙钟时刻
+        self._latest_frame_wall_clocks: List[float] = [0.0] * len(
+            self.sources
+        )  # V5.0: 帧采集墙钟时刻
         self._ret: bool = False
         self._lock = threading.Lock()
         self._error_msg: Optional[str] = None
@@ -1065,14 +1067,18 @@ class VideoStream:
 
             frame = shared_grabber.latest_frame
             if frame is not None:
-                frame = cv2.resize(frame, (1280, 720), interpolation=cv2.INTER_LINEAR)  # V5.1: 720p 降载
+                frame = cv2.resize(
+                    frame, (1280, 720), interpolation=cv2.INTER_LINEAR
+                )  # V5.1: 720p 降载
                 last_frame_ts = timestamp
                 _capture_wall_clock = time.time()
                 with self._lock:
                     self._latest_frames[idx] = frame
                     self._latest_frame_timestamps[idx] = timestamp
                     self._latest_frame_wall_clocks[idx] = _capture_wall_clock
-                    self._frame_wall_clock_map[timestamp] = _capture_wall_clock  # V5.0: PTS→墙钟
+                    self._frame_wall_clock_map[timestamp] = (
+                        _capture_wall_clock  # V5.0: PTS→墙钟
+                    )
                     # 限制 map 大小，保留最近 300 条
                     if len(self._frame_wall_clock_map) > 300:
                         _oldest = sorted(self._frame_wall_clock_map.keys())[:-200]
@@ -1181,7 +1187,11 @@ class VideoStream:
                     if aw.m3u8_path.exists():
                         if list(aw.output_dir.glob("stream_annotated*.ts")):
                             hls_ready = True
-                if not hls_ready and self._primary_writer and self._primary_writer.m3u8_path.exists():
+                if (
+                    not hls_ready
+                    and self._primary_writer
+                    and self._primary_writer.m3u8_path.exists()
+                ):
                     if list(self._primary_writer.output_dir.glob("stream_rgb*.ts")):
                         hls_ready = True
 
@@ -1190,7 +1200,11 @@ class VideoStream:
                         self.MSG_MODEL_LOADING, "推理引擎就绪，正在生成视频流..."
                     )
                 elif hls_ready and not has_broadcast_running:
-                    if self.pipeline and self.pipeline.annotated_writer and not self.pipeline.annotated_writer.m3u8_path.exists():
+                    if (
+                        self.pipeline
+                        and self.pipeline.annotated_writer
+                        and not self.pipeline.annotated_writer.m3u8_path.exists()
+                    ):
                         continue
                     elapsed = time.time() - self._session_start_time
                     logger.info(

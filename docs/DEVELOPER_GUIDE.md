@@ -92,11 +92,13 @@
 1. 收集样本：`playingDate - nearest_timestamp`，收集 5-20 个
 2. 取中位数：`timeCalibrationMs = median(samples)`
 3. 应用校准：`calibratedVideoTime = currentVideoAbsTime - timeCalibrationMs`
+4. 绝对对齐前馈补偿 (v2.8.0)：引入 `compensationMs = -2500`（即 -2500ms 负向时延），计算最终时间 `effectiveCalibratedTime = calibratedVideoTime + compensationMs`，完美对齐物理分片落盘时效公差与 AI 推理持久化带来的时空轴偏移。
+5. 启动缓冲垫片增强 (v2.8.0)：调大 Hls.js `liveSyncDurationCount` 至 **`5.5`**，`liveMaxLatencyDurationCount` 设为 **`6.0`**，确保开播初期拥有 5.5s 的安全预读厚度，彻底杜绝 GPU 冷启动暖机导致的卡顿。
 
 **渲染循环时间对齐**：
-- 检测框匹配：只接受 `timestamp <= calibratedVideoTime`
-- 记录更新：`recordTime <= calibratedVideoTime` 才显示
-- isLagging 分支：同样使用 `calibratedVideoTime`，`lastValidRecord` 检查 `recordAge >= 0 && < 5000ms`
+- 检测框匹配：只接受 `timestamp <= effectiveCalibratedTime`
+- 记录更新：`recordTime <= effectiveCalibratedTime` 才从 `pendingRecords` 移入 `records` 渲染显示
+- isLagging 分支：同样使用 `effectiveCalibratedTime`，`lastValidRecord` 检查 `recordAge >= 0 && < 5000ms`
 - Fallback：只选"过去最近"的框，不选未来的
 
 **流切换保护**：

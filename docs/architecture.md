@@ -284,12 +284,14 @@ HLS 的 `playingDate`（来自 `#EXT-X-PROGRAM-DATE-TIME`）和检测框的 `tim
 
 ### 自动时间校准机制
 
-前端 `VideoPlayer.vue` 实现了自动校准：
+前端 `VideoPlayer.vue` 实现了自动校准与绝对对齐补偿：
 
 ```
 1. 收集样本：当 playingDate 可用时，计算 playingDate 与最近检测框 timestamp 的差值
 2. 取中位数：收集 5-20 个样本后，取中位数作为 timeCalibrationMs
-3. 应用校准：所有时间匹配使用 calibratedVideoTime = currentVideoAbsTime - timeCalibrationMs
+3. 应用校准：计算基础对齐绝对时间 calibratedVideoTime = currentVideoAbsTime - timeCalibrationMs
+4. 绝对对齐前馈补偿 (v2.8.0)：引入 compensationMs = -2500，计算生效绝对时间 effectiveCalibratedTime = calibratedVideoTime + compensationMs，完全对齐物理时滞。
+5. 启动缓冲垫片增强 (v2.8.0)：调大 Hls.js liveSyncDurationCount 至 5.5，liveMaxLatencyDurationCount 至 6.0，提供 5.5s 安全预读厚度消除首屏卡顿。
 ```
 
 ```javascript
@@ -301,17 +303,19 @@ calibrationSamples.push(signed);
 const sorted = [...calibrationSamples].sort((a, b) => a - b);
 timeCalibrationMs = sorted[Math.floor(sorted.length / 2)];
 
-// 应用校准
+// 应用校准与 -2500ms 负向回缩对齐补偿
 const calibratedVideoTime = currentVideoAbsTime - timeCalibrationMs;
+const compensationMs = -2500;
+const effectiveCalibratedTime = calibratedVideoTime + compensationMs;
 ```
 
 ### 渲染循环时间对齐
 
-`renderLoop` 中所有时间敏感操作都使用 `calibratedVideoTime`：
+`renderLoop` 中所有时间敏感操作都使用 `effectiveCalibratedTime`：
 
-1. **检测框匹配**：只接受 `timestamp <= calibratedVideoTime` 的检测框，绝不显示未来帧
-2. **记录更新**：`recordTime <= calibratedVideoTime` 才从 `pendingRecords` 移入 `records`
-3. **缓冲态渲染**：`isLagging` 分支也使用 `calibratedVideoTime` 做时间对齐
+1. **检测框匹配**：只接受 `timestamp <= effectiveCalibratedTime` 的检测框，绝不显示未来帧
+2. **记录更新**：`recordTime <= effectiveCalibratedTime` 才从 `pendingRecords` 移入 `records`
+3. **缓冲态渲染**：`isLagging` 分支也使用 `effectiveCalibratedTime` 做时间对齐
 4. **Fallback 匹配**：只选"过去最近"的检测框，不选未来的
 
 ### 流切换保护

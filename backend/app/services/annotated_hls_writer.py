@@ -122,7 +122,7 @@ class AnnotatedHLSWriter:
         
         # 根据 fps 和 hls_time 动态计算 GOP
         # 行业标准: GOP = fps × hls_time，确保每个 HLS 分段以关键帧起始
-        hls_time = 2
+        hls_time = 1
         gop = int(self.fps * hls_time)
 
         # V4.7: 720p 标注流 — 降低 BGR→NV12 转换 + 编码负载

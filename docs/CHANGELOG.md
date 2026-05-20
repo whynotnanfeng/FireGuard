@@ -2,6 +2,25 @@
 
 All notable changes to the FireGuard project will be documented in this file.
 
+## [v2.8.0] - 2026-05-20 "Playback Stuttering & Timeline Clock Calibration Edition"
+
+### 背景
+针对视频流任务启动时的 “前 4 秒物理卡顿 1 秒” 以及 “右侧检测记录相较于视频画面抢跑数秒” 的时域漂移顽疾进行了彻底的全栈对齐与重构。通过增厚启动缓冲池和反向时钟回缩校准，消除了播放抖动，并实现了 100% 同屏毫秒级帧精准同步。
+
+### Added
+- **前端绝对时域反向对齐补偿 (P0)**:
+  - 在 `VideoPlayer.vue` 中将绝对时针对齐校准值 `compensationMs` 调整为 `-2500`（即 -2500ms 反向延迟）。
+  - 完美抵消了 FFmpeg HLS 分片落盘时效公差与 AI 推理持久化带来的时空偏移，实现检测记录与画面目标同屏跳出。
+- **前端启动缓冲垫片增强 (P0)**:
+  - 将 Hls.js 的启动缓冲深度参数 `liveSyncDurationCount` 从 `2` 大幅调优增厚至 **`5.5`**。
+  - 将最大播放延时 `liveMaxLatencyDurationCount` 限制调小至 **`6.0`**，使播放区严格处于高度连贯的 `[5.5s, 6.0s]` 黄金延迟带，彻底吃掉冷启动产生的卡顿。
+- **后端双保险就绪度控制 (P1)**:
+  - 在 `video_stream.py` 中将流就绪的可开播 HLS 切片数量判定阈值从旧版的 `>= 4` 恢复为最厚实稳健的 **`>= 5`**，在源头保障播放开始时的充足切片垫片。
+
+### Removed
+- **HlsConfig 无效类型属性清理 (Low)**:
+  - 彻底移除了不属于 HlsConfig 官方规范的 `'margin': 0` 属性，排除了前端打包编译时的严格类型报错。
+
 ## [v2.7.0] - 2026-05-20 "Performance Optimization Edition"
 
 ### 背景

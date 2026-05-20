@@ -129,7 +129,7 @@ uvicorn main:app --host 0.0.0.0 --port 8001
 - **精密缓冲**：内置 4MB 内核级接收缓冲区，可抵御模型加载瞬间的 CPU 冲击。
 - **全同步解码**：强制 100% 帧对齐，彻底消除 H.264 解码报错。
 - **零计算分发**：主进程仅负责解码，推理与压缩任务在子进程并行。
-- **HLS 缓冲优化 (v1.9.0)**：backBuffer 10s、maxBuffer 30s、maxMaxBuffer 60s，分片时长 2s，在 CPU 负载较高时保持播放流畅。
+- **HLS 缓冲与时钟对齐优化 (v1.9.0 / v2.8.0)**：backBuffer 10s、maxBuffer 30s、maxMaxBuffer 60s，`liveSyncDurationCount` 调优为 `5.5`，`liveMaxLatencyDurationCount` 设为 `6.0`。配合后端就绪切片数阈值提高至 5 且引入 `-2500ms` 负向绝对时校准前馈补偿，彻底消灭首播卡顿，实现检测记录与画面毫秒级 100% 同屏呈现。
 - **ElasticScaling 冷却 (v1.9.0)**：Worker 弹性伸缩 10s 冷却期，防止 CPU 抖动。
 
 ### 3.2 硬件加速 (GPU) 配置

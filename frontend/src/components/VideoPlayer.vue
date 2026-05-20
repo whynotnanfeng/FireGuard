@@ -199,7 +199,7 @@ const props = defineProps<{
   showRecordsPanel?: boolean
 }>()
 
-const emit = defineEmits(['close', 'status-change', 'time-update'])
+const emit = defineEmits(['close', 'status-change', 'time-update', 'playback-absolute-time'])
 
 const videoPlayerRef = ref<HTMLVideoElement | null>(null)
 const webrtcPlayerRef = ref<InstanceType<typeof WebRTCPlayer> | null>(null)
@@ -370,6 +370,7 @@ const FORCE_RELEASE_THRESHOLD_MS = 5000
 let recordsReleasedThisSecond = 0
 let recordsReleaseSecondStart = 0
 let lastRecordsReleaseDiag = 0
+let lastEmittedAbsoluteTime = 0
 
 /**
  * NTP 式异常值过滤
@@ -398,7 +399,7 @@ function addCalibrationSample(sample: number) {
 let _getVideoAbsTimeLogCounter = 0;
 let _lastAbsTimeSource = '';
 
-function getVideoAbsTime(video: HTMLVideoElement): number {
+function getVideoAbsTime(video: HTMLVideoElement | null): number {
   if (isSwitchingStream && frozenRealTime.value) {
     return frozenRealTime.value;
   }
@@ -409,7 +410,7 @@ function getVideoAbsTime(video: HTMLVideoElement): number {
 
   // V4.10: HLS programDateTime 优先 — 每段 TS 分片携带绝对时间戳，
   // 与后端 FFmpeg 时钟对齐，精度远超 sessionStartTime 推算。
-  const currentTime = video.currentTime;
+  const currentTime = video ? video.currentTime : 0;
   const currentLvl = hls?.currentLevel;
   const levelIdx = currentLvl !== undefined && currentLvl >= 0 ? currentLvl : 0;
   const details = hls?.levels?.[levelIdx]?.details;
@@ -420,12 +421,47 @@ function getVideoAbsTime(video: HTMLVideoElement): number {
       (f: any) => currentTime >= f.start - 0.05 && currentTime < f.start + f.duration + 0.05
     );
     if (currentFrag?.programDateTime) {
-      const t = currentFrag.programDateTime + (currentTime - currentFrag.start) * 1000;
+      const pdtMs = typeof currentFrag.programDateTime === 'number'
+        ? currentFrag.programDateTime
+        : new Date(currentFrag.programDateTime).getTime();
+      const t = pdtMs + (currentTime - currentFrag.start) * 1000;
       lastVideoAbsTime = t;
       lastVideoAbsTimeTs = Date.now();
       cachedBufferDelayMs = Date.now() + clockOffset - t;
       _lastAbsTimeSource = 'pdt';
       return t;
+    }
+
+    // 防御性外推 1：currentTime 尚未达到首个分片（如初始加载时）
+    if (fragments.length > 0) {
+      const firstFrag = fragments[0];
+      if (currentTime < firstFrag.start && firstFrag.programDateTime) {
+        const pdtMs = typeof firstFrag.programDateTime === 'number'
+          ? firstFrag.programDateTime
+          : new Date(firstFrag.programDateTime).getTime();
+        const t = pdtMs - (firstFrag.start - currentTime) * 1000;
+        lastVideoAbsTime = t;
+        lastVideoAbsTimeTs = Date.now();
+        cachedBufferDelayMs = Date.now() + clockOffset - t;
+        _lastAbsTimeSource = 'pdt_approx_past';
+        return t;
+      }
+    }
+
+    // 防御性外推 2：currentTime 超过末尾分片（如临近直播边缘）
+    if (fragments.length > 0) {
+      const lastFrag = fragments[fragments.length - 1];
+      if (currentTime >= lastFrag.start + lastFrag.duration && lastFrag.programDateTime) {
+        const pdtMs = typeof lastFrag.programDateTime === 'number'
+          ? lastFrag.programDateTime
+          : new Date(lastFrag.programDateTime).getTime();
+        const t = pdtMs + (currentTime - lastFrag.start) * 1000;
+        lastVideoAbsTime = t;
+        lastVideoAbsTimeTs = Date.now();
+        cachedBufferDelayMs = Date.now() + clockOffset - t;
+        _lastAbsTimeSource = 'pdt_approx_future';
+        return t;
+      }
     }
   }
 
@@ -446,7 +482,6 @@ function getVideoAbsTime(video: HTMLVideoElement): number {
     _lastAbsTimeSource = 'relative';
     return absTime;
   }
-
   if (firstSessionStartTime.value || sessionMap.value.length > 0) {
     const absTime = offsetToAbsTime(currentTime);
     _lastAbsTimeSource = 'session';
@@ -460,9 +495,16 @@ function getVideoAbsTime(video: HTMLVideoElement): number {
     _lastAbsTimeSource = 'extrapolate';
     return t;
   }
-  const t = Date.now() + clockOffset - cachedBufferDelayMs;
+
+  // 终极回退：动态利用 hls.latency 评估出最准确的当前播放画面真实延迟
+  let currentDelay = cachedBufferDelayMs;
+  if (playbackMode.value === 'hls' && hls && hls.latency >= 0 && hls.latency < 60) {
+    currentDelay = hls.latency * 1000;
+    cachedBufferDelayMs = currentDelay;
+  }
+  const t = Date.now() + clockOffset - currentDelay;
   if (_lastAbsTimeSource !== 'final') {
-    diagLogger.log('DIAG-ABSTIME', JSON.stringify({ source: 'final_fallback', t, prevSource: _lastAbsTimeSource }));
+    diagLogger.log('DIAG-ABSTIME', JSON.stringify({ source: 'final_fallback', t, currentDelay, prevSource: _lastAbsTimeSource }));
   }
   _lastAbsTimeSource = 'final';
   return t;
@@ -1356,31 +1398,17 @@ function connect() {
               const tsB = b.timestamp_ms || new Date(b.detected_at).getTime();
               return tsA - tsB;
             });
-            if (playMode.value === 'live') {
-              sorted.forEach((r: any) => {
-                // 确保有 timestamp_ms 字段
-                if (!r.timestamp_ms) {
-                  r.timestamp_ms = new Date(r.detected_at).getTime();
-                }
-                records.value.unshift(r);
-              });
-              if (records.value.length > 1000) {
-                records.value = records.value.slice(0, 1000);
+            // 无论 live 还是 history，统一将记录写入待释放队列进行绝对时间戳物理同步
+            sorted.forEach((r: any) => {
+              if (!r.timestamp_ms) {
+                r.timestamp_ms = new Date(r.detected_at).getTime();
               }
-              diagLogger.log('DIAG-RE', JSON.stringify({ event: 'live_updated', newLen: records.value.length }));
-            } else {
-              sorted.forEach((r: any) => {
-                // 确保有 timestamp_ms 字段
-                if (!r.timestamp_ms) {
-                  r.timestamp_ms = new Date(r.detected_at).getTime();
-                }
-                pendingRecords.value.push(r);
-              });
-              if (pendingRecords.value.length > 2000) {
-                pendingRecords.value.splice(0, pendingRecords.value.length - 2000);
-              }
-              diagLogger.log('DIAG-RE', JSON.stringify({ event: 'history_pushed', newLen: pendingRecords.value.length }));
+              pendingRecords.value.push(r);
+            });
+            if (pendingRecords.value.length > 2000) {
+              pendingRecords.value.splice(0, pendingRecords.value.length - 2000);
             }
+            diagLogger.log('DIAG-RE', JSON.stringify({ event: 'pushed_to_pending', newLen: pendingRecords.value.length }));
           }
           break
         case 'detection':
@@ -1554,8 +1582,8 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
         backBufferLength: 10,
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
-        liveSyncDurationCount: 5,
-        liveMaxLatencyDurationCount: 8,
+        liveSyncDurationCount: 5.5,
+        liveMaxLatencyDurationCount: 6.0,
         highBufferWatchdogPeriod: 10,
         manifestLoadingMaxRetry: 10,
         manifestLoadingTimeOut: 5000,
@@ -1881,15 +1909,29 @@ function renderLoop() {
     return;
   }
 
+  // 1. 优先获取最核心的物理绝对时间并对外广播以实现对齐，防止因 early returns (如 webrtc, lagging, switching) 漏发
+  const videoElement = videoPlayerRef.value || null;
+  const currentVideoAbsTime = getVideoAbsTime(videoElement);
+  const calibratedVideoTime = currentVideoAbsTime - timeCalibrationMs;
+  const baseCalibratedTime = playbackMode.value === 'hls'
+    ? currentVideoAbsTime
+    : (calibrationInitialized
+        ? calibratedVideoTime
+        : currentVideoAbsTime - (cachedBufferDelayMs > 0 ? cachedBufferDelayMs : 3000));
+
+  // 引入 -2500ms 的反向时间对齐补偿，完美校正 AI 推理、网络传输及分片打包带来的物理时滞
+  const compensationMs = -2500;
+  const effectiveCalibratedTime = baseCalibratedTime + compensationMs;
+
+  if (Math.abs(effectiveCalibratedTime - lastEmittedAbsoluteTime) >= 100) {
+    emit('playback-absolute-time', effectiveCalibratedTime);
+    lastEmittedAbsoluteTime = effectiveCalibratedTime;
+  }
+
   const isPaused = isVideoPaused.value;
   const shouldUpdateRecords = playMode.value === 'live' || !isPaused;
 
   if (playbackMode.value === 'webrtc') {
-    const currentVideoAbsTime = getVideoAbsTime(null as any);
-    const calibratedVideoTime = currentVideoAbsTime - timeCalibrationMs;
-    const effectiveCalibratedTime = calibrationInitialized
-      ? calibratedVideoTime
-      : currentVideoAbsTime - (cachedBufferDelayMs > 0 ? cachedBufferDelayMs : 3000);
 
     if (shouldUpdateRecords && pendingRecords.value.length > 0) {
       const now = Date.now()
@@ -1990,9 +2032,6 @@ function renderLoop() {
   const isLagging = !isVideoActuallyPlaying.value && !isPaused && !isSwitchingStream;
 
   if (isLagging) {
-    const currentVideoAbsTime = getVideoAbsTime(video);
-    const calibratedVideoTime = currentVideoAbsTime - timeCalibrationMs;
-    
     // 【P0-4 修复】：lastValidRecord 超时清除机制，防止"幽灵检测框"
     const nowMs = Date.now()
     if (lastValidRecord.value && (nowMs - lastValidRecordUpdateTime) > LAST_VALID_RECORD_TIMEOUT_MS) {
@@ -2017,9 +2056,6 @@ function renderLoop() {
     
     // 【P0-4 诊断日志】：卡顿态记录释放
     if (shouldUpdateRecords && pendingRecords.value.length > 0) {
-      const effectiveCalibratedTimeLagging = calibrationInitialized
-        ? calibratedVideoTime
-        : currentVideoAbsTime - (cachedBufferDelayMs > 0 ? cachedBufferDelayMs : 3000);
       const now = Date.now()
       if (now - recordsReleaseSecondStart >= 1000) {
         recordsReleasedThisSecond = 0
@@ -2030,7 +2066,7 @@ function renderLoop() {
       while (pendingRecords.value.length > 0 && movedCount < MAX_RECORDS_PER_FRAME && recordsReleasedThisSecond < MAX_RECORDS_PER_SECOND) {
         const first = pendingRecords.value[0];
         const recordTime = new Date(first.detected_at).getTime();
-        if (recordTime <= effectiveCalibratedTimeLagging || (effectiveCalibratedTimeLagging - recordTime) > FORCE_RELEASE_THRESHOLD_MS) {
+        if (recordTime <= effectiveCalibratedTime || (effectiveCalibratedTime - recordTime) > FORCE_RELEASE_THRESHOLD_MS) {
           const record = pendingRecords.value.shift();
           if (record) {
             records.value.unshift(record);
@@ -2049,7 +2085,7 @@ function renderLoop() {
         movedCount,
         pendingRemaining: pendingRecords.value.length,
         recordsTotal: records.value.length,
-        effectiveTime: Math.round(effectiveCalibratedTimeLagging),
+        effectiveTime: Math.round(effectiveCalibratedTime),
         firstPendingTime: pendingRecords.value[0] ? new Date(pendingRecords.value[0].detected_at).getTime() : null
       }))
       lastRecordsReleaseDiag = Date.now()
@@ -2059,12 +2095,7 @@ function renderLoop() {
   return;
 }
 
-  // 2. 获取视频当前正在播放画面的"绝对时间" (毫秒)
-  const currentVideoAbsTime = getVideoAbsTime(video);
-  const calibratedVideoTime = currentVideoAbsTime - timeCalibrationMs;
-  const effectiveCalibratedTime = calibrationInitialized
-    ? calibratedVideoTime
-    : currentVideoAbsTime - (cachedBufferDelayMs > 0 ? cachedBufferDelayMs : 3000);
+
 
   if (shouldUpdateRecords && pendingRecords.value.length > 0) {
     const now = Date.now()
@@ -2616,6 +2647,8 @@ function jumpToLive() {
   detectionBuffer.value = [];
   liveDetectionCache = [];
   lastValidRecord.value = null;
+  pendingRecords.value = [];
+  lastEmittedAbsoluteTime = 0;
   
   sendDebugLog('JUMP_TO_LIVE');
 

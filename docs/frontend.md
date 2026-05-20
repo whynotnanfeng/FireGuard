@@ -162,7 +162,11 @@ interface ConfigState {
 - **流切换保护 (v1.9.5)**：`jumpToLive()` 清空 `detectionBuffer`、`lastValidRecord`、`liveDetectionCache`，避免残留数据污染新会话。任务重新执行前清除所有检测状态。
 - **历史检测框全量加载 (v1.9.5)**：加载范围从历史起点到目标+60s，缓冲池容量 150→300，pruning cutoff 基于画面时间而非墙钟时间。
 - **检测框持久化 (v1.9.0)**：视频缓冲期间保留最后一次有效检测结果并以半透明叠加层显示，陈旧阈值从 15s 提升至 30s，避免检测框突然消失。
-- **HLS 缓冲优化 (v1.9.0)**：增大 HLS 缓冲参数（backBuffer: 10s, maxBuffer: 30s, maxMaxBuffer: 60s），提升 CPU 负载较高时的播放流畅度。
+- **HLS 缓冲与对齐优化 (v1.9.0 / v2.8.0)**：
+  - **容量参数**：增大 HLS 缓冲参数（backBuffer: 10s, maxBuffer: 30s, maxMaxBuffer: 60s），提升 CPU 负载较高时的播放流畅度。
+  - **首屏卡顿消除**：调优 `liveSyncDurationCount` 至 **`5.5`**，`liveMaxLatencyDurationCount` 设为 **`6.0`**，使开播时拥有至少 **5.5秒** 的充足预读安全缓冲，完美抗击推理引擎暖机延时与网络抖动，彻底解决首屏卡顿。
+  - **数据画面对齐**：绝对时针前馈补偿 `compensationMs` 修改为 **`-2500`**（负向时延），抵消打包落盘时差，实现检测记录与画面物体 100% 毫秒级同步弹出。
+  - **配置规范化**：移除了 `Hls` 构造器选项中不符合规范的 `'margin'` 属性，消除严格类型类型报错。
 - **加载遮罩稳定窗口 (v1.9.2)**：引入 `lastConfirmedPlayingTime` 时间戳和 3 秒稳定窗口机制。HLS 切片切换时浏览器会短暂触发 `waiting` 事件导致 `isVideoActuallyPlaying = false`，稳定窗口确保最近确认过播放的情况下不误显示"画面加载中"遮罩。同时应用于 `buffering` 状态，防止正常缓冲过渡时的遮罩闪烁。
 - **直播边缘播放 (v1.9.2)**：实时模式 `initHls` 不再传 `startPosition = 0`，改为 `startPosition = -1`（HLS.js 直播边缘）。`MANIFEST_PARSED` 事件中使用 `trySeekToLive()` 轮询等待 `liveSyncPosition` 就绪（最多 25 次 × 200ms = 5 秒），避免 fallback 到位置 0 导致播放旧画面。超时后降级为简单 `play()`。
 

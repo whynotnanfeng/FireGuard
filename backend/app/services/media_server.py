@@ -134,6 +134,8 @@ paths:
         logger.info(
             f"[MediaServer] Starting MediaMTX on RTSP:{target_rtsp_port} API:{target_api_port}"
         )
+        self.target_api_port = target_api_port
+        self.target_rtsp_port = target_rtsp_port
 
         # 【P0 修复】：检查 MediaMTX 是否已被其他进程拥有
         try:
@@ -235,8 +237,8 @@ paths:
         logger.info("[MediaServer] Health check thread started.")
 
     def _health_check_loop(self):
-        target_api_port = config.MEDIAMTX_API_PORT
-        target_rtsp_port = config.MEDIAMTX_RTSP_PORT
+        target_api_port = getattr(self, "target_api_port", config.MEDIAMTX_API_PORT)
+        target_rtsp_port = getattr(self, "target_rtsp_port", config.MEDIAMTX_RTSP_PORT)
         check_interval = 5
         fail_threshold = 6   # 需要连续失败 ~30s 才触发
         max_takeover_lifetime = 3  # 进程生命周期内最多尝试 3 次接管

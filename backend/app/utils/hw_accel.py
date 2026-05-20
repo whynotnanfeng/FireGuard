@@ -61,7 +61,7 @@ def resolve_hls_encoder(ffmpeg_path: str, priority: list[str] | None = None) -> 
     )
 
 
-def build_hls_encode_args(encoder: str, is_hw: bool, fps: float = 15.0, hls_time: int = 2) -> list[str]:
+def build_hls_encode_args(encoder: str, is_hw: bool, fps: float = 15.0, hls_time: int = 1) -> list[str]:
     """
     根据编码器类型构建FFmpeg编码参数。
 

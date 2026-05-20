@@ -118,7 +118,7 @@ class DirectHLSWriter:
         base_cmd += [
             "-flags2", "+fast",
             "-f", "hls",
-            "-hls_time", "2",
+            "-hls_time", "1",
             "-hls_list_size", "0",
             "-hls_flags", "append_list+program_date_time+omit_endlist+independent_segments",
             "-hls_segment_type", "mpegts",
