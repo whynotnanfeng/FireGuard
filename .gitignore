@@ -93,6 +93,11 @@ backend/test_*.py
 # --- Root HTML Design Proposals & Plans ---
 /*.html
 
+# --- Temporary Development Task Guides ---
+CHANGE_GUIDE.md
+PERFORMANCE_OPTIMIZATION_GUIDE.md
+REFACTORING_GUIDE.md
+
 
 # Claude Code MCP config (contains secrets)
 .claude/mcp.json
