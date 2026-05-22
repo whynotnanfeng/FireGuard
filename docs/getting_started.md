@@ -65,8 +65,8 @@ npm install
 **v1.9.0 配置中心**：Redis 同时作为统一配置中心的存储后端。系统首次启动时会自动将默认配置写入 Redis `fireguard:config`，所有服务（后端、模拟器）启动时优先从配置中心读取端口等配置项。配置中心支持：
 - **动态端口管理**：修改 Redis 中的配置项后，新启动的服务实例将使用新端口。
 - **服务注册与发现**：各服务启动时自动注册，支持心跳保活。
-- **go2rtc 路径管理**：推流路径统一注册/注销，避免路径冲突。
-- **状态查询**：通过 `GET /api/tasks/registry/status` 可查看当前所有已注册服务、配置项和 go2rtc 路径。
+- **MediaMTX 路径管理**：拉流路径统一注册/注销，避免路径冲突。
+- **状态查询**：通过 `GET /api/tasks/registry/status` 可查看当前所有已注册服务和配置项。
 
 ### 1. 后端服务（必选）
 
@@ -122,17 +122,17 @@ uvicorn main:app --host 0.0.0.0 --port 8001
 
 ---
 
-## 五、性能优化建议 (v2.0.0)
+## 五、性能优化建议
 
 针对 8Mbps 以上的高码率工业流，系统默认已启用 **工业级加固配置**：
-- **FFmpeg 采集器 (v2.0.0)**：通过 `USE_FFMPEG_CAPTURE=True` 启用 FFmpeg 子进程采集，替代 OpenCV VideoCapture，彻底解决 Windows 环境下视频流不稳定问题。
+- **FFmpeg 采集器 (v2.0.0+)**：默认使用 FFmpeg 子进程采集（`FFmpegCapture`），替代 OpenCV VideoCapture，彻底解决 Windows 环境下视频流不稳定问题。
 - **精密缓冲**：内置 4MB 内核级接收缓冲区，可抵御模型加载瞬间的 CPU 冲击。
 - **全同步解码**：强制 100% 帧对齐，彻底消除 H.264 解码报错。
 - **零计算分发**：主进程仅负责解码，推理与压缩任务在子进程并行。
 - **HLS 缓冲与时钟对齐优化 (v1.9.0 / v2.8.0)**：backBuffer 10s、maxBuffer 30s、maxMaxBuffer 60s，`liveSyncDurationCount` 调优为 `5.5`，`liveMaxLatencyDurationCount` 设为 `6.0`。配合后端就绪切片数阈值提高至 5 且引入 `-2500ms` 负向绝对时校准前馈补偿，彻底消灭首播卡顿，实现检测记录与画面毫秒级 100% 同屏呈现。
 - **ElasticScaling 冷却 (v1.9.0)**：Worker 弹性伸缩 10s 冷却期，防止 CPU 抖动。
 
-### 3.2 硬件加速 (GPU) 配置
+### 5.1 硬件加速 (GPU) 配置
 
 本系统支持 **NVIDIA CUDA** 和 **Windows DirectML** 双加速后端。
 

@@ -1,8 +1,8 @@
-# FireGuard (火灾监测系统) v2.6.0 "Monitoring Dashboard Edition"
+# FireGuard (火灾监测系统) v2.9.0 "Storage Quota Extension & UI/UX Perfection Edition"
 
 FireGuard 是一个基于深度学习（ONNX 核心）的智能火灾目标监测系统。它提供了从模型管理、视频/视频流实时检测任务配置，到结果可视化查询、大屏多路监控的完整闭环功能。
 
-## 项目特点 (v2.6.0)
+## 项目特点 (v2.9.0)
 
 1. **零计算分发推理 (Zero-Compute Dispatch)**：采用 Raw Numpy IPC 传输架构，主进程 100% 卸载图像压缩开销，彻底解决 8Mbps+ 高码率流的抓取延迟。
 2. **工业级比特流稳定性**：基于 4MB 内核精密缓冲与全速同步解码技术，完美吸收 AI 模型加载时的 CPU 冲击，实现 RTSP 流 0 报错运行。
@@ -16,26 +16,33 @@ FireGuard 是一个基于深度学习（ONNX 核心）的智能火灾目标监�
 10. **初始化状态管理 (v1.9.4)**：新增 `initializing` 任务状态，统一管理视频源连接、模型加载、HLS 生成等初始化工作。用户仅在任务完全就绪后可查看，确保五位一体画面同步呈现。
 11. **五位一体时间同步 (v1.9.5/v2.1.0)**：画面、进度条时间/位置、检测框/记录 100% 对齐。通过 NTP 式时钟同步配合 EMA 平滑，同步精度达 <50ms。
 12. **全新大屏监控看板 (v2.6.0)**：新增多路实时监控聚合网格（支持 4 列流体平铺）。借助 `ResizeObserver` + CSS `transform: scale()` 对播放器进行完美微缩渲染，首创 16:10 黑边防遮挡设计，以及基于 `@time-update` 的独立秒级跳动运行时长，体验丝滑。
+13. **多层性能缓存 (v2.7.0)**：目录大小 30s TTL 缓存、m3u8 直播 1s TTL 缓存、元数据 5s TTL 缓存，热路径日志降级为 DEBUG，异步健康监控改造，API 响应时间降低 99%。
+14. **HLS 播放抗卡顿与绝对时钟对齐 (v2.8.0)**：`liveSyncDurationCount` 调优至 5.5，`compensationMs` 校准为 -2500ms，彻底消除首屏卡顿与检测记录抢跑。
+15. **大文件上传配额扩展 (v2.9.0)**：用户存储空间配额和单文件限制从 1GB 提升至 20GB，彻底解决大文件上传卡死问题。
 
-## 📚 详细文档 (Documentation)
+## 详细文档 (Documentation)
 
 项目包含全套的技术与使用文档，建议阅读：
 - **[项目概览](./docs/project_overview.md)**: 愿景与场景说明。
-- **[快速启动](./docs/getting_started.md)**: 核心环境搭建与**可选**模拟器配置指南。
+- **[快速启动](./docs/getting_started.md)**: 核心环境搭建与可选模拟器配置指南。
 - **[架构设计](./docs/architecture.md)**: 深入了解推理引擎与任务调度。
 - **[开发者指南](./docs/DEVELOPER_GUIDE.md)**: 核心业务逻辑与二次开发说明。
 - **[API 文档](./docs/api.md)**: 后端接口规范。
-- **[初始化状态重构方案](./docs/REFACTOR_INITIALIZING_STATUS.md)**: `initializing` 状态设计与实施记录。
+- **[数据库设计](./docs/database.md)**: 实体 ER 图与关键字段说明。
+- **[前端设计](./docs/frontend.md)**: UI 框架、组件树与设计规范。
+- **[模拟器文档](./docs/simulator.md)**: 流模拟控制台完整指南。
+- **[变更日志](./docs/CHANGELOG.md)**: 版本迭代记录。
 
 ## 服务架构
 
 *   **Core Platform**:
-    *   **Frontend**: Vue 3 + Vite + Ant Design Vue
+    *   **Frontend**: Vue 3 + Vite + Ant Design Vue 4 + Pinia + hls.js
     *   **Backend**: Python + FastAPI + SQLModel + ONNXRuntime (CPU/GPU)
-    *   **Database**: SQLite (`fire_detection.db`)
-    *   **Config Center**: Redis (统一配置中心、服务注册、go2rtc 路径管理)
+    *   **Database**: SQLite (WAL mode)
+    *   **Config Center**: Redis (统一配置中心、服务注册、MediaMTX 路径管理)
+    *   **流媒体网关**: MediaMTX v1.18.1 (RTSP/HLS/WebRTC)
 *   **Auxiliary Tool (Optional)**:
-    *   **Simulator**: 基于 go2rtc + FFmpeg 的流媒体模拟推流服务，仅供无现成监控流测试时使用。
+    *   **Simulator**: 基于 MediaMTX + FFmpeg 的流媒体模拟推流服务，仅供无现成监控流测试时使用。
 
 ## 快速启动 (Detection Platform)
 
@@ -77,9 +84,9 @@ uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 - **一键复制**: 快捷复制 RTSP URL 到剪贴板，带 UI 反馈。
 - **元数据解析**: 自动调用 `ffprobe` 提取分辨率、帧率、码率等 8 项关键数据。
 - **BPP 画质评估**: 基于 Bits Per Pixel 自动评级 (POOR/FAIR/GOOD/EXCELLENT)。
-- **go2rtc 集成 (v1.9.7)**: 使用 `PUT /api/streams` API 动态注册流路径，确保 FFmpeg 推流稳定。
+- **MediaMTX 集成 (v2.0.0+)**: 通过 MediaMTX REST API 动态注册流路径，确保 FFmpeg 推流稳定。v2.1.2 起由后端统一管理拉流路径生命周期。
 
-### 端口配置 (v2.6.0)
+### 端口配置
 | 服务 | 端口 | 说明 |
 |------|------|------|
 | MediaMTX RTSP | 8554 | RTSP 推流/拉流端口 |

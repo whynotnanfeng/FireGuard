@@ -25,7 +25,7 @@
         </router-link>
       </nav>
       <div class="sidebar-footer">
-        <div class="version-info">v1.3.1</div>
+        <div class="version-info">v2.9.0</div>
       </div>
     </aside>
 
