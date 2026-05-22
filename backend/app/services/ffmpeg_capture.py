@@ -476,15 +476,10 @@ class FFmpegCapture:
                 current_wall_clock = time.time()
                 self._last_wall_clock = current_wall_clock
 
-                # V4.1: 单调递增帧序号 PTS
-                # 使用帧序号 × 帧间隔作为 PTS，不受 WSL2 时钟偏差影响
-                # 不取模视频时长 — 保持单调递增，确保 HLS 时间轴连续
-                # 模拟流循环播放时 PTS 持续增长，前端通过 getVideoAbsTime 的
-                # sessionStartTime + currentTime 计算与后端时间戳对齐
-                expected_interval_ms = 1000.0 / self._frame_rate
-                pts_ms = self._frame_count * expected_interval_ms + self._pts_offset
-
-                # 增加累积偏移量（用于续播）
+                # 使用实际经过时间计算 PTS，避免帧率漂移导致时间戳不同步
+                # 当实际 FPS 低于目标 FPS 时，帧计数 PTS 会超前于真实时间
+                elapsed_s = current_wall_clock - self._session_start_time
+                pts_ms = elapsed_s * 1000.0 + self._pts_offset
                 pts_ms += self._cumulative_offset * 1000
 
                 if self._frame_count % 500 == 0:
@@ -517,10 +512,10 @@ class FFmpegCapture:
                         f"pts_ms={pts_ms:.0f}"
                     )
 
-                # V4.5: 帧间隙诊断 — 超过 3x 帧间隔时记录（辅助定位模拟器循环边界卡顿）
+                # 帧间隙诊断 — 超过 3x 帧间隔时记录（辅助定位模拟器循环边界卡顿）
                 if self._last_wall_clock and self._frame_count > 1:
                     gap_ms = (current_wall_clock - self._last_wall_clock) * 1000
-                    expected_gap_ms = expected_interval_ms
+                    expected_gap_ms = 1000.0 / self._frame_rate
                     if gap_ms > expected_gap_ms * 3:
                         logger.warning(
                             f"[DIAG-FRAME-GAP] frame={self._frame_count}, "
@@ -551,7 +546,7 @@ class FFmpegCapture:
             f"[FFmpegCapture] Restarting (reconnect_count={self._reconnect_count})..."
         )
 
-        # V4.9: 计算 PTS 偏移量，确保重启后 PTS 单调递增不断裂
+        # 计算 PTS 偏移量，确保重启后 PTS 单调递增不断裂
         expected_interval_ms = 1000.0 / self._frame_rate
         self._pts_offset = self._frame_count * expected_interval_ms
 

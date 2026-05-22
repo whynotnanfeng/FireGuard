@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { useAuthStore } from '@/stores/auth'
 
 /**
  * 结构化日志系统
@@ -68,7 +69,12 @@ class Logger {
     this.buffer = []
 
     try {
-      await axios.post('/api/logs/batch', { logs: logsToSend }, { timeout: 5000 })
+      const authStore = useAuthStore()
+      const headers: Record<string, string> = {}
+      if (authStore.token) {
+        headers['Authorization'] = `Bearer ${authStore.token}`
+      }
+      await axios.post('/api/logs/batch', { logs: logsToSend }, { timeout: 5000, headers })
     } catch {
       // 如果发送失败，丢弃日志，避免累积
     }

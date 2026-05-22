@@ -53,7 +53,7 @@ class MediaGatewayManager:
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # V1.3.1: 在线程中调用且 Loop 已在运行时，必须阻塞等待结果，否则 FFmpeg 会比注册更早启动
+                # 在线程中调用且 Loop 已在运行时，必须阻塞等待结果，否则 FFmpeg 会比注册更早启动
                 from concurrent.futures import TimeoutError
                 future = asyncio.run_coroutine_threadsafe(
                     self.service.register_stream(stream_path, raw_url), loop

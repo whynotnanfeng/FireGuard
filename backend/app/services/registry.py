@@ -266,8 +266,9 @@ class ServiceRegistry:
             self.set_config("mediamtx_api_port", 9997)
             self.set_config("mediamtx_rtsp_port", 8554)
         else:
-            self.set_config("mediamtx_api_port", 9997)
-            self.set_config("mediamtx_rtsp_port", 8554)
+            # development 模式使用模拟器默认端口 (api=9996, rtsp=8555)
+            self.set_config("mediamtx_api_port", 9996)
+            self.set_config("mediamtx_rtsp_port", 8555)
 
     def close(self):
         self._stop_event.set()

@@ -13,7 +13,6 @@ import time
 import threading
 import queue
 import multiprocessing as mp
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
 
@@ -26,15 +25,12 @@ from app.utils.time import now_beijing
 from app.services.broker import broker
 from app.services.detector import Detection
 from app.services.storage_manager import storage_manager
-from app.database import engine
-from app.models.task import Task
 
 import cv2
 
 from app.config import config
 from app.database import engine
 from app.models.task import Task
-from app.models.result import TaskResult
 from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
@@ -49,7 +45,7 @@ class StreamManager:
         self._streams: Dict[str, "VideoStream"] = {}
         self._paused: Set[str] = set()
         self._monitor_task: Optional[asyncio.Task] = None
-        # V1.3.0: High-integrity identity tracking
+        # High-integrity identity tracking
         self._stream_tokens: Dict[str, object] = {} 
         
         # [核心优化]: 延迟初始化 MP 资源，防止 Windows 下 re-import 导致的 Manager 爆炸
@@ -199,7 +195,7 @@ class StreamManager:
         
         # 情况 1: 需要扩容（含死亡 Worker 重生）
         if target_workers > current_workers or dead_count > 0:
-            # 【V1.9.0 稳定性加固】：如果当前 CPU 已经很高，禁止扩容，防止新进程加载模型瞬间抢占解码资源导致 H.264 报错
+            # 稳定性加固：如果当前 CPU 已经很高，禁止扩容，防止新进程加载模型瞬间抢占解码资源导致 H.264 报错
             respawn_needed = dead_count > 0
             if cpu_usage > 75 and not respawn_needed:
                 logger.info(f"[ElasticScaling] Scale-UP suppressed due to High CPU ({cpu_usage}%). Keeping {current_workers} workers.")
@@ -224,13 +220,13 @@ class StreamManager:
             try:
                 w = self.workers.pop()
                 w.stop()
-                # 【V1.9.2 加固】：增加超时
+                # 加固：增加超时
                 self.global_inference_in_q.put(None, timeout=1.0) # 塞毒丸
-            except:
+            except Exception:
                 pass
             # 提示：实际物理进程会在 Join 之后回收
         
-        # [V1.4.9 回滚缩容逻辑]: 
+        # 回滚缩容逻辑
         # 为了 Windows 系统的绝对稳定，我们不再自动杀掉多余的进程。
         # 保持 1-2 个空闲进程对系统几乎无负荷，但能极大提升任务启动速度。
 
@@ -244,7 +240,7 @@ class StreamManager:
             w.stop()
             try:
                 self.global_inference_in_q.put(None, timeout=1.0) # 塞毒丸
-            except:
+            except Exception:
                 pass
         
         for w in self.workers:
@@ -255,9 +251,9 @@ class StreamManager:
         # 3. 停止分发线程
         if self._dispatcher_thread:
             try:
-                # 【V1.9.2 加固】：增加超时，防止由于队列满导致的退出挂起
+                # 加固：增加超时，防止由于队列满导致的退出挂起
                 self.global_inference_out_q.put(None, timeout=1.0)
-            except:
+            except Exception:
                 pass
             self._dispatcher_thread.join(timeout=2.0)
 
@@ -276,7 +272,7 @@ class StreamManager:
     def _result_dispatcher_loop(self):
         """核心路由：从全局队列拿结果，支持【批处理聚合】和【时序重排】"""
         from collections import defaultdict
-        from app.services.video_stream import db_executor  # V4.10: 用于卸载 process_detections
+        from app.services.video_stream import db_executor  # 用于卸载 process_detections
 
         logger.info("[Dispatcher] Result dispatcher thread started. Batching enabled.")
         
@@ -352,14 +348,14 @@ class StreamManager:
                         break
                     continue 
 
-                # V2.0: 增加严格校验，防止 NoneType 崩溃
-                # 【P0-2 改进】：支持 3/4/5 元组格式
-                # V3.0: 5 元组包含 jpeg_data，确保帧与检测结果严格对应
+                # 增加严格校验，防止 NoneType 崩溃
+                # 改进支持 3/4/5 元组格式
+                # 5 元组包含 jpeg_data，确保帧与检测结果严格对应
                 if not isinstance(result, (list, tuple)) or len(result) < 3:
                     logger.warning(f"[Dispatcher] Malformed inference result: {result}")
                     continue
 
-                # 解析结果：兼容多种格式（V4.10: result[5] = provider 诊断信息）
+                # 解析结果：兼容多种格式（result[5] = provider 诊断信息）
                 task_id, timestamp, raw_detections = result[0], result[1], result[2]
                 inference_time_ms = result[3] if len(result) >= 4 else 0
                 returned_jpeg_data = result[4] if len(result) >= 5 else None
@@ -373,12 +369,12 @@ class StreamManager:
                     raw_detections = []
                 _dispatcher_result_count += 1
                 
-                # 【P0-5 诊断日志】：监控结果间隔
+                # 诊断日志监控结果间隔
                 if _dispatcher_last_result_ts > 0:
                     gap = timestamp - _dispatcher_last_result_ts
                     if gap > _dispatcher_max_gap:
                         _dispatcher_max_gap = gap
-                    # 【P0-5 诊断日志】：如果间隔超过 5 秒，输出警告
+                    # 诊断日志如果间隔超过 5 秒，输出警告
                     if gap > 5.0:
                         logger.warning(
                             f"[DIAG-DISP] Large gap detected: {gap:.2f}s since last result for task {task_id}, "
@@ -408,26 +404,30 @@ class StreamManager:
                 ntp_offset_ms = clock_monitor.avg_offset_ms or 0.0
                 current_abs_time = int((stream_start_time + timestamp) * 1000 - ntp_offset_ms)
                 
-                # V3.8: 推理结果路径 —— 仅做追踪 + 事件处理 + 更新最新检测结果。
+                # 推理结果路径 —— 仅做追踪 + 事件处理 + 更新最新检测结果。
                 # 检测框绘制和 HLS 写入由 _annotated_frame_writer 线程独立处理
                 # （源帧率 15fps，与推理速率解耦）。
-                with stream._latest_results_lock:
+                with stream._lock:
                     stream._latest_results = filtered
                     stream._latest_results_timestamp = timestamp
                     stream._latest_results_wall_time = time.time()
 
                 if stream.pipeline and stream._pipeline_initialized:
-                    # V4.10: 卸载到线程池避免 process_detections 持有 GIL
+                    # 卸载到线程池避免 process_detections 持有 GIL
                     # 阻塞 grabber/writer 线程（日志确诊：CPU 94% 时帧间隔达 263ms）
                     try:
+                        logger.info(
+                            f"[Dispatcher] Submitting process_detections: task_id={task_id}, "
+                            f"detections={len(filtered)}, abs_time={current_abs_time}"
+                        )
                         db_executor.submit(
                             stream.pipeline.process_detections, filtered, current_abs_time
                         )
                     except Exception as e:
-                        logger.error(f"[V3.8] Pipeline process_detections failed: {e}", exc_info=True)
+                        logger.error(f"Pipeline process_detections failed: {e}", exc_info=True)
                 
                 # 3. 构造 WebSocket 载荷
-                # V5.0: 从 consumer 记录的 PTS→墙钟映射中读取精确帧采集时刻
+                # 从 consumer 记录的 PTS→墙钟映射中读取精确帧采集时刻
                 _frame_wall_clock = stream._frame_wall_clock_map.get(
                     timestamp, stream_start_time + timestamp
                 )
@@ -459,6 +459,11 @@ class StreamManager:
                     
                 # 5. 数据库持久化
                 if filtered:
+                    # 添加诊断日志，确认检测记录保存被调用
+                    logger.info(
+                        f"[Dispatcher] Saving {len(filtered)} detections for task {task_id}, "
+                        f"timestamp_ms={current_abs_time}"
+                    )
                     db_executor.submit(stream._save_detection_records_sync, filtered, current_abs_time)
                     stream._last_results_time = timestamp
 
@@ -608,14 +613,14 @@ class StreamManager:
             
             await asyncio.sleep(5)
 
-    def start_stream(self, task_id: str, source: str, model_path: str, mapping: Optional[dict], is_resume: bool = False, use_gpu: bool = False) -> "VideoStream":
+    def start_stream(self, task_id: str, source: str, model_path: str, mapping: Optional[dict], is_resume: bool = False, use_gpu: bool = False, main_loop: Optional[object] = None) -> "VideoStream":
         """V12: 冷启动 - 始终创建新流实例（由调用方负责先stop旧流）"""
         from app.services.video_stream import VideoStream
 
-        # V1.2.46: Add a short delay to ensure old thread sockets are fully closed by OS
+        # Add a short delay to ensure old thread sockets are fully closed by OS
         time.sleep(0.1)
 
-        # V1.3.3: Pre-load detection config from DB
+        # Pre-load detection config from DB
         detection_config = None
         from app.models.task import Task
         from sqlmodel import Session
@@ -639,11 +644,11 @@ class StreamManager:
                                 cat["threshold"] = old_t / 100.0
                                 logger.debug(f"[Migration] Normalized cat {cat.get('name')} threshold: {old_t} -> {cat['threshold']}")
                     
-                    logger.info(f"[V1.3.3] Injected initial config for {task_id}")
+                    logger.info(f"Injected initial config for {task_id}")
                 except Exception as e:
                     logger.warning(f"Failed to parse initial config for {task_id}: {e}")
 
-        # V1.3.0: Create unique identity token for this run
+        # Create unique identity token for this run
         token_val = str(time.time()) # 使用时间戳字符串作为可序列化 Token
         self._stream_tokens[task_id] = token_val
         self.active_tasks_map[task_id] = token_val
@@ -658,19 +663,21 @@ class StreamManager:
 
         # 创建并启动新流 (注意：现在传入 model_path 而非 detector 实例)
         new_stream = VideoStream(task_id, source, model_path, token_val, mapping, use_gpu=use_gpu)
+        new_stream._main_loop = main_loop
         new_stream._is_resuming = is_resume
         new_stream.detection_config = detection_config # Inject config
-        new_stream.start_grabbers()
 
-        # 注册到管理器
+        # 先注册到管理器，再启动 grabbers，确保失败时 monitor 能检测到并清理
         with self._lock:
             self._streams[task_id] = new_stream
         self._paused.discard(task_id)
+
+        new_stream.start_grabbers()
         
         # 动态调整进程池
         self._adjust_worker_count()
         
-        logger.info(f"[V12] Stream {task_id} cold-started successfully using Global Pool")
+        logger.info(f"Stream {task_id} cold-started successfully using Global Pool")
         return new_stream
 
     def get_stream(self, task_id: str) -> Optional["VideoStream"]:
@@ -687,7 +694,7 @@ class StreamManager:
             self._streams[task_id].resume()
 
     def stop_stream(self, task_id: str) -> None:
-        logger.info(f"V1.3.0 MANAGER: Hard-stop requested for stream {task_id}")
+        logger.info(f"Hard-stop requested for stream {task_id}")
         with self._lock:
             stream = self._streams.get(task_id)
         if stream:
@@ -713,7 +720,7 @@ class StreamManager:
             # 放回不属于该任务的帧
             for item in temp_list:
                 self.global_inference_in_q.put_nowait(item)
-        except:
+        except Exception:
             pass
             
         self._paused.discard(task_id)
@@ -733,7 +740,7 @@ class StreamManager:
                 logger.info(f"[StreamManager] Stream {task_id} removal ignored: instance mismatch or already removed.")
 
     def is_active(self, task_id: str, token: object) -> bool:
-        """V1.3.0: Cross-verification heartbeat for workers."""
+        """Cross-verification heartbeat for workers."""
         return self._stream_tokens.get(task_id) is token
 
     def is_ready(self, task_id: str) -> bool:
@@ -741,9 +748,6 @@ class StreamManager:
 
     def is_paused(self, task_id: str) -> bool:
         return task_id in self._paused
-
-
-stream_manager = StreamManager()
 
 
 # ── Task Runner ───────────────────────────────────────────────────────────────
@@ -879,6 +883,7 @@ class TaskRunner:
             # FPS Throttling for Image Tasks
             fps_target = detection_config.get("fps", config.DETECTION_FPS_IMAGE)
             last_process_time = 0.0
+            total_images = len(image_files)
 
             all_detections: dict = {}
             result_dir = config.RESULTS_DIR / user_id / task_id
@@ -888,14 +893,10 @@ class TaskRunner:
             for idx, img_path in enumerate(image_files):
                 now_exec = time.time()
                 if fps_target > 0:
-                    # For image tasks, FPS means how many images we process per "second" of processing time
-                    # or more simply, we can just use it as a rate limiter.
-                    if (now_exec - last_process_time) < (1.0 / fps_target):
-                        # Technically we should skip or wait. For images, we usually want to skip
-                        # if we want to simulate a specific rate from a sequence.
-                        # But for a folder, it's more like a rate limiter.
-                        # Let's just implement it as a rate limiter to avoid overloading.
-                        pass # Processing images usually doesn't need skipping unless it's a burst
+                    elapsed = now_exec - last_process_time
+                    min_interval = 1.0 / fps_target
+                    if elapsed < min_interval:
+                        time.sleep(min_interval - elapsed)
                 
                 if task_id in self._cancelled_tasks:
                     logger.info(f"Image task {task_id} cancelled during processing")
@@ -930,6 +931,18 @@ class TaskRunner:
                     first_result_path = str(out_path)
                 all_detections[out_name] = [d.to_dict() for d in filtered_dets]
                 last_process_time = time.time()
+
+                # Progress reporting (every 5 images)
+                if total_images > 0 and (idx + 1) % 5 == 0:
+                    try:
+                        with Session(engine) as db_sess:
+                            t = db_sess.get(Task, task_id)
+                            if t:
+                                t.progress = int((idx + 1) / total_images * 100)
+                                db_sess.add(t)
+                                db_sess.commit()
+                    except Exception:
+                        pass
 
             return first_result_path, all_detections
 
@@ -1007,6 +1020,7 @@ class TaskRunner:
                 fps = cap_rgb.get(cv2.CAP_PROP_FPS) or 25
                 w = int(cap_rgb.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap_rgb.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                total_frames = int(cap_rgb.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
 
                 out_name = f"annotated_{video_path_obj.stem}.webm"
                 out_path = result_dir / out_name
@@ -1016,7 +1030,7 @@ class TaskRunner:
                 vid_detections = []
                 frame_idx = 0
                 
-                # V1.6: Dynamic FPS Calculation
+                # Dynamic FPS Calculation
                 fps_target = detection_config.get("fps", config.DETECTION_FPS_VIDEO)
                 if fps_target > 0:
                     frame_step = max(1, int(fps / fps_target))
@@ -1059,7 +1073,19 @@ class TaskRunner:
                         
                         annotated = Detector.draw_boxes(frame_rgb, filtered_dets)
                         writer.write(annotated)
-                    
+
+                    # Progress reporting (every 100 frames)
+                    if total_frames > 0 and frame_idx % 100 == 0:
+                        try:
+                            with Session(engine) as db_sess:
+                                t = db_sess.get(Task, task_id)
+                                if t:
+                                    t.progress = min(99, int(frame_idx / total_frames * 100))
+                                    db_sess.add(t)
+                                    db_sess.commit()
+                        except Exception:
+                            pass
+
                     frame_idx += 1
 
                 cap_rgb.release()

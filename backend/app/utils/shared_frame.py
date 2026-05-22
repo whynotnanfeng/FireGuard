@@ -46,13 +46,7 @@ class SharedFrameRing:
         self.buffers = []
         for i in range(n_buffers):
             buf_name = f"{name_prefix}_{i}"
-            # 清理可能残留的上次同名共享内存
-            try:
-                old = shm.SharedMemory(name=buf_name)
-                old.close()
-                old.unlink()
-            except FileNotFoundError:
-                pass
+            self._force_cleanup_name(buf_name)
             block = shm.SharedMemory(name=buf_name, create=True, size=self.frame_bytes)
             self.buffers.append(block)
 
@@ -96,6 +90,24 @@ class SharedFrameRing:
                 block.unlink()
             except Exception:
                 pass
+        self.buffers.clear()
+
+    @staticmethod
+    def _force_cleanup_name(buf_name: str):
+        """强制清理指定名称的残留共享内存（Windows 兼容）"""
+        import time
+        for attempt in range(5):
+            try:
+                old = shm.SharedMemory(name=buf_name)
+                old.close()
+                old.unlink()
+                # Windows 内核对象释放需要等待
+                time.sleep(0.15)
+                return
+            except FileNotFoundError:
+                return
+            except Exception:
+                time.sleep(0.15)
 
     @property
     def payload_size_bytes(self) -> int:

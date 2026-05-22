@@ -22,7 +22,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func, col
 
 from app.config import config
 from app.database import get_session
@@ -38,6 +38,7 @@ from app.models.detection_event import DetectionEvent
 from app.services.notifier import notifier
 from app.services.storage_manager import storage_manager
 from app.utils.time import now_beijing
+from app.limiter import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +85,15 @@ class DetectionConfigUpdate(BaseModel):
     detection_config: dict
 
 
-def _to_response(task: Task, session: Session) -> TaskResponse:
+def _to_response(task: Task, session: Session, models_map: dict[str, str] | None = None) -> TaskResponse:
     model_name = None
     if task.model_id:
-        dm = session.get(DetectionModel, task.model_id)
-        if dm:
-            model_name = dm.name
+        if models_map and task.model_id in models_map:
+            model_name = models_map[task.model_id]
+        else:
+            dm = session.get(DetectionModel, task.model_id)
+            if dm:
+                model_name = dm.name
     return TaskResponse(
         id=task.id,
         name=task.name,
@@ -116,10 +120,8 @@ def _to_response(task: Task, session: Session) -> TaskResponse:
 
 # ── List ─────────────────────────────────────────────────────────────────────
 
-@router.get("", response_model=TaskListResponse)
-def list_tasks(
-    skip: int = 0,
-    limit: int = 20,
+def _build_task_query(
+    user_id: str,
     status: Optional[str] = None,
     search: Optional[str] = None,
     task_type: Optional[str] = None,
@@ -127,10 +129,8 @@ def list_tasks(
     description: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user),
 ):
-    query = select(Task).where(Task.user_id == current_user.id)
+    query = select(Task).where(Task.user_id == user_id)
     if status:
         query = query.where(Task.status == status)
     if search:
@@ -145,28 +145,36 @@ def list_tasks(
         query = query.where(Task.created_at >= datetime.fromisoformat(date_from))
     if date_to:
         query = query.where(Task.created_at <= datetime.fromisoformat(date_to))
-        
+    return query
+
+
+@router.get("", response_model=TaskListResponse)
+def list_tasks(
+    skip: int = 0,
+    limit: int = 20,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    task_type: Optional[str] = None,
+    model_id: Optional[str] = None,
+    description: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    query = _build_task_query(
+        current_user.id, status, search, task_type, model_id, description, date_from, date_to
+    )
     items = session.exec(query.offset(skip).limit(limit).order_by(Task.created_at.desc())).all()
+    total = session.exec(select(func.count()).select_from(query.subquery())).one()
+    # 批量预加载 model 名称，避免 N+1 查询
+    model_ids = {t.model_id for t in items if t.model_id}
+    models_map: dict[str, str] = {}
+    if model_ids:
+        models = session.exec(select(DetectionModel).where(col(DetectionModel.id).in_(model_ids))).all()
+        models_map = {m.id: m.name for m in models}
 
-    count_query = select(Task).where(Task.user_id == current_user.id)
-    if status:
-        count_query = count_query.where(Task.status == status)
-    if search:
-        count_query = count_query.where(Task.name.contains(search))
-    if task_type:
-        count_query = count_query.where(Task.task_type == task_type)
-    if model_id:
-        count_query = count_query.where(Task.model_id == model_id)
-    if description:
-        count_query = count_query.where(Task.description.contains(description))
-    if date_from:
-        count_query = count_query.where(Task.created_at >= datetime.fromisoformat(date_from))
-    if date_to:
-        count_query = count_query.where(Task.created_at <= datetime.fromisoformat(date_to))
-        
-    total = len(session.exec(count_query).all())
-
-    return TaskListResponse(total=total, items=[_to_response(t, session) for t in items])
+    return TaskListResponse(total=total, items=[_to_response(t, session, models_map) for t in items])
 
 
 # ── Create ────────────────────────────────────────────────────────────────────
@@ -292,7 +300,8 @@ async def create_task(
             def save_uploaded_files():
                 for f in rgb_files:
                     f.file.seek(0)
-                    out_path = rgb_dir / (f.filename or "file")
+                    safe_name = os.path.basename(f.filename or "file") or "file"
+                    out_path = rgb_dir / safe_name
                     with open(out_path, "wb") as buffer:
                         shutil.copyfileobj(f.file, buffer)
 
@@ -300,7 +309,8 @@ async def create_task(
                     ir_dir.mkdir(parents=True, exist_ok=True)
                     for f in ir_files:
                         f.file.seek(0)
-                        out_path = ir_dir / (f.filename or "file")
+                        safe_name = os.path.basename(f.filename or "file") or "file"
+                        out_path = ir_dir / safe_name
                         with open(out_path, "wb") as buffer:
                             shutil.copyfileobj(f.file, buffer)
 
@@ -331,7 +341,7 @@ async def create_task(
             task_dir = config.UPLOADS_DIR / current_user.id / task.id
             if task_dir.exists():
                 shutil.rmtree(task_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=f"Task creation failed: {e}")
+        raise HTTPException(status_code=500, detail="Task creation failed")
 
     return _to_response(task, session)
 
@@ -496,10 +506,10 @@ async def delete_task(
     if result_dir.exists():
         shutil.rmtree(result_dir, ignore_errors=True)
 
-    # Delete detection records
-    records = session.exec(select(DetectionRecord).where(DetectionRecord.task_id == task_id)).all()
-    for record in records:
-        session.delete(record)
+    # Delete detection records (批量删除，避免全量加载到内存)
+    from sqlalchemy import delete as sa_delete
+    session.exec(sa_delete(DetectionRecord).where(DetectionRecord.task_id == task_id))
+    session.exec(sa_delete(DetectionEvent).where(DetectionEvent.task_id == task_id))
 
     # ── V1.2.15: Physical Cleanup of Recorded Videos ──────────────────
     # Re-verify and delete the storage segments
@@ -510,6 +520,44 @@ async def delete_task(
 
     session.commit()
     return {"message": "Task deleted"}
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _rebuild_m3u8_from_segments(m3u8_path: Path, ts_files: list[Path], task_id: str) -> None:
+    """从现有 .ts 分段文件重建 m3u8 播放列表（当原 m3u8 损坏或丢失时）"""
+    import re
+
+    segment_entries = []
+    for ts_file in ts_files:
+        # 尝试从 FFmpeg 日志或文件名推断时长，默认每段 1 秒
+        duration = 1.0
+        # 从文件名提取编号用于排序
+        match = re.search(r"stream_annotated(\d+)\.ts", ts_file.name)
+        seg_num = int(match.group(1)) if match else 0
+        segment_entries.append((seg_num, duration, ts_file.name))
+
+    segment_entries.sort(key=lambda x: x[0])
+
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        f"#EXT-X-TARGETDURATION:{int(max(e[1] for e in segment_entries)) + 1}",
+        f"#EXT-X-MEDIA-SEQUENCE:{segment_entries[0][0]}",
+    ]
+    for _, duration, filename in segment_entries:
+        lines.append(f"#EXTINF:{duration:.3f},")
+        lines.append(filename)
+    lines.append("#EXT-X-ENDLIST")
+
+    try:
+        m3u8_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info(
+            f"[Tasks] Rebuilt m3u8 for task {task_id}: "
+            f"{len(segment_entries)} segments"
+        )
+    except Exception as e:
+        logger.error(f"[Tasks] Failed to rebuild m3u8 for task {task_id}: {e}")
 
 
 # ── Execute ───────────────────────────────────────────────────────────────────
@@ -553,15 +601,89 @@ async def execute_task(
             # 等待旧流彻底释放资源（最多 5s），防止新旧进程冲突
             await asyncio.to_thread(old_stream._drain_done.wait, timeout=3.0)
 
+        # 续存判断：基于数据完整性
+        # .ts 分段和 m3u8 是视频历史（类似数据库），停止时不清除，重启时不删除
+        # 只要 .ts 分段存在就续存；m3u8 损坏则从 .ts 文件重建
+        task_dir = Path(config.VIDEO_STORAGE_DIR) / task.id
+        is_resume = False
+        if task_dir.exists():
+            old_segments = sorted(task_dir.glob("stream_annotated*.ts"))
+            old_m3u8 = task_dir / "stream_annotated.m3u8"
+            if old_segments:
+                if old_m3u8.exists():
+                    try:
+                        m3u8_content = old_m3u8.read_text(encoding="utf-8")
+                        if "#EXTINF:" in m3u8_content:
+                            is_resume = True
+                            logger.info(
+                                f"[Tasks] Resume mode for task {task.id}: "
+                                f"{len(old_segments)} old segments, m3u8 intact"
+                            )
+                        else:
+                            # m3u8 损坏：从 .ts 文件重建，不丢失视频历史
+                            _rebuild_m3u8_from_segments(old_m3u8, old_segments, task.id)
+                            is_resume = True
+                            logger.warning(
+                                f"[Tasks] m3u8 corrupted for task {task.id}, "
+                                f"rebuilt from {len(old_segments)} segments"
+                            )
+                    except Exception:
+                        # 读取失败：重建 m3u8
+                        _rebuild_m3u8_from_segments(old_m3u8, old_segments, task.id)
+                        is_resume = True
+                else:
+                    # m3u8 不存在但 .ts 文件在：重建 m3u8
+                    _rebuild_m3u8_from_segments(old_m3u8, old_segments, task.id)
+                    is_resume = True
+                    logger.info(
+                        f"[Tasks] m3u8 missing for task {task.id}, "
+                        f"rebuilt from {len(old_segments)} segments"
+                    )
+        if not is_resume:
+            logger.info(f"[Tasks] Fresh start for task {task.id}")
+
+        # 防御性清理：关闭上次运行遗留的孤立 ENTER 事件（left_at=NULL）
+        # 正常停止时 _flush_active_tracks 已处理，这里兜底处理异常退出/崩溃的情况
+        from app.models.detection_event import DetectionEvent
+        orphaned = session.exec(
+            select(DetectionEvent).where(
+                DetectionEvent.task_id == task.id,
+                DetectionEvent.event_type == "enter",
+                DetectionEvent.left_at.is_(None),  # type: ignore[attr-defined]
+            )
+        ).all()
+        if orphaned:
+            close_time = now_beijing()
+            for evt in orphaned:
+                evt.left_at = close_time
+                evt.duration_ms = int((close_time - evt.entered_at).total_seconds() * 1000)
+                session.add(evt)
+            session.commit()
+            logger.info(f"[Tasks] Closed {len(orphaned)} orphaned ENTER events for task {task.id}")
+
         # DB 立即置为 running，前端响应"正在连接"
         task.status = "initializing"
         task.error_msg = ""
         task.updated_at = now_beijing()
         session.add(task)
         session.commit()
-        
-        stream_manager.start_stream(task.id, task.source_path, dm.file_path, mapping, use_gpu=task.use_gpu)
-        
+
+        # V12: 在线程池中启动流，避免 start_grabbers() 的 RTSP 重试阻塞事件循环
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(
+            None,
+            lambda: stream_manager.start_stream(
+                task.id, task.source_path, dm.file_path, mapping,
+                is_resume=is_resume, use_gpu=task.use_gpu,
+                main_loop=loop,
+            ),
+        )
+        future.add_done_callback(
+            lambda f: f.exception() and logger.error(
+                f"start_stream background failed for {task.id}: {f.exception()}"
+            )
+        )
+
         await notifier.broadcast_status(task.id, "initializing")
         
         return {"message": "Stream execution started", "position": 0}
@@ -601,6 +723,24 @@ async def pause_task(
         stream_manager.stop_stream(task_id)
         if stream and stream._drain_done:
             stream._drain_done.wait(timeout=10.0)
+
+        # 确保旧 FFmpeg 进程完全退出，防止续存时新旧进程冲突导致花屏
+        if stream and hasattr(stream, 'pipeline') and stream.pipeline:
+            writer = getattr(stream.pipeline, 'annotated_writer', None)
+            if writer and writer.process:
+                try:
+                    writer.process.wait(timeout=5)
+                except Exception:
+                    try:
+                        writer.process.terminate()
+                        writer.process.wait(timeout=2)
+                    except Exception:
+                        try:
+                            writer.process.kill()
+                        except Exception:
+                            pass
+                writer.process = None
+                logger.info(f"[Tasks] FFmpeg process confirmed stopped for {task_id}")
     except Exception as e:
         logger.error(f"stop_stream failed for {task_id}: {e}")
 
@@ -626,6 +766,7 @@ async def pause_task(
 
 @router.get("/{task_id}/result")
 def get_result(
+    request: Request,
     task_id: str,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
@@ -637,9 +778,11 @@ def get_result(
     if task.task_type == "stream":
         if task.status not in ("running", "paused"):
             raise HTTPException(status_code=400, detail="Stream task is not running")
+        ws_scheme = "wss" if request.url.scheme == "https" else "ws"
+        ws_host = request.headers.get("host", request.url.hostname or "localhost:8000")
         return {
             "type": "stream",
-            "websocket_url": f"ws://localhost:8000/ws/stream/{task_id}",
+            "websocket_url": f"{ws_scheme}://{ws_host}/ws/stream/{task_id}",
         }
 
     if task.status != "completed":
@@ -652,28 +795,16 @@ def get_result(
     base_url = f"/api/results/{current_user.id}/{task_id}"
     detections = json.loads(result.detections)
 
-    if task.task_type == "image":
-        result_dir = config.RESULTS_DIR / current_user.id / task_id
-        filenames = sorted([f for f in os.listdir(result_dir) if f.startswith("annotated_")]) if os.path.exists(result_dir) else []
-        urls = [f"{base_url}/{f}" for f in filenames]
-        return {
-            "type": "image",
-            "url": urls[0] if urls else "",
-            "urls": urls,
-            "filenames": filenames,
-            "detections": detections,
-        }
-    else:  # video
-        result_dir = config.RESULTS_DIR / current_user.id / task_id
-        filenames = sorted([f for f in os.listdir(result_dir) if f.startswith("annotated_")]) if os.path.exists(result_dir) else []
-        urls = [f"{base_url}/{f}" for f in filenames]
-        return {
-            "type": "video",
-            "url": urls[0] if urls else "",
-            "urls": urls,
-            "filenames": filenames,
-            "detections": detections,
-        }
+    result_dir = config.RESULTS_DIR / current_user.id / task_id
+    filenames = sorted([f for f in os.listdir(result_dir) if f.startswith("annotated_")]) if os.path.exists(result_dir) else []
+    urls = [f"{base_url}/{f}" for f in filenames]
+    return {
+        "type": task.task_type,
+        "url": urls[0] if urls else "",
+        "urls": urls,
+        "filenames": filenames,
+        "detections": detections,
+    }
 
 
 # ── Historical Detections API (Phase 4) ──────────────────────────────────
@@ -1060,11 +1191,28 @@ class DiagLogRequest(BaseModel):
     logs: List[DiagLogEntry]
 
 
+def _extract_user_id_from_token(request: Request) -> str:
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        try:
+            from app.dependencies import decode_token
+            payload = decode_token(auth_header[7:])
+            return payload.get("sub", "anonymous")
+        except Exception:
+            pass
+    return "anonymous"
+
+
 @system_router.post("/logs/diag")
-async def log_diag(body: DiagLogRequest):
+@limiter.limit("60/minute")
+async def log_diag(
+    request: Request,
+    body: DiagLogRequest,
+):
     """接收前端诊断日志，写入 diag.log 文件"""
     config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = config.LOGS_DIR / "diag.log"
+    user_id = _extract_user_id_from_token(request)
 
     with open(log_path, "a", encoding="utf-8") as f:
         for entry in body.logs:
@@ -1072,6 +1220,7 @@ async def log_diag(body: DiagLogRequest):
                 "time": datetime.now().isoformat(),
                 "client_ts": entry.ts,
                 "task_id": body.taskId,
+                "user_id": user_id,
                 "tag": entry.tag,
                 "msg": entry.msg,
             }
@@ -1081,7 +1230,9 @@ async def log_diag(body: DiagLogRequest):
 
 
 @system_router.post("/logs/batch")
+@limiter.limit("60/minute")
 async def log_frontend_batch(
+    request: Request,
     body: BatchLogRequest,
 ):
     """
@@ -1089,12 +1240,13 @@ async def log_frontend_batch(
     """
     config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = config.LOGS_DIR / "frontend.log"
+    user_id = _extract_user_id_from_token(request)
 
     with open(log_path, "a", encoding="utf-8") as f:
         for entry in body.logs:
             log_line = {
                 "time": datetime.now().isoformat(),
-                "user_id": "anonymous",  # 改为匿名上报，确保护日志通畅
+                "user_id": user_id,
                 "client_time": entry.timestamp,
                 "level": entry.level,
                 "category": entry.category,

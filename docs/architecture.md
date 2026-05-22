@@ -1,4 +1,4 @@
-# 架构设计文档 (v2.5.1 服务端帧嵌入渲染版)
+# 架构设计文档 (v2.9.0 服务端帧嵌入渲染版)
 
 本系统在 **v2.5.1** 版本中恢复服务端帧嵌入渲染（帧精确检测框对齐），通过 720p/10fps 降低编码负载消除卡顿。GPU 推理全链路打通（CUDAExecutionProvider），采集恢复加入指数退避。架构核心原则：解码/编码/推理/采集恢复各自独立，互不阻塞。
 
@@ -125,7 +125,7 @@ FFmpegCapture → _latest_frames (@15fps)
 - **PI 队列控制器**：目标队列深度 5，Kp=0.06, Ki=0.008。队列>5 减慢派发，队列<5 加快派发。
 - **CPU 利用率映射**：<50%→全速, 50-70%→75%, 70-85%→55%, >85%→保底 5fps。
 - **速率范围**：5fps (Frigate 默认) ~ source_fps (动态检测)。
-- **配置项**：`DETECTION_FPS_STREAM` 从 50 降为 15（与源帧率对齐），`detection_config.fps` 为用户期望上限。
+- **配置项**：`DETECTION_FPS_STREAM` 默认 15（与源帧率对齐），`detection_config.fps` 为用户期望上限。
 
 ### GPU 资源分配策略 (v2.3.0)
 
@@ -147,11 +147,11 @@ NVDEC 和 NVENC 使用 GPU 内部独立引擎，不共享计算单元，可同�
 - **MediaMTX 路径管理 (v2.1.2 更新)**：
   - v2.0.0-v2.1.1：`register_go2rtc_path()` 在推流前通过 MediaMTX REST API (`POST /api/v1/paths`) 注册流路径，`unregister_go2rtc_path()` 在停止时注销。
   - v2.1.2+：`register_stream()` 通过 `/v3/config/paths/add/{stream_path}` API 注册拉流路径，配置 `source` 为原始 RTSP 地址。`unregister_stream()` 先踢出连接 (`/v3/paths/{stream_path}/kick`) 再删除路径配置 (`/v3/config/paths/delete/{stream_path}`)。
-  - v1.9.7 之前使用 go2rtc 的 `PUT /api/streams` 注册路径，v2.0.0 迁移至 MediaMTX 后改为 `POST /api/v1/paths`，v2.1.2 再次重构为显式拉流路径注册。
+  - v1.9.7 之前使用 go2rtc 的 `PUT /api/streams` 注册路径（已弃用），v2.0.0 迁移至 MediaMTX 后改为 `POST /api/v1/paths`，v2.1.2 再次重构为显式拉流路径注册。
 - **Redis 数据结构**：
   - `fireguard:config` (Hash)：全局配置项 `{key: value}`
   - `fireguard:registry` (Hash)：服务实例 `{service_name: json_info}`
-  - `fireguard:go2rtc_paths` (Set)：已注册的 MediaMTX 推流路径（保留旧命名以兼容）
+  - `fireguard:mediamtx:owner` (String)：MediaMTX 进程所有者信息
 
 ### 0.5 MediaMTX 流媒体网关 (v2.0.0 新增)
 系统流媒体网关从 go2rtc 迁移至 **MediaMTX v1.18.1**，提供更稳定的 RTSP/HLS/WebRTC 流管理：
@@ -393,6 +393,32 @@ else:
 ```
 
 **效果**：推理队列深度稳定在安全范围内，检测框投递速率稳定在 10-15 FPS。
+
+#### NVENC 编码参数优化 (P1) — 2026-05-22 经验总结
+
+**问题**：修改 NVENC 编码参数后出现花屏撕裂卡顿。
+
+**错误尝试**：将 preset 从 `p1` 改为 `p2`，rate control 从 `CBR` 改为 `VBR`，bufsize 从 `2M` 改为 `8M`。理论上 VBR 更高效，但实际导致编码器缓冲积压，帧大小波动剧烈，产生撕裂。
+
+**正确配置**（`hw_accel.py`）：
+```python
+if "nvenc" in encoder:
+    args += [
+        "-preset", "p1",        # 最快编码 preset，实时流首选
+        "-tune", "ll",          # 低延迟模式，必须启用
+        "-rc", "cbr",           # 固定码率，比 VBR 更稳定
+        "-b:v", "2M",           # 目标码率
+        "-maxrate", "2M",       # 最大码率（与 b:v 相等 = CBR）
+        "-bufsize", "2M",       # 缓冲区大小（与 b:v 相等最稳定）
+        "-gpu", "0",            # 指定 GPU 设备
+    ]
+```
+
+**关键经验**：
+- `p1` > `p2`：实时流场景下 p1 编码延迟更低，p2 的额外优化在高负载下反而引入不稳定
+- `CBR` > `VBR`：VBR 的缓冲区波动导致帧大小不均，网络传输时容易产生撕裂
+- `bufsize` = `b:v`：缓冲区与码率相等时编码器行为最可预测
+- 修改编码参数后**必须实测**，不能仅凭理论判断
 
 ### 问题2：模拟流画面撕裂
 

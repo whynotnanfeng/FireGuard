@@ -39,6 +39,24 @@ def create_db_and_tables() -> None:
     _enable_wal_mode()
     SQLModel.metadata.create_all(engine)
     _migrate_new_columns()
+    _create_indexes()
+
+
+def _create_indexes() -> None:
+    """Create composite indexes for query performance."""
+    import sqlite3
+    conn = sqlite3.connect(str(config.DB_PATH))
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_records_task_time "
+            "ON detection_records(task_id, detected_at)"
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"[Migration] Index creation skipped: {e}")
+    finally:
+        conn.close()
 
 
 def _migrate_new_columns() -> None:

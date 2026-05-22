@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { useAuthStore } from '@/stores/auth'
 
 interface DiagEntry {
   ts: string
@@ -44,7 +45,12 @@ class DiagLogger {
     const batch = [...this.buffer]
     this.buffer = []
     try {
-      await axios.post('/api/logs/diag', { taskId: this.taskId, logs: batch }, { timeout: 5000 })
+      const authStore = useAuthStore()
+      const headers: Record<string, string> = {}
+      if (authStore.token) {
+        headers['Authorization'] = `Bearer ${authStore.token}`
+      }
+      await axios.post('/api/logs/diag', { taskId: this.taskId, logs: batch }, { timeout: 5000, headers })
     } catch {
     }
   }
@@ -64,4 +70,6 @@ class DiagLogger {
 }
 
 export const diagLogger = new DiagLogger()
-diagLogger.startAutoFlush()
+if (import.meta.env.DEV) {
+  diagLogger.startAutoFlush()
+}

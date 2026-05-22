@@ -1,4 +1,4 @@
-# API 文档 (FireGuard v1.9.0)
+# API 文档 (FireGuard v2.9.0)
 
 ## 基础信息
 
@@ -64,13 +64,40 @@
 - **Query Parameters**:
     - `skip`: (int, default=0) 跳过条数
     - `limit`: (int, default=20) 获取条数
-    - `status`: (string, optional) 按状态筛选 (pending, running, success, exception, paused)
+    - `status`: (string, optional) 按状态筛选 (pending, initializing, running, queued, completed, failed, exception)
     - `search`: (string, optional) 按任务名称关键词检索
+    - `task_type`: (string, optional) 按任务类型筛选 (image, video, stream)
+    - `model_id`: (string, optional) 按模型 ID 筛选
+    - `description`: (string, optional) 按描述关键词检索
+    - `date_from`: (string, optional) 创建时间起始 (ISO 格式)
+    - `date_to`: (string, optional) 创建时间截止 (ISO 格式)
 - **Response**:
 ```json
 {
-  "data": [
-    { "id": "uuid", "name": "火灾巡检_01", "status": "running" }
+  "total": 42,
+  "items": [
+    {
+      "id": "uuid",
+      "name": "火灾巡检_01",
+      "task_type": "stream",
+      "input_types": ["rgb"],
+      "model_id": "model-uuid",
+      "model_name": "fire-detection-v1",
+      "source_type": "rtsp",
+      "source_path": "rtsp://...",
+      "description": "正门监控",
+      "status": "running",
+      "progress": 0,
+      "error_msg": "",
+      "detection_config": { "global_threshold": 0.25 },
+      "has_history": true,
+      "cumulative_running_seconds": 3600.0,
+      "session_start_time": "2026-05-20T10:00:00",
+      "resolution_width": 1920,
+      "resolution_height": 1080,
+      "created_at": "2026-05-20T09:00:00",
+      "updated_at": "2026-05-20T10:00:00"
+    }
   ]
 }
 ```
@@ -81,32 +108,35 @@
 - **Request (form-data)**: `name`, `task_type`, `model_id`, `rgb_files`, `use_gpu` (optional, boolean, default `False`)
 
 ### 检查 GPU 状态 [v1.9.0 新增]
-- **Method**: `GET /tasks/gpu-status`
+- **Method**: `GET /tasks/gpu/status`
 - **Auth**: JWT Bearer Token
 - **Success Status**: `200 OK`
 - **Description**: 检查当前系统 GPU 环境是否可用于推理。前端在启用 GPU 任务前应先调用此接口验证。
 - **Response**:
 ```json
 {
-  "data": {
-    "available": true,
+  "available": true,
+  "checks": {
+    "onnx_gpu": true,
     "cuda_available": true,
-    "onnx_gpu_available": true,
     "device_name": "NVIDIA GeForce RTX 3060",
-    "message": "GPU 推理环境就绪"
-  }
+    "vram_mb": 12288,
+    "vram_sufficient": true
+  },
+  "reason": ""
 }
 ```
 - **Error Response (GPU 不可用)**:
 ```json
 {
-  "data": {
-    "available": false,
+  "available": false,
+  "checks": {
+    "onnx_gpu": false,
     "cuda_available": false,
-    "onnx_gpu_available": false,
-    "device_name": null,
-    "message": "CUDA 驱动未安装或 onnxruntime-gpu 不可用"
-  }
+    "vram_mb": 0,
+    "vram_sufficient": false
+  },
+  "reason": "onnxruntime-gpu未安装或CUDAProvider不可用; 未检测到NVIDIA显卡"
 }
 ```
 
@@ -114,7 +144,7 @@
 - **Method**: `GET /tasks/registry/status`
 - **Auth**: JWT Bearer Token
 - **Success Status**: `200 OK`
-- **Description**: 查看 Redis 配置中心的当前状态，包括已注册服务、配置项和 go2rtc 路径。
+- **Description**: 查看 Redis 配置中心的当前状态，包括已注册服务和配置项。
 - **Response**:
 ```json
 {
@@ -127,13 +157,11 @@
     }
   },
   "config": {
-    "go2rtc_rtsp_port": "8554",
-    "go2rtc_api_port": "1984",
-    "go2rtc_webrtc_port": "8555",
-    "backend_port": "8000",
-    "simulator_port": "8001"
-  },
-  "go2rtc_paths": ["cam_001", "cam_002"]
+    "mediamtx_rtsp_port": 8554,
+    "mediamtx_api_port": 9997,
+    "backend_port": 8000,
+    "simulator_port": 8008
+  }
 }
 ```
 
@@ -155,6 +183,140 @@
   }
 }
 ```
+
+### 获取任务快照 (Hot Start)
+- **Method**: `GET /tasks/{id}/snapshot`
+- **Auth**: JWT Bearer Token
+- **Success Status**: `200 OK`
+- **Description**: 前端进入监控页面的首个请求，拉取当前状态、最近检测框和检测记录。
+- **Response**:
+```json
+{
+  "task": { "id": "uuid", "status": "running", ... },
+  "last_status": "running",
+  "recent_detections": [ { "timestamp": 1716200000000, "boxes": [...] } ],
+  "recent_records": [ { "id": "...", "class_name": "fire", "confidence": 0.95, "box": [x1,y1,x2,y2], "detected_at": "...", "timestamp_ms": 1716200000000 } ],
+  "hls_ready": true,
+  "has_history": true,
+  "server_time": 1716200000000,
+  "ntp_offset_ms": 0.0,
+  "ntp_synced": false
+}
+```
+
+### 更新检测配置
+- **Method**: `PUT /tasks/{id}/detection-config`
+- **Auth**: JWT Bearer Token
+- **Success Status**: `200 OK`
+- **Request Body**:
+```json
+{
+  "detection_config": {
+    "global_threshold": 0.25,
+    "categories": [
+      { "id": "0", "name": "fire", "selected": true, "threshold": 0.3 }
+    ]
+  }
+}
+```
+- **Description**: 更新任务的检测配置。仅 `pending` 或 `paused` 状态可修改。
+
+### 获取检测记录
+- **Method**: `GET /tasks/{id}/detection-records`
+- **Auth**: JWT Bearer Token
+- **Query Parameters**:
+    - `skip`: (int, default=0)
+    - `limit`: (int, default=500)
+    - `order`: (string, default="desc") 排序方向 "asc" | "desc"
+    - `start_time`: (string, optional) 起始时间 (ISO 格式)
+    - `end_time`: (string, optional) 截止时间 (ISO 格式)
+- **Response**:
+```json
+{
+  "records": [
+    {
+      "id": "uuid",
+      "class_name": "fire",
+      "confidence": 0.95,
+      "box": [100, 200, 150, 280],
+      "detected_at": "2026-05-20T10:00:00",
+      "timestamp_ms": 1716200000000
+    }
+  ]
+}
+```
+
+### 获取历史检测框 (滑动窗口)
+- **Method**: `GET /tasks/{id}/detections`
+- **Auth**: JWT Bearer Token
+- **Query Parameters**:
+    - `start_time`: (float, required) 起始绝对时间戳 (毫秒)
+    - `end_time`: (float, required) 结束绝对时间戳 (毫秒)
+- **Response**:
+```json
+[
+  {
+    "timestamp": 1716200000000,
+    "timestamp_ms": 1716200000000,
+    "boxes": [
+      { "x": 100, "y": 200, "w": 50, "h": 80, "conf": 0.95, "label": "fire" }
+    ]
+  }
+]
+```
+
+### 获取检测事件 (事件驱动)
+- **Method**: `GET /tasks/{id}/detection-events`
+- **Auth**: JWT Bearer Token
+- **Query Parameters**:
+    - `skip`: (int, default=0)
+    - `limit`: (int, default=200)
+    - `event_type`: (string, optional) "enter" | "leave"
+    - `class_name`: (string, optional)
+    - `start_time`: (string, optional)
+    - `end_time`: (string, optional)
+    - `order`: (string, default="desc")
+- **Response**:
+```json
+{
+  "events": [
+    {
+      "id": "uuid",
+      "track_id": 1,
+      "event_type": "enter",
+      "class_name": "fire",
+      "confidence": 0.95,
+      "box": [100, 200, 150, 280],
+      "entered_at": "2026-05-20T10:00:00",
+      "left_at": "2026-05-20T10:05:00",
+      "duration_ms": 300000,
+      "max_confidence": 0.98,
+      "avg_confidence": 0.92,
+      "update_count": 150
+    }
+  ]
+}
+```
+
+### 获取检测事件统计摘要
+- **Method**: `GET /tasks/{id}/detection-events/summary`
+- **Auth**: JWT Bearer Token
+- **Response**:
+```json
+{
+  "total_targets": 5,
+  "class_stats": {
+    "fire": { "count": 3, "avg_duration_ms": 120000, "avg_confidence": 0.91 },
+    "smoke": { "count": 2, "avg_duration_ms": 60000, "avg_confidence": 0.85 }
+  }
+}
+```
+
+### 下载结果 ZIP
+- **Method**: `GET /tasks/{id}/download`
+- **Auth**: JWT Bearer Token
+- **Success Status**: `200 OK`
+- **Description**: 下载已完成任务的所有标注结果文件的 ZIP 压缩包。仅 `completed` 状态可用。
 
 ---
 
@@ -300,7 +462,7 @@ case 'time_sync':
 ## 6. 系统日志 (System Logs)
 
 ### 前端批量上报日志
-- **Method**: `POST /tasks/logs/batch`
+- **Method**: `POST /logs/batch`
 - **Auth**: 无 (支持匿名上报以确保诊断链路通畅)
 - **Request Body**:
 ```json
@@ -320,6 +482,39 @@ case 'time_sync':
 ```
 - **Description**: 将前端发生的诊断日志、异常、播放状态等批量写入后端的 `logs/frontend.log` 中。
 - **Response**: `{"status": "ok", "received": 1}`
+
+### 前端诊断日志上报
+- **Method**: `POST /logs/diag`
+- **Auth**: 无
+- **Request Body**:
+```json
+{
+  "taskId": "uuid",
+  "logs": [
+    {
+      "ts": "2026-05-20T10:00:00Z",
+      "tag": "ClockSync",
+      "msg": "offset=250ms"
+    }
+  ]
+}
+```
+- **Description**: 接收前端诊断日志，写入 `logs/diag.log` 文件。
+- **Response**: `{"status": "ok", "received": 1}`
+
+### 播放调试日志
+- **Method**: `POST /tasks/{id}/playback-log`
+- **Auth**: JWT Bearer Token
+- **Request Body**:
+```json
+{
+  "event_type": "drift_detected",
+  "timestamp": 1716200000000,
+  "details": { "drift_ms": 1500 }
+}
+```
+- **Description**: 前端播放问题事件上报，写入 `logs/playback.log`。
+- **Response**: `{"status": "ok"}`
 
 ---
 

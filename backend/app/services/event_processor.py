@@ -47,11 +47,16 @@ class EventProcessor:
             self._handle_update(event)
         elif event.state == TrackState.LEAVE:
             self._handle_leave(event)
-    
     def reset(self):
         """重置处理器状态"""
+        pending_count = len(self._pending_stats)
+        enter_count = len(self._enter_records)
         self._pending_stats.clear()
         self._enter_records.clear()
+        logger.info(
+            f"[EventProcessor] RESET: task_id={self.task_id}, "
+            f"cleared {pending_count} pending stats, {enter_count} enter records"
+        )
     
     def _handle_enter(self, event: TrackEvent):
         """Enter 事件：立即写入数据库"""
@@ -77,16 +82,17 @@ class EventProcessor:
         )
         
         self._save_to_db(record)
-        
+
         self._pending_stats[event.track_id] = {
             "max_conf": event.confidence,
             "conf_sum": event.confidence,
             "count": 1,
         }
-        
-        logger.debug(
+
+        logger.info(
             f"[EventProcessor] ENTER: track_id={event.track_id}, "
-            f"class={event.class_name}, conf={event.confidence:.2f}"
+            f"class={event.class_name}, conf={event.confidence:.2f}, "
+            f"task_id={self.task_id}"
         )
     
     def _handle_update(self, event: TrackEvent):
@@ -137,24 +143,30 @@ class EventProcessor:
         )
         
         self._save_to_db(record)
-        
-        logger.debug(
+
+        logger.info(
             f"[EventProcessor] LEAVE: track_id={event.track_id}, "
             f"class={event.class_name}, duration={event.duration_ms}ms, "
-            f"updates={update_count}"
+            f"updates={update_count}, task_id={self.task_id}"
         )
     
     def _save_to_db(self, record: DetectionEvent):
         """异步写入数据库"""
         from app.database import engine
         from sqlmodel import Session
-        
+
         try:
             with Session(engine) as session:
                 session.add(record)
                 session.commit()
+                logger.info(
+                    f"[EventProcessor] SAVED: task_id={self.task_id}, "
+                    f"track_id={record.track_id}, event_type={record.event_type}, "
+                    f"class={record.class_name}"
+                )
         except Exception as e:
             logger.error(
-                f"[EventProcessor] Failed to save event to DB: {e}, "
-                f"task_id={self.task_id}, track_id={record.track_id}"
+                f"[EventProcessor] FAILED to save event to DB: {e}, "
+                f"task_id={self.task_id}, track_id={record.track_id}, "
+                f"event_type={record.event_type}"
             )

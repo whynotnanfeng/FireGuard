@@ -226,6 +226,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useTaskStore } from '@/stores/task'
+import { useAuthStore } from '@/stores/auth'
 import { tasksApi } from '@/api/tasks'
 import { modelsApi } from '@/api/models'
 import TaskStatus from '@/components/TaskStatus.vue'
@@ -238,6 +239,7 @@ import { PlusOutlined, ReloadOutlined, DownOutlined, UpOutlined } from '@ant-des
 import dayjs, { type Dayjs } from 'dayjs'
 
 const taskStore = useTaskStore()
+const authStore = useAuthStore()
 
 const page = ref(1)
 const pageSize = ref(10)
@@ -383,7 +385,9 @@ onUnmounted(() => {
 function startNotifications() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = window.location.host // 自动包含端口
-    const url = `${protocol}//${host}/ws/notifications`
+    const token = authStore.token
+    if (!token) return
+    const url = `${protocol}//${host}/ws/notifications?token=${token}`
     notificationWs = new WebSocket(url)
     
     let lastNotificationTime = 0

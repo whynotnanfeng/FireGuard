@@ -182,14 +182,10 @@ import DetectionEventsPanel from '@/components/DetectionEventsPanel.vue'
 import {
   PauseOutlined,
   CaretRightOutlined,
-  CloseOutlined,
-  ReloadOutlined,
-  HistoryOutlined,
   RollbackOutlined,
-  ThunderboltOutlined,
   SwapOutlined,
 } from '@ant-design/icons-vue'
-import { Empty, message } from 'ant-design-vue'
+import { message } from 'ant-design-vue'
 
 type StreamState = 'connecting' | 'retry' | 'loading' | 'model_loading' | 'running' | 'exception' | 'recovering' | 'paused_end' | 'buffering'
 
@@ -1203,11 +1199,20 @@ watch(() => props.taskId, (newId) => {
 })
 
 watch(() => currentTask.value?.status, (status) => {
-  if (status === 'running' && (streamState.value === 'paused_end' || streamState.value === 'exception')) {
-    logger.info('stream', 'Task is running again, reconnecting', { taskId: props.taskId })
+  // V5.3: 扩展重连条件，增加 WebSocket 断开连接的判断
+  // 当任务重新运行时，如果 streamState 不在 running 状态或 WebSocket 未连接，则重连
+  const shouldReconnect = status === 'running' && (
+    streamState.value === 'paused_end' ||
+    streamState.value === 'exception' ||
+    !ws || ws.readyState !== WebSocket.OPEN
+  )
+  if (shouldReconnect) {
+    destroyPlayer()
+    forceDisconnect()
     detectionBuffer.value = [];
     lastValidRecord.value = null;
     pendingRecords.value = [];
+    // 不清空 records.value — 续存模式下保留历史记录
     connect()
     initPlayer()
   }
@@ -1240,7 +1245,6 @@ function connect() {
 
     ws.onopen = () => {
       logger.info('websocket', 'Connected', { taskId: props.taskId });
-
       // V3.0: 启动事件驱动检测记录轮询
       startEventsPolling()
 
@@ -1477,6 +1481,11 @@ function connect() {
             streamState.value = 'exception'
             errorMsg.value = data.message || ''
             emit('status-change', 'exception')
+          } else if (data.status === 'pending') {
+            // V5.3: 任务停止/暂停时转换到 paused_end 状态
+            // 这是任务重启后 WebSocket 重连的关键触发条件
+            streamState.value = 'paused_end'
+            emit('status-change', 'pending')
           } else if (data.status === 'deleted') {
             terminatingTasks.add(props.taskId)
             message.warning('当前任务已被移除')
@@ -1838,7 +1847,7 @@ async function refreshDetectionEvents() {
     detectionEvents.value = eventsRes.events
     activeTracks.value = summaryRes.total_targets
   } catch (e) {
-    logger.debug('api', 'Failed to refresh detection events', { taskId: props.taskId, error: String(e) })
+    diagLogger.warn('events-poll', `Failed to refresh detection events: ${e}`, { taskId: props.taskId })
   }
 }
 
@@ -1919,8 +1928,10 @@ function renderLoop() {
         ? calibratedVideoTime
         : currentVideoAbsTime - (cachedBufferDelayMs > 0 ? cachedBufferDelayMs : 3000));
 
-  // 引入 -2500ms 的反向时间对齐补偿，完美校正 AI 推理、网络传输及分片打包带来的物理时滞
-  const compensationMs = -2500;
+  // 历史模式下引入 -2500ms 的反向时间对齐补偿，校正 AI 推理、网络传输及分片打包带来的物理时滞
+  // 实时模式下不补偿：HLS 本身已有 5-6 秒延迟，再补偿会导致 effectiveTime 过度滞后于检测记录时间戳，
+  // 使得 pendingRecords 中的记录因 recordTime > effectiveCalibratedTime 而永远无法释放
+  const compensationMs = playMode.value === 'history' ? -2500 : 0;
   const effectiveCalibratedTime = baseCalibratedTime + compensationMs;
 
   if (Math.abs(effectiveCalibratedTime - lastEmittedAbsoluteTime) >= 100) {

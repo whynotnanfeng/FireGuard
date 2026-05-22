@@ -114,7 +114,7 @@
 
 | 配置项 | 默认值 | 语义 |
 |----------|--------|------|
-| `DETECTION_FPS_STREAM` | 5 | 实时流推理频率 (Hz) |
+| `DETECTION_FPS_STREAM` | 15 | 实时流推理频率 (Hz)，与源帧率对齐 |
 | `DETECTION_FPS_VIDEO` | 0 | 离线视频处理频率 (0 为不限制) |
 | `DETECTION_FPS_IMAGE` | 0 | 图片处理频率 |
 
@@ -128,7 +128,7 @@
   - **配置管理**: 所有服务端口和关键配置存储在 Redis `fireguard:config` Hash 中，支持 `get_config()` / `set_config()` 动态读写。
   - **服务注册**: 服务启动时调用 `register_service(name, info)` 注册自身信息（PID、启动时间），后台线程定期发送心跳。
   - **服务发现**: `list_services()` 返回所有已注册服务的状态信息。
-  - **go2rtc 路径管理 (v1.9.7 更新)**: `register_go2rtc_path()` / `unregister_go2rtc_path()` 统一管理推流路径的注册与注销，使用 `PUT /api/streams` API。
+  - **go2rtc 路径管理 (v1.9.7 更新)**: `register_go2rtc_path()` / `unregister_go2rtc_path()` 统一管理推流路径的注册与注销（已弃用，保留兼容）。
   - **MediaMTX 流生命周期管理 (v2.1.2 更新)**: `register_stream()` / `unregister_stream()` 统一管理拉流路径的注册与注销。注册时通过 `/v3/config/paths/add/{stream_path}` API 配置 `source` 为原始 RTSP 地址，注销时先踢出连接再删除路径配置。
 - **降级策略**: Redis 不可用时，自动降级为环境变量或 `DEFAULT_CONFIG` 中的默认值，不影响服务启动。
 - **全局实例**: 模块级 `registry` 单例在 `main.py` 启动时初始化。
@@ -206,10 +206,10 @@ if (connectionId !== activeConnectionId) return;
 - **模拟器**: `python -m simulator.main` (从根目录运行以避免导入错误)
 
 ### B. 配置中心管理 (v1.9.0)
-- **查看配置**: `GET /api/tasks/registry/status` — 返回所有已注册服务、配置项和 go2rtc 路径。
+- **查看配置**: `GET /api/tasks/registry/status` — 返回所有已注册服务和配置项。
 - **修改配置**: 直接通过 Redis CLI 修改 `fireguard:config` Hash 中的值，新启动的服务实例将使用新配置。
   ```bash
-  redis-cli HSET fireguard:config go2rtc_rtsp_port 8556
+  redis-cli HSET fireguard:config mediamtx_rtsp_port 8556
   ```
 - **服务注册**: 后端和模拟器启动时自动注册，无需手动操作。
 
@@ -246,8 +246,11 @@ if (connectionId !== activeConnectionId) return;
 
 1. **一直卡在初始化**: `[StatusMon] diag#N` 看 `has_frame` 是否为 True。若 False，检查 RTSP/FFmpegCapture。
 2. **画面卡顿**: `[Dispatch]` 看 `actual fps`。若 < 5fps，检查 CPU 利用率。
-3. **画面撕裂**: `ffmpeg_annotated.log` 看 FFmpeg 是否有编码错误。
+3. **画面撕裂**: `ffmpeg_annotated.log` 看 FFmpeg 是否有编码错误。检查 `hw_accel.py` 中 NVENC 参数（preset=p1, rc=cbr, bufsize=b:v）。
 4. **时间轴不更新**: 前端 `currentGlobalTime` 定时器 200ms 更新，不受 `timeupdate` 影响。
+5. **断点续存不生效**: 检查 `tasks.py` 中 `is_resume` 判定逻辑，确认基于磁盘分段文件检测而非 task status。
+6. **停止后重新执行无新检测记录**: 检查 `EventProcessor` 是否被意外清空，检查前端响应式数组是否被破坏。
+7. **检测框不跟手**: 检查后端 `current_abs_time` 计算（应使用 `stream_start_time + timestamp`），检查前端 `timeCalibrationMs` 校准是否初始化。
 
 ### B. 前端诊断链路
 前端 `VideoPlayer.vue` 会自动计算画面与推理框的偏移量，并通过异步批量接口上报。
@@ -258,6 +261,40 @@ if (connectionId !== activeConnectionId) return;
 ### C. OpenCV 调试
 为了保持终端整洁，系统默认禁用了 OpenCV 的 stderr 输出。
 - 若需开启调试：设置 `os.environ["OPENCV_LOG_LEVEL"] = "DEBUG"` (在 `video_stream.py` 顶部)。
+
+### D. 前端诊断日志系统 (`diagLogger`)
+
+前端使用 `DiagLogger` 类（定义在 `frontend/src/utils/diagLogger.ts`）收集诊断信息并批量上报到后端。
+
+**API 签名（只有三个方法）：**
+```typescript
+diagLogger.log(tag: string, ...args: unknown[])   // 通用日志
+diagLogger.warn(tag: string, ...args: unknown[])  // 警告日志
+diagLogger.error(tag: string, ...args: unknown[]) // 错误日志
+// ⚠️ 没有 info() 方法，调用会抛出 TypeError
+```
+
+**上报机制：**
+- 诊断日志缓冲到 50 条或每 3 秒批量发送
+- 接口：`POST /api/logs/diag`
+- 后端存储：`backend/logs/diag.log`
+
+**添加诊断代码后的验证步骤：**
+1. 在 `diag.log` 中 grep 新 tag，确认日志已出现
+2. 如果日志未出现，说明 Vite HMR 未加载 — 手动刷新浏览器（Ctrl+F5）
+3. WSL2 环境下 HMR 可能不稳定，建议刷新后重新测试
+
+### E. 前后端双数据系统
+
+前端的检测数据来自两个独立系统，互不影响：
+
+| 数据系统 | 传输方式 | 用途 | 更新频率 |
+|---------|---------|------|---------|
+| `detectionEvents` | REST 轮询 `GET /tasks/{id}/detection-events` | 右侧检测事件面板（ENTER/LEAVE） | 每 2 秒 |
+| `records` | WebSocket `record_event` 消息 | 检测框渲染、时间轴记录 | 逐帧推送 |
+
+- 两者独立运行，停止一个不影响另一个
+- 重新执行任务时，events 轮询会自动重启（WebSocket `onopen` 触发）
 
 ---
 

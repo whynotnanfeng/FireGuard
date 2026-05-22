@@ -12,16 +12,43 @@ from app.config import config
 logger = logging.getLogger(__name__)
 
 class BaseBroker:
-    def publish_sync(self, channel: str, message: dict): raise NotImplementedError
-    async def subscribe(self, channel: str) -> Any: raise NotImplementedError
-    async def unsubscribe(self, channel: str, subscriber: Any): raise NotImplementedError
-    async def get_recent_cache(self, channel: str, limit: int = 150) -> List[dict]: raise NotImplementedError
-    def set_status(self, task_id: str, status_payload: dict): raise NotImplementedError
-    def get_status(self, task_id: str) -> Optional[dict]: raise NotImplementedError
-    def clear_status(self, task_id: str): pass
-    def clear_cache(self, channel: str): pass
-    async def connect(self): pass
-    async def disconnect(self): pass
+    """消息总线接口：支持同步发布、异步订阅、状态快照和缓存管理。"""
+
+    def publish_sync(self, channel: str, message: dict):
+        """同步发布消息到指定频道（线程安全）。"""
+        raise NotImplementedError
+
+    async def subscribe(self, channel: str) -> Any:
+        """异步订阅频道，返回 asyncio.Queue。"""
+        raise NotImplementedError
+
+    async def unsubscribe(self, channel: str, subscriber: Any):
+        """取消订阅，释放资源。"""
+        raise NotImplementedError
+
+    async def get_recent_cache(self, channel: str, limit: int = 150) -> List[dict]:
+        """获取频道最近 N 条缓存消息。"""
+        raise NotImplementedError
+
+    def set_status(self, task_id: str, status_payload: dict):
+        """设置任务状态快照（供 WebSocket 轮询）。"""
+        raise NotImplementedError
+
+    def get_status(self, task_id: str) -> Optional[dict]:
+        """获取任务最新状态快照。"""
+        raise NotImplementedError
+
+    def clear_status(self, task_id: str):
+        """清除任务状态快照。"""
+
+    def clear_cache(self, channel: str):
+        """清除频道消息缓存。"""
+
+    async def connect(self):
+        """建立连接（Redis 模式下创建连接池）。"""
+
+    async def disconnect(self):
+        """断开连接并释放资源。"""
 
 class InMemoryBroker(BaseBroker):
     def __init__(self):
@@ -114,12 +141,14 @@ class HybridBroker(BaseBroker):
         self._redis_fail_count = 0
         self._redis_last_fail_time = 0.0
         self._REDIS_RETRY_INTERVAL = 10.0
-        
+        self._shutting_down = False
+
         self._subscribers = defaultdict(list)
         self._cache = defaultdict(lambda: deque(maxlen=1000))
         self._status_snapshots = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._lock = threading.Lock()
+        self._redis_lock = asyncio.Lock()
         self._status_key = "fireguard:task_status"
         self._cache_prefix = "fireguard:cache:"
 
@@ -127,14 +156,18 @@ class HybridBroker(BaseBroker):
         self._loop = loop
 
     async def connect(self):
-        if not self._async_redis:
+        if self._shutting_down:
+            return
+        async with self._redis_lock:
+            if self._async_redis:
+                return
             try:
                 self._async_redis = async_redis.from_url(self.redis_url, decode_responses=True)
                 await self._async_redis.ping()
-                
+
                 self._sync_redis = redis.from_url(self.redis_url, decode_responses=True)
                 self._sync_redis.ping()
-                
+
                 self._health_task = asyncio.create_task(self._health_monitor())
                 self._redis_available = True
                 self._redis_fail_count = 0
@@ -145,13 +178,22 @@ class HybridBroker(BaseBroker):
                 logger.warning(f"[HybridBroker] Redis unavailable, using in-memory fallback: {e}")
 
     async def disconnect(self):
+        self._shutting_down = True
+
         if hasattr(self, '_health_task') and self._health_task:
             self._health_task.cancel()
             try:
                 await self._health_task
             except asyncio.CancelledError:
                 pass
-        
+
+        async with self._redis_lock:
+            await self._close_redis_connections()
+
+        self._redis_available = False
+        logger.info("[HybridBroker] Disconnected.")
+
+    async def _close_redis_connections(self):
         if self._async_redis:
             try:
                 await self._async_redis.close()
@@ -162,44 +204,50 @@ class HybridBroker(BaseBroker):
                 self._sync_redis.close()
             except Exception:
                 pass
-        self._redis_available = False
-        logger.info("[HybridBroker] Disconnected.")
+        self._async_redis = None
+        self._sync_redis = None
 
     async def _health_monitor(self):
         """Redis 健康监控：定期 ping 检测连接状态，自动标记可用性"""
-        while True:
+        while not self._shutting_down:
             try:
                 await asyncio.sleep(5.0)
-                if self._async_redis:
-                    await self._async_redis.ping()
-                    if not self._redis_available:
-                        self._redis_available = True
-                        self._redis_fail_count = 0
-                        logger.info("[HybridBroker] Redis connection restored")
-                else:
-                    try:
-                        self._async_redis = async_redis.from_url(self.redis_url, decode_responses=True)
-                        await self._async_redis.ping()
-                        self._sync_redis = redis.from_url(self.redis_url, decode_responses=True)
-                        self._sync_redis.ping()
-                        self._redis_available = True
-                        self._redis_fail_count = 0
-                        logger.info("[HybridBroker] Redis reconnected via health monitor")
-                    except Exception:
-                        self._redis_available = False
+                if self._shutting_down:
+                    break
+
+                async with self._redis_lock:
+                    if self._async_redis:
+                        try:
+                            await self._async_redis.ping()
+                            if not self._redis_available:
+                                self._redis_available = True
+                                self._redis_fail_count = 0
+                                logger.info("[HybridBroker] Redis connection restored")
+                        except Exception as e:
+                            if self._redis_available:
+                                logger.warning(f"[HybridBroker] Redis health check failed: {e}")
+                            self._redis_available = False
+                            await self._close_redis_connections()
+                    else:
+                        if self._shutting_down:
+                            break
+                        try:
+                            async_redis_client = async_redis.from_url(self.redis_url, decode_responses=True)
+                            await async_redis_client.ping()
+                            sync_redis_client = redis.from_url(self.redis_url, decode_responses=True)
+                            sync_redis_client.ping()
+                            self._async_redis = async_redis_client
+                            self._sync_redis = sync_redis_client
+                            self._redis_available = True
+                            self._redis_fail_count = 0
+                            logger.info("[HybridBroker] Redis reconnected via health monitor")
+                        except Exception:
+                            self._redis_available = False
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                if self._redis_available:
-                    logger.warning(f"[HybridBroker] Redis health check failed: {e}")
-                self._redis_available = False
-                try:
-                    if self._async_redis:
-                        await self._async_redis.close()
-                except Exception:
-                    pass
-                self._async_redis = None
-                self._sync_redis = None
+            except Exception:
+                if self._shutting_down:
+                    break
 
     def publish_sync(self, channel: str, message: dict):
         """
@@ -240,8 +288,8 @@ class HybridBroker(BaseBroker):
         now = time.time()
         if self._redis_fail_count >= 3 and (now - self._redis_last_fail_time) < self._REDIS_RETRY_INTERVAL:
             return
-        
-        if not self._sync_redis:
+
+        if not self._sync_redis or not self._redis_available:
             return
         
         payload = json.dumps(message)

@@ -8,7 +8,7 @@ import cv2
 
 cv2.setNumThreads(2)
 
-# V1.8.1: 全局环境净化 - 在所有库初始化前强制设置 FFmpeg 参数
+# 全局环境净化 - 在所有库初始化前强制设置 FFmpeg 参数
 # 这能确保每一路 VideoCapture 都能准确识别到 TCP 传输和缓冲配置，解决变量失效问题
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
     "rtsp_transport;tcp|"
@@ -22,7 +22,7 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
     "fflags;+discardcorrupt"
 )
 
-# 【V1.4.5 终极净化】：在任何 OpenCV 导入前禁止其输出任何日志到 stderr
+# 禁止 OpenCV 输出日志到 stderr（必须在 cv2 import 前设置）
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
 
@@ -33,7 +33,6 @@ import queue  # noqa: E402
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 from typing import List, Optional  # noqa: E402
 import numpy as np  # noqa: E402
-from fastapi import WebSocket  # noqa: E402, F401 - kept for backward compat
 from app.config import config  # noqa: E402
 from app.utils.time import now_beijing  # noqa: E402
 from app.services.detector import Detection  # noqa: E402
@@ -45,6 +44,7 @@ from app.services.notifier import notifier  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# 最低检测置信度阈值：低于此值的检测结果直接丢弃，防止误报
 DETECTION_CONF_FLOOR = 0.35
 
 # Global executor for async DB operations to prevent blocking the main loop
@@ -82,7 +82,7 @@ class VideoStream:
         self,
         task_id: str,
         source: str,
-        model_path: str,  # [修改点1] 传入路径而非实例
+        model_path: str,
         token: object,
         label_mapping: Optional[dict] = None,
         use_gpu: bool = False,
@@ -93,13 +93,12 @@ class VideoStream:
         self.model_path = model_path
         self.token = token
         self.use_gpu = use_gpu
-        self.loop = asyncio.get_event_loop()
         self._stop_event = threading.Event()
         self._latest_frames: List[Optional[np.ndarray]] = [None] * len(self.sources)
         self._latest_frame_timestamps: List[float] = [0.0] * len(self.sources)
         self._latest_frame_wall_clocks: List[float] = [0.0] * len(
             self.sources
-        )  # V5.0: 帧采集墙钟时刻
+        )  # 帧采集墙钟时刻
         self._ret: bool = False
         self._lock = threading.Lock()
         self._error_msg: Optional[str] = None
@@ -114,25 +113,25 @@ class VideoStream:
         self._latest_results: list[Detection] = []
         self._latest_results_timestamp: float = 0.0
         self._latest_results_wall_time: float = 0.0
-        self._frame_wall_clock_map: dict[float, float] = {}  # V5.0: PTS→帧采集墙钟映射
+        self._frame_wall_clock_map: dict[float, float] = {}  # PTS→帧采集墙钟映射
         self._latest_results_lock = threading.Lock()  # 保护 _latest_results 跨线程访问
         self.label_mapping = label_mapping or {}
         self.detection_config: Optional[dict] = None
         self._last_results_time = 0.0
         self._last_valid_results: list[Detection] = []
-        self._frame_ring = None  # V4.10: SharedMemory ring, lazy init in dispatch
+        self._frame_ring = None  # SharedMemory ring, lazy init in dispatch
         self._pre_connecting = (
-            False  # V4.10: 预检阶段标志，防止状态监控覆盖 rtsp_connecting
+            False  # 预检阶段标志，防止状态监控覆盖 rtsp_connecting
         )
-        self._shared_grabber = None  # V4.11: 共享帧采集器引用
+        self._shared_grabber = None  # 共享帧采集器引用
         self.natural_width: Optional[int] = None
         self.natural_height: Optional[int] = None
-        self._history_marked = False  # V1.8.2: 确保每路任务至少标记一次历史记录
+        self._history_marked = False  # 确保每路任务至少标记一次历史记录
         self._is_resuming = False
         self._is_draining = False  # 优雅退出标志
         self._drain_done = threading.Event()  # drain 完成信号
 
-        # P0 修复：跨线程重连信号，用于 _dispatch_single 通知 _frame_grabber 重建 VideoCapture
+        # 跨线程重连信号，用于 _dispatch_single 触发流重建
         self._force_reconnect = threading.Event()
         self._reconnect_lock = threading.Lock()
 
@@ -143,10 +142,10 @@ class VideoStream:
         self._pts_reset_count = 0  # PTS 重置计数器
         self._video_duration_ms = 0.0  # 视频总时长（通过 ffprobe 获取）
 
-        # V1.4.2: 追踪 HLS 写入器，确保状态同步
+        # 追踪 HLS 写入器，确保状态同步
         self._primary_writer = None
 
-        # V3.0: 新架构 - TaskPipelineManager（检测框注入 + 事件驱动记录）
+        # 新架构 - TaskPipelineManager（检测框注入 + 事件驱动记录）
         self.pipeline = None
         self._pipeline_initialized = False
 
@@ -159,8 +158,23 @@ class VideoStream:
 
             self.alignment_buffer = RGBTAlignmentBuffer(max_tolerance_sec=0.05)
 
+    def _get_task_session(self):
+        """Context manager yielding (session, task) for DB operations."""
+        from contextlib import contextmanager
+        from app.database import engine
+        from app.models.task import Task
+        from sqlmodel import Session
+
+        @contextmanager
+        def _ctx():
+            with Session(engine) as session:
+                task = session.get(Task, self.task_id)
+                yield session, task
+
+        return _ctx()
+
     def _init_pipeline(self):
-        """V5.1: 服务端帧嵌入渲染 — 720p/10fps 降低 CPU 负载"""
+        """服务端帧嵌入渲染 — 720p/10fps 降低 CPU 负载"""
         try:
             from pathlib import Path
             from app.services.task_pipeline_manager import TaskPipelineManager
@@ -171,6 +185,10 @@ class VideoStream:
             fps = self.detection_config.get("fps", 15) if self.detection_config else 15
             _hls_fps = 10.0  # 10fps 标注输出, 大幅降低编码 CPU
 
+            logger.info(
+                f"[VideoStream] Pipeline init: task_id={self.task_id}, "
+                f"resume={self._is_resuming}"
+            )
             self.pipeline = TaskPipelineManager(
                 task_id=self.task_id,
                 output_dir=Path(config.VIDEO_STORAGE_DIR) / self.task_id,
@@ -178,6 +196,7 @@ class VideoStream:
                 height=height,
                 fps=_hls_fps,
                 enable_annotated_stream=True,
+                resume=self._is_resuming,
             )
             self.pipeline.start()
             self._pipeline_initialized = True
@@ -190,7 +209,7 @@ class VideoStream:
             self._annotated_writer_thread.start()
 
             logger.info(
-                f"[VideoStream] V5.1 Pipeline initialized for {self.task_id} "
+                f"[VideoStream] Pipeline initialized for {self.task_id} "
                 f"({width}x{height}@{_hls_fps}fps) + annotated HLS encoder"
             )
         except Exception as e:
@@ -201,7 +220,7 @@ class VideoStream:
             self._pipeline_initialized = False
 
     def _annotated_frame_writer(self, _target_fps: float = 10.0):
-        """V5.1: 恒定帧率标注 HLS 写入 — 帧精确框对齐"""
+        """恒定帧率标注 HLS 写入 — 帧精确框对齐"""
         _interval = 1.0 / _target_fps
         last_written_ts = 0.0
         next_write_time = time.time()
@@ -300,12 +319,7 @@ class VideoStream:
 
     def _preload_resolution(self):
         try:
-            from app.database import engine
-            from app.models.task import Task
-            from sqlmodel import Session
-
-            with Session(engine) as session:
-                task = session.get(Task, self.task_id)
+            with self._get_task_session() as (session, task):
                 if task and task.resolution_width and task.resolution_height:
                     self.natural_width = task.resolution_width
                     self.natural_height = task.resolution_height
@@ -317,12 +331,7 @@ class VideoStream:
 
     def _db_set_status(self, status: str, msg: str = ""):
         try:
-            from app.database import engine
-            from app.models.task import Task
-            from sqlmodel import Session
-
-            with Session(engine) as session:
-                task = session.get(Task, self.task_id)
+            with self._get_task_session() as (session, task):
                 if task:
                     old_status = task.status
                     task.status = status
@@ -347,12 +356,7 @@ class VideoStream:
 
     def _get_task_meta(self) -> dict:
         try:
-            from app.database import engine
-            from app.models.task import Task
-            from sqlmodel import Session
-
-            with Session(engine) as session:
-                task = session.get(Task, self.task_id)
+            with self._get_task_session() as (session, task):
                 if task:
                     return {
                         "cumulative_running_seconds": task.cumulative_running_seconds,
@@ -385,10 +389,7 @@ class VideoStream:
     def _save_detection_records_sync(
         self, detections: List[Detection], timestamp_ms: int
     ):
-        from app.database import engine
-        from app.models.task import Task
         from app.models.detection_record import DetectionRecord
-        from sqlmodel import Session
         import time as _time
 
         # 【双时间戳架构】：
@@ -411,6 +412,11 @@ class VideoStream:
             record_events.append(record_data)
 
         if record_events:
+            # 添加诊断日志，确认 record_event 被发布
+            logger.info(
+                f"[VideoStream] Publishing record_event: {len(record_events)} records "
+                f"for task {self.task_id}"
+            )
             broker.publish_sync(
                 f"detections:{self.task_id}",
                 {"type": "record_event", "records": record_events},
@@ -420,13 +426,12 @@ class VideoStream:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                with Session(engine) as session:
-                    task = session.get(Task, self.task_id)
+                with self._get_task_session() as (session, task):
                     if task:
                         task.updated_at = now_beijing()
 
-                    for re_data in record_events:
-                        record = DetectionRecord(
+                    records = [
+                        DetectionRecord(
                             id=re_data["id"],
                             task_id=self.task_id,
                             class_name=re_data["class_name"],
@@ -434,12 +439,14 @@ class VideoStream:
                             box=json.dumps(re_data["box"]),
                             detected_at=frame_detected_at,
                         )
-                        session.add(record)
+                        for re_data in record_events
+                    ]
+                    session.add_all(records)
 
                     session.commit()
 
                 db_save_duration = _time.time() - db_save_start
-                # 【P0-5 诊断日志】：数据库写入超过 1 秒时输出警告
+                # 诊断日志数据库写入超过 1 秒时输出警告
                 if db_save_duration > 1.0:
                     logger.warning(
                         f"[DIAG-DB] Slow DB write: {db_save_duration:.2f}s for task {self.task_id}, "
@@ -458,18 +465,9 @@ class VideoStream:
                         exc_info=True,
                     )
 
-    def _push_to_message_queue(self, payload: dict):
-        """[Deprecated] Use global inference pool instead."""
-        pass
-
     def _mark_has_history(self):
         try:
-            from app.database import engine
-            from app.models.task import Task
-            from sqlmodel import Session
-
-            with Session(engine) as session:
-                task = session.get(Task, self.task_id)
+            with self._get_task_session() as (session, task):
                 if task and not task.has_history:
                     task.has_history = True
                     session.add(task)
@@ -489,12 +487,7 @@ class VideoStream:
         self.natural_width = w
         self.natural_height = h
         try:
-            from app.database import engine
-            from app.models.task import Task
-            from sqlmodel import Session
-
-            with Session(engine) as session:
-                task = session.get(Task, self.task_id)
+            with self._get_task_session() as (session, task):
                 if task:
                     task.resolution_width = w
                     task.resolution_height = h
@@ -515,10 +508,10 @@ class VideoStream:
         self._error_msg = None
         self._retry_count = 0
         self._cap_opened = False
-        self._is_resuming = False
+        # 不再重置 _is_resuming，保留 task_runner.start_stream() 设置的值
         self._is_draining = False
 
-        # V3.0: 初始化 TaskPipelineManager
+        # 初始化 TaskPipelineManager
         self._init_pipeline()
 
         # --- MediaMTX Gateway Integration ---
@@ -533,8 +526,12 @@ class VideoStream:
             channel = "rgb" if idx == 0 else "ir"
 
             # 2. 录制和抓流全部使用网关代理地址
+            logger.info(
+                f"[VideoStream] start_recording: channel={channel}, "
+                f"resume={self._is_resuming}"
+            )
             writer = storage_manager.start_recording(
-                self.task_id, proxied_url, channel=channel
+                self.task_id, proxied_url, channel=channel, resume=self._is_resuming
             )
             if idx == 0:
                 self._primary_writer = writer  # 记录主通道写入器
@@ -544,7 +541,7 @@ class VideoStream:
                 logger.error(f"[VideoStream] {err} for channel {channel}")
                 self._error_msg = f"视频源连接成功但画面转换失败: {err}"
 
-            # V4.11: 共享 grabber — 同 URL 只解码一次
+            # 共享 grabber — 同 URL 只解码一次
             # 预检 URL 可达性（针对实际连接的 proxied_url，不是原始 source_url）
             from app.services.ffmpeg_capture import check_rtsp_reachable
             from app.utils.shared_grabber import grabber_registry
@@ -696,14 +693,14 @@ class VideoStream:
             self._stop_event.set()
             self._is_resuming = True
 
-            # V3.7: 先停止 Pipeline（AnnotatedHLSWriter），再停止 StorageManager。
+            # 先停止 Pipeline（AnnotatedHLSWriter），再停止 StorageManager。
             # 否则 StorageManager._ensure_all_zombies_gone 会误杀
             # AnnotatedHLSWriter 的 FFmpeg 进程，导致 Broken pipe 错误。
             if self.pipeline:
                 try:
                     self.pipeline.stop()
                     logger.info(
-                        f"[VideoStream] V3.0 Pipeline stopped for {self.task_id}"
+                        f"[VideoStream] Pipeline stopped for {self.task_id}"
                     )
                 except Exception as e:
                     logger.error(f"[VideoStream] Failed to stop pipeline: {e}")
@@ -712,6 +709,15 @@ class VideoStream:
 
             storage_manager.stop_recording(self.task_id)
             media_gateway.unregister_proxy(self.task_id, len(self.sources))
+
+            # 释放共享内存环，防止重启时 FileExistsError
+            if self._frame_ring is not None:
+                try:
+                    self._frame_ring.cleanup()
+                    logger.info(f"[VideoStream] SharedMemory ring cleaned for {self.task_id}")
+                except Exception as e:
+                    logger.warning(f"[VideoStream] SharedMemory cleanup error: {e}")
+                self._frame_ring = None
 
             logger.info(
                 f"[VideoStream] Terminal Stop completed for task {self.task_id}"
@@ -741,7 +747,7 @@ class VideoStream:
         stale_frame_count = 0
         MAX_STALE_FRAMES = 100
 
-        # ── V4.0: 系统级资源感知自适应调度 ──
+        # ── 系统级资源感知自适应调度 ──
         # 多维输入：
         #   1. 推理队列深度 (PI 控制器, 目标=5)
         #   2. CPU 使用率 (psutil, 每 2s)
@@ -760,7 +766,7 @@ class VideoStream:
         )
         # 推理上限 = min(用户期望, 源帧率)。源帧率是物理上限，无法超越
         abs_max_fps = min(user_max_fps, source_fps)
-        abs_min_fps = 8.0  # V4.11: 共享 grabber 释放 CPU，保底从 5→8fps
+        abs_min_fps = 8.0  # 共享 grabber 释放 CPU，保底从 5→8fps
 
         dispatch_interval = 1.0 / abs_max_fps  # 初始最快速率
         last_detect_time = 0.0
@@ -769,15 +775,15 @@ class VideoStream:
         current_queue_depth = 0
         current_cpu_pct = 50.0  # 初始假设中等负载
 
-        # PI 控制器
-        target_depth = 5
+        # PI 控制器：根据推理队列深度动态调节派发间隔
+        target_depth = 5          # 目标队列深度（帧数）
         integral = 0.0
-        Kp = 0.06
-        Ki = 0.008
+        Kp = 0.06                 # 比例增益：误差→间隔调节的灵敏度
+        Ki = 0.008                # 积分增益：消除稳态误差
 
-        # 指数平滑 (间隔)
+        # 指数平滑：抑制派发间隔的突变，避免推理负载剧烈波动
         smoothed_interval = dispatch_interval
-        alpha = 0.35
+        alpha = 0.35              # 平滑系数（0=全平滑, 1=无平滑），0.35 平衡响应速度与稳定性
 
         while not self._stop_event.is_set():
             if self._is_draining:
@@ -848,7 +854,7 @@ class VideoStream:
                         f"n={self._dispatch_count}"
                     )
 
-            # V4.8: 自适应休眠替代固定 busy-wait，降低空闲时 CPU 占用
+            # 自适应休眠替代固定 busy-wait，降低空闲时 CPU 占用
             if now - last_detect_time < smoothed_interval:
                 wait_ms = max(20, (smoothed_interval - (now - last_detect_time)) * 1000)
                 self._stop_event.wait(wait_ms / 1000.0)
@@ -870,7 +876,7 @@ class VideoStream:
                         frame_timestamp = _ts  # 时间戳未变，记录当前值
 
             if frame is None:
-                # V5.0: 无新帧时静默等待，SharedGrabber 独立恢复采集
+                # 无新帧时静默等待，SharedGrabber 独立恢复采集
                 # 真实场景可能长时间无目标，不应视为异常
                 self._stop_event.wait(0.05)
                 continue
@@ -886,11 +892,21 @@ class VideoStream:
                     h, w = frame.shape[:2]
                     from app.utils.shared_frame import SharedFrameRing
 
-                    self._frame_ring = SharedFrameRing(
-                        n_buffers=3,
-                        shape=(h, w, 3),
-                        name_prefix=f"shm_{self.task_id}",
-                    )
+                    for _shm_retry in range(3):
+                        try:
+                            self._frame_ring = SharedFrameRing(
+                                n_buffers=3,
+                                shape=(h, w, 3),
+                                name_prefix=f"shm_{self.task_id}",
+                            )
+                            break
+                        except FileExistsError:
+                            logger.warning(f"[VideoStream] SharedMemory exists, retry {_shm_retry+1}/3")
+                            time.sleep(0.3)
+                    if self._frame_ring is None:
+                        logger.error(f"[VideoStream] Failed to create SharedMemory ring for {self.task_id}")
+                        self._stop_event.wait(1.0)
+                        continue
                     logger.info(
                         f"[VideoStream] SharedMemory ring created for {self.task_id} "
                         f"({w}x{h}, {self._frame_ring.frame_bytes / 1024 / 1024:.1f}MB/buf)"
@@ -1051,7 +1067,7 @@ class VideoStream:
             else:
                 self._stop_event.wait(0.05)
 
-    # V5.0: 纯帧消费者 — 采集帧 + 写入缓冲区（原分辨率，供推理和 Canvas overlay 使用）
+    # 纯帧消费者 — 采集帧 + 写入缓冲区（原分辨率，供推理和 Canvas overlay 使用）
     def _shared_frame_consumer(self, shared_grabber, idx: int, source_url: str):
         from app.utils.shared_grabber import grabber_registry
 
@@ -1069,7 +1085,7 @@ class VideoStream:
             if frame is not None:
                 frame = cv2.resize(
                     frame, (1280, 720), interpolation=cv2.INTER_LINEAR
-                )  # V5.1: 720p 降载
+                )  # 720p 降载
                 last_frame_ts = timestamp
                 _capture_wall_clock = time.time()
                 with self._lock:
@@ -1077,7 +1093,7 @@ class VideoStream:
                     self._latest_frame_timestamps[idx] = timestamp
                     self._latest_frame_wall_clocks[idx] = _capture_wall_clock
                     self._frame_wall_clock_map[timestamp] = (
-                        _capture_wall_clock  # V5.0: PTS→墙钟
+                        _capture_wall_clock  # PTS→墙钟
                     )
                     # 限制 map 大小，保留最近 300 条
                     if len(self._frame_wall_clock_map) > 300:
@@ -1109,7 +1125,7 @@ class VideoStream:
 
     # --- 接收与分发 (由 StreamManager 的全局 Dispatcher 调用) ---
     def _status_monitor_loop(self):
-        """V4.1 增强诊断版：每步条件均有日志"""
+        """每步条件均有诊断日志"""
         logger.info(f"[StatusMon] STARTED for {self.task_id}")
         last_broadcast = 0
         has_broadcast_running = False
@@ -1138,7 +1154,7 @@ class VideoStream:
 
                 # 每 10 轮输出诊断 (≈ 每 5 秒)
                 if _diag_count % 10 == 0:
-                    aw_status = "client-render (V5.0)"
+                    aw_status = "client-render "
                     pw_status = "none"
                     if self._primary_writer:
                         pw_alive = (
@@ -1226,14 +1242,17 @@ class VideoStream:
                         force=True,
                     )
                     # 通过 notifier WebSocket 推送状态更新到前端（否则前端不刷新）
-                    if self.loop:
-                        self.loop.call_soon_threadsafe(
+                    try:
+                        _loop = self._main_loop or asyncio.get_event_loop()
+                        _loop.call_soon_threadsafe(
                             lambda: asyncio.create_task(
                                 notifier.broadcast_status(
                                     self.task_id, "running", "监控运行中"
                                 )
                             )
                         )
+                    except RuntimeError:
+                        pass
                     logger.info(
                         f"[StatusMon] MSG_RUNNING broadcast sent for {self.task_id}"
                     )
@@ -1245,473 +1264,6 @@ class VideoStream:
                 # else: hls_ready and already running → silent, no status change needed
             except Exception as e:
                 logger.error(f"[VideoStream] Status monitor iteration error: {e}")
-
-    def handle_inference_result(self, timestamp: float, raw_detections: list):
-        """[Deprecated] Handled by task_runner now."""
-        pass
-
-    def _frame_grabber(self, source_url: str, idx: int):
-        from app.services.task_runner import stream_manager
-
-        # 配置开关：USE_FFMPEG_CAPTURE=True 时使用 FFmpeg 子进程，否则使用 OpenCV
-        use_ffmpeg = os.getenv("USE_FFMPEG_CAPTURE", "False").lower() == "true"
-
-        if use_ffmpeg:
-            self._frame_grabber_ffmpeg(source_url, idx)
-        else:
-            self._frame_grabber_opencv(source_url, idx)
-
-    def _frame_grabber_ffmpeg(self, source_url: str, idx: int):
-        """使用 FFmpegCapture 替代 OpenCV VideoCapture 读取帧
-
-        FFmpeg 子进程提供更可靠的 RTSP 流读取能力，内置异常恢复机制。
-        """
-        from app.services.task_runner import stream_manager
-        from app.services.ffmpeg_capture import FFmpegCapture
-
-        # 【P1 修复】：获取累积运行时间，确保续播时时间戳连续
-        task_meta = self._get_task_meta()
-        cumulative_offset = task_meta.get("cumulative_running_seconds", 0.0)
-        if cumulative_offset > 0:
-            logger.info(
-                f"[VideoStream] Resuming with cumulative_offset={cumulative_offset:.1f}s "
-                f"for task {self.task_id} (session restart continuity)"
-            )
-
-        logger.info(
-            f"[VideoStream {self.task_id}] FFmpegCapture grabber started (ch:{idx})"
-        )
-
-        # V4.10: 启动前验证 RTSP 源可达性，避免 FFmpeg 无限挂起导致"卡初始化"
-        from app.services.ffmpeg_capture import check_rtsp_reachable
-
-        self._pre_connecting = True
-        max_pre_connect_attempts = 8
-        pre_connect_backoff = 1.0
-        for pre_attempt in range(1, max_pre_connect_attempts + 1):
-            if self._stop_event.is_set():
-                return
-            if check_rtsp_reachable(source_url):
-                logger.info(
-                    f"[VideoStream] RTSP source reachable after "
-                    f"{pre_attempt} attempt(s) for ch:{idx}"
-                )
-                self._cap_opened = True
-                self._pre_connecting = False
-                break
-            else:
-                self._broadcast_status(
-                    self.MSG_RTSP_CONNECTING,
-                    f"正在等待视频源就绪... ({pre_attempt}/{max_pre_connect_attempts})",
-                    {"attempt": pre_attempt, "max": max_pre_connect_attempts},
-                )
-                time.sleep(pre_connect_backoff)
-                pre_connect_backoff = min(pre_connect_backoff * 2, 8.0)
-        else:
-            self._pre_connecting = False
-            logger.error(
-                f"[VideoStream] RTSP source unreachable after "
-                f"{max_pre_connect_attempts} attempts for ch:{idx}"
-            )
-            self._error_msg = f"视频源连接失败（已重试 {max_pre_connect_attempts} 次），请检查视频源是否可用"
-            return
-
-        self._broadcast_status(self.MSG_CONNECTING, f"正在连接通道 {idx} (FFmpeg)...")
-
-        # 回退: GPU解码 + GPU编码各自独立, NVENC/NVDEC 之间无争抢。
-        # WSL2 下 CPU 软解 1080p H.264 开销远超 GPU 硬解。
-        hw_accel = "auto" if self.use_gpu else "cpu"
-
-        capture = FFmpegCapture(
-            rtsp_url=source_url,
-            width=self.natural_width or 1920,
-            height=self.natural_height or 1080,
-            fps=self.detection_config.get("fps", 15) if self.detection_config else 15,
-            transport="tcp",
-            reconnect_delay=5.0,
-            cumulative_offset=cumulative_offset,
-            hw_accel=hw_accel,
-        )
-
-        if not capture.start():
-            logger.error(f"[VideoStream] FFmpegCapture failed to start for ch:{idx}")
-            self._error_msg = f"FFmpeg 启动失败 (通道 {idx})"
-            return
-
-        # 动态更新源帧率（实际摄像头的帧率可能与默认 15fps 不同）
-        self._fps_estimate = getattr(capture, "fps", 15.0) or 15.0
-        logger.info(
-            f"[VideoStream] FFmpegCapture started for ch:{idx} "
-            f"(source_fps={self._fps_estimate:.0f})"
-        )
-
-        consecutive_fail = 0
-        max_consecutive_fail = 20
-        max_ffmpeg_restarts = 60  # V4.10: 模拟器循环会正常触发重连，上限设高
-        frame_count = 0
-        last_health_log_time = time.time()
-        last_frame_time = time.time()  # V4.10: 帧采集超时保护
-        _prev_read_ts = time.time()  # V4.10: 帧间隔追踪
-        _read_gaps: list[float] = []  # V4.10: 最近 50 次帧间隔
-
-        try:
-            while not self._stop_event.is_set():
-                if not stream_manager.is_active(self.task_id, self.token):
-                    break
-
-                # V4.10: 30s 无帧则强制重启 FFmpeg（替代 -timeout，避免正常推流时误断）
-                if time.time() - last_frame_time > 30.0:
-                    logger.warning(
-                        f"[VideoStream] No frame received for 30s, "
-                        f"force restarting ch:{idx}"
-                    )
-                    capture.restart()
-                    last_frame_time = time.time()
-                    consecutive_fail = 0
-                    if capture._reconnect_count >= max_ffmpeg_restarts:
-                        self._error_msg = (
-                            f"视频流读取失败（已重启 {max_ffmpeg_restarts} 次）"
-                        )
-                        break
-                    continue
-
-                if self._force_reconnect.is_set():
-                    logger.info(
-                        f"[VideoStream] Reconnect signal received for ch:{idx} (FFmpeg)"
-                    )
-                    self._force_reconnect.clear()
-                    # 【修复】：不立即重启，而是先标记重连中，保留最后一帧
-                    # 避免 HLS 流断裂导致前端黑屏
-                    logger.warning(
-                        f"[VideoStream] Scheduling graceful reconnect for ch:{idx}"
-                    )
-                    consecutive_fail = max_consecutive_fail  # 触发重启但不中断流
-                    continue
-
-                # V4.10: FFmpeg 进程退出时立即重启，不等 max_consecutive_fail 次超时
-                if capture.process is not None and capture.process.poll() is not None:
-                    logger.warning(
-                        f"[VideoStream] FFmpeg process exited (code={capture.process.returncode}), "
-                        f"immediate restart ch:{idx}"
-                    )
-                    capture.restart()
-                    consecutive_fail = 0
-                    if capture._reconnect_count >= max_ffmpeg_restarts:
-                        self._error_msg = (
-                            f"FFmpeg 进程反复崩溃（已重启 {max_ffmpeg_restarts} 次）"
-                        )
-                        break
-                    continue
-
-                success, frame, pts_ms = capture.read_frame()
-
-                if not success:
-                    consecutive_fail += 1
-                    if consecutive_fail >= max_consecutive_fail:
-                        logger.warning(
-                            f"[VideoStream] Consecutive read failures ({consecutive_fail}), "
-                            f"restarting ch:{idx} (FFmpeg)"
-                        )
-                        capture.restart()
-                        consecutive_fail = 0
-                        if capture._reconnect_count >= max_ffmpeg_restarts:
-                            self._error_msg = (
-                                f"视频流断连（已重启 {max_ffmpeg_restarts} 次）"
-                            )
-                            break
-                    time.sleep(0.01)
-                    continue
-
-                consecutive_fail = 0
-                frame_count += 1
-                last_frame_time = time.time()  # V4.10: 更新帧采集时间
-
-                # V4.10: 帧间隔追踪
-                now_grab = time.time()
-                gap_ms = (now_grab - _prev_read_ts) * 1000
-                _prev_read_ts = now_grab
-                _read_gaps.append(gap_ms)
-                if len(_read_gaps) > 50:
-                    _read_gaps.pop(0)
-
-                if now_grab - last_health_log_time >= 10.0:
-                    stats = capture.get_stats()
-                    elapsed = now_grab - last_health_log_time
-                    actual_fps = (
-                        (frame_count - getattr(self, "_last_grab_frame_count", 0))
-                        / elapsed
-                        if elapsed > 0
-                        else 0
-                    )
-                    self._last_grab_frame_count = frame_count
-                    # V4.10: 帧间隔统计
-                    gap_avg = sum(_read_gaps) / len(_read_gaps) if _read_gaps else 0
-                    gap_max = max(_read_gaps) if _read_gaps else 0
-                    gap_min = min(_read_gaps) if _read_gaps else 0
-                    logger.info(
-                        f"[DIAG-GRABBER] ch={idx} "
-                        f"frames={stats['frame_count']} "
-                        f"actual_fps={actual_fps:.1f} "
-                        f"gap={gap_min:.0f}/{gap_avg:.0f}/{gap_max:.0f}ms "
-                        f"reconnects={stats['reconnect_count']} "
-                        f"running={stats['is_running']} "
-                        f"hw={stats.get('hw_accel_type', 'cpu')} "
-                        f"consecutive_fail={consecutive_fail} "
-                        f"render=client(V5.0) "
-                        f"raw_enc_lv={self._primary_writer._encode_level if self._primary_writer else '?'}"
-                    )
-                    last_health_log_time = now_grab
-
-                if frame is None or self._is_corrupted_frame(frame):
-                    continue
-
-                frame_timestamp = pts_ms / 1000.0
-
-                with self._lock:
-                    self._latest_frames[idx] = frame
-                    self._latest_frame_timestamps[idx] = frame_timestamp
-                    self._last_frame_time = now_grab
-                    self._ret = True
-
-                if not self._history_marked:
-                    self._mark_has_history()
-                    self._history_marked = True
-
-                if not self.natural_width:
-                    h, w = frame.shape[:2]
-                    self._save_resolution_sync(w, h)
-
-                if self.is_multimodal:
-                    if idx == 0:
-                        self.alignment_buffer.add_rgb(now_grab, frame)
-                    else:
-                        self.alignment_buffer.add_ir(now_grab, frame)
-
-        except Exception as e:
-            logger.error(f"[VideoStream] FFmpeg grabber error ch:{idx}: {e}")
-        finally:
-            capture.stop()
-            logger.info(f"[VideoStream] FFmpegCapture stopped for ch:{idx}")
-
-    def _frame_grabber_opencv(self, source_url: str, idx: int):
-        """使用 OpenCV VideoCapture 读取帧（原有实现）"""
-        from app.services.task_runner import stream_manager
-
-        # 【P2-1 修复】：移除重复的环境变量设置
-        # 全局已在文件顶部统一设置，此处仅负责实例化，避免多线程竞争
-        cap = None
-        if os.name == "nt":
-            cap_api = cv2.CAP_MSMF
-            logger.info(
-                f"[VideoStream {self.task_id}] Using CAP_MSMF backend (Windows HW decode)"
-            )
-        else:
-            cap_api = cv2.CAP_FFMPEG
-        last_attempt_time = 0.0
-        consecutive_fail = 0
-        consecutive_reconnect_fails = 0
-
-        # 日志增强：帧率统计和健康监控
-        frame_count = 0
-        last_health_log_time = time.time()
-        last_frame_grab_time = time.time()
-        fps_actual = 0.0
-
-        logger.info(
-            f"[VideoStream {self.task_id}] Unified 'On-Demand' Grabber started (ch:{idx}, OpenCV)"
-        )
-        self._broadcast_status(self.MSG_CONNECTING, f"正在连接通道 {idx}...")
-
-        while not self._stop_event.is_set():
-            if not stream_manager.is_active(self.task_id, self.token):
-                break
-
-            # P0 修复：监听跨线程重连信号
-            if self._force_reconnect.is_set():
-                logger.info(
-                    f"[VideoStream] Reconnect signal received for ch:{idx}, recreating capture..."
-                )
-                self._force_reconnect.clear()
-                if cap:
-                    cap.release()
-                cap = None
-                self._cap_opened = False
-                consecutive_fail = 0
-                consecutive_reconnect_fails += 1
-                if consecutive_reconnect_fails >= self.MAX_RETRIES:
-                    logger.error(
-                        f"[VideoStream] Max reconnect attempts ({self.MAX_RETRIES}) exceeded for ch:{idx}"
-                    )
-                    self._error_msg = f"视频源连接失败（已重试 {self.MAX_RETRIES} 次）"
-                    break
-                backoff = min(2.0 * (2**consecutive_reconnect_fails), 30.0)
-                logger.warning(
-                    f"[VideoStream] Reconnect attempt {consecutive_reconnect_fails}/{self.MAX_RETRIES}, backing off {backoff:.1f}s"
-                )
-                time.sleep(backoff)
-                continue
-
-            now = time.time()
-            # 1. 自动重连逻辑
-            if cap is None or not cap.isOpened():
-                if (now - last_attempt_time) < self.RETRY_INTERVAL:
-                    time.sleep(0.1)
-                    continue
-                last_attempt_time = now
-                try:
-                    # V1.8.1: 采用文件头定义的全局配置，此处仅负责实例化
-                    cap = cv2.VideoCapture(source_url, cap_api)
-                    if cap.isOpened():
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 50)
-                        self._cap_opened = True
-                        self._retry_count = 0
-                        consecutive_reconnect_fails = 0
-                        if self._first_connect_done:
-                            self._broadcast_status(
-                                self.MSG_RECOVERED, "视频源重连成功，恢复监控中..."
-                            )
-                        else:
-                            self._first_connect_done = True
-                            self._broadcast_status(
-                                self.MSG_MODEL_LOADING,
-                                "连接成功，正在初始化推理引擎...",
-                            )
-                    else:
-                        self._retry_count += 1
-                        if self._retry_count >= self.MAX_RETRIES:
-                            logger.error(
-                                f"[VideoStream] Initial connection failed after {self.MAX_RETRIES} attempts for ch:{idx}"
-                            )
-                            self._error_msg = (
-                                f"视频源初始连接失败（已重试 {self.MAX_RETRIES} 次）"
-                            )
-                            self._cap_opened = False
-                            break
-                        self._broadcast_status(
-                            self.MSG_RETRY,
-                            f"连接重试中 ({self._retry_count}/{self.MAX_RETRIES})",
-                            {"attempt": self._retry_count, "max": self.MAX_RETRIES},
-                        )
-                        continue
-                except Exception as e:
-                    logger.error(f"[VideoStream] Connection error: {e}")
-                    cap = None
-                    self._retry_count += 1
-                    if self._retry_count >= self.MAX_RETRIES:
-                        logger.error(
-                            f"[VideoStream] Connection failed after {self.MAX_RETRIES} attempts (exception path) for ch:{idx}"
-                        )
-                        self._error_msg = (
-                            f"视频源连接失败（已重试 {self.MAX_RETRIES} 次）"
-                        )
-                        self._cap_opened = False
-                        break
-                    continue
-
-            try:
-                # 2. 【全速同步解码 V1.8.0】：必须每一帧都 grab 且 retrieve
-                if not cap.grab():
-                    consecutive_fail += 1
-                    if consecutive_fail % 100 == 0:
-                        logger.warning(
-                            f"[VideoStream] Heavy Grabber stuck (ch:{idx}, fails:{consecutive_fail})"
-                        )
-
-                    # 【V1.8.8 最优重连逻辑】：如果连续 20 帧抓取失败（约 0.8 秒），强制重置 VideoCapture
-                    # 理由：FFmpeg 内核在解码严重损坏的流时可能进入僵死状态，重建是唯一解
-                    if consecutive_fail >= 20:
-                        logger.error(
-                            f"[VideoStream] Critical grab failure (count={consecutive_fail}). Recreating Capture Context..."
-                        )
-                        with self._lock:
-                            self._ret = False
-                            self._latest_frames[idx] = None
-                        if cap:
-                            cap.release()
-                        cap = None
-                        self._cap_opened = False
-                        consecutive_reconnect_fails += 1
-                        if consecutive_reconnect_fails >= self.MAX_RETRIES:
-                            logger.error(
-                                f"[VideoStream] Max reconnect attempts ({self.MAX_RETRIES}) exceeded for ch:{idx}"
-                            )
-                            self._error_msg = (
-                                f"视频源连接失败（已重试 {self.MAX_RETRIES} 次）"
-                            )
-                            break
-                        backoff = min(2.0 * (2**consecutive_reconnect_fails), 30.0)
-                        logger.warning(
-                            f"[VideoStream] Reconnect attempt {consecutive_reconnect_fails}/{self.MAX_RETRIES}, backing off {backoff:.1f}s"
-                        )
-                        time.sleep(backoff)
-                    else:
-                        time.sleep(0.01)
-                    continue
-
-                consecutive_fail = 0
-
-                # 日志增强：帧率统计
-                frame_count += 1
-                now_grab = time.time()
-                if now_grab - last_health_log_time >= 5.0:
-                    fps_actual = frame_count / (now_grab - last_health_log_time)
-                    logger.info(
-                        f"[VideoStream] Health check ch:{idx}: FPS={fps_actual:.1f}, "
-                        f"pts_reset={self._pts_reset_count}, frame_count={self._frame_count}"
-                    )
-                    frame_count = 0
-                    last_health_log_time = now_grab
-                last_frame_grab_time = now_grab
-
-                # 核心修正：回归 100% 解码同步。
-                # 由于压缩任务已移出主进程，全速解码开销极低，这是解决高码率同步错误的唯一路径。
-                ret, img = cap.retrieve()
-                if (
-                    not ret
-                    or img is None
-                    or img.size == 0
-                    or self._is_corrupted_frame(img)
-                ):
-                    continue
-
-                # wall-clock 相对时间戳
-                # WSL2 时钟偏差在 session_start_time 减法中抵消
-                frame_timestamp = now - self._session_start_time
-
-                # 更新最新帧缓存
-                with self._lock:
-                    self._latest_frames[idx] = img
-                    self._latest_frame_timestamps[idx] = frame_timestamp
-                    self._last_frame_time = now
-                    self._ret = True
-
-                # V1.8.2: 健壮的历史标记逻辑
-                # 无论分辨率是否预加载，只要收到第一帧就标记 has_history
-                if not self._history_marked:
-                    self._mark_has_history()
-                    self._history_marked = True
-
-                # 分辨率自适应逻辑 (处理 None 或 0)
-                if not self.natural_width:
-                    h, w = img.shape[:2]
-                    self._save_resolution_sync(w, h)
-
-                # 对齐逻辑 (多模态)
-                if self.is_multimodal:
-                    if idx == 0:
-                        self.alignment_buffer.add_rgb(now, img)
-                    else:
-                        self.alignment_buffer.add_ir(now, img)
-
-            except Exception as e:
-                logger.error(f"[VideoStream] Capture loop exception: {e}")
-                if cap:
-                    cap.release()
-                cap = None
-                self._cap_opened = False
-
-        if cap:
-            cap.release()
 
     @staticmethod
     def _is_corrupted_frame(img: np.ndarray) -> bool:

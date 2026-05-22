@@ -45,6 +45,7 @@ class SharedGrabber:
         self._latest_frame: Optional[np.ndarray] = None
         self._latest_pts_ms: float = 0.0
         self._frame_lock = threading.Lock()
+        self._frame_ready = threading.Condition(self._frame_lock)
 
     @property
     def subscriber_count(self) -> int:
@@ -57,7 +58,16 @@ class SharedGrabber:
 
     @property
     def latest_pts_ms(self) -> float:
-        return self._latest_pts_ms
+        with self._frame_lock:
+            return self._latest_pts_ms
+
+    def latest_frame_and_pts(self, timeout: float = 0.05) -> tuple[Optional[np.ndarray], float]:
+        """原子读取帧和 PTS，使用条件变量等待新帧，避免轮询延迟"""
+        with self._frame_ready:
+            self._frame_ready.wait(timeout=timeout)
+            frame = self._latest_frame.copy() if self._latest_frame is not None else None
+            pts_ms = self._latest_pts_ms
+            return frame, pts_ms
 
     def subscribe(self, task_id: str, stream_ref=None) -> bool:
         with self._lock:
@@ -172,9 +182,10 @@ class SharedGrabber:
             consecutive_fail = 0
             self._frame_count += 1
 
-            with self._frame_lock:
+            with self._frame_ready:
                 self._latest_frame = frame
                 self._latest_pts_ms = pts_ms
+                self._frame_ready.notify_all()
 
             if time.time() - last_diag >= 30:
                 elapsed = time.time() - last_diag

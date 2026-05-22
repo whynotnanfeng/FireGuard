@@ -20,7 +20,7 @@ class GlobalInferenceWorker(mp.Process):
 
     def run(self):
         import os as _os, sys as _sys
-        # V4.11: 子进程需继承 CUDA/cuDNN PATH（multiprocessing 不继承环境变更）
+        # 子进程需继承 CUDA/cuDNN PATH（multiprocessing 不继承环境变更）
         _cur = _os.environ.get("PATH", "")
         _path_additions = []
 
@@ -73,7 +73,7 @@ class GlobalInferenceWorker(mp.Process):
                 if task_data is None:
                     break
 
-                # V4.11: 共享内存格式 (>=9 元素) 或旧 JPEG 格式 (<9 元素)
+                # 共享内存格式 (>=9 元素) 或旧 JPEG 格式 (<9 元素)
                 if len(task_data) >= 9:
                     (task_id, timestamp, model_path, label_mapping,
                      conf_floor, shm_name, shm_shape, shm_dtype, use_gpu) = task_data

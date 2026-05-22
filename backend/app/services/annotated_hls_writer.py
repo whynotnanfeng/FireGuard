@@ -1,5 +1,5 @@
 """
-带标注帧的 HLS 编码器（V3.3 守护进程版）
+带标注帧的 HLS 编码器（守护进程版）
 
 架构参考 DirectHLSWriter，将帧写入线程改为守护进程模式：
 - 独立写入线程持续从队列取帧
@@ -8,7 +8,7 @@
 - FFmpeg 崩溃自动重启
 - 队列满时丢弃旧帧保留最新帧
 
-V3.3 关键改进：
+关键改进：
 - 写入线程不使用 time.sleep 控制帧率（导致帧率不准）
 - 改用 wall-clock 精确帧率控制
 - 添加 DirectHLSWriter 的关键稳定参数
@@ -27,14 +27,14 @@ from typing import Optional
 import numpy as np
 
 from app.config import config
-from app.utils.hw_accel import resolve_hls_encoder, build_hls_encode_args
+from app.utils.hw_accel import resolve_hls_encoder
 
 logger = logging.getLogger(__name__)
 
 
 class AnnotatedHLSWriter:
     """
-    带标注帧的 HLS 编码器（V3.3 守护进程版）
+    带标注帧的 HLS 编码器（守护进程版）
     
     架构：
         推理线程 → put_frame() → 有界队列 → 守护写入线程 → FFmpeg pipe → HLS 输出
@@ -55,6 +55,7 @@ class AnnotatedHLSWriter:
         fps: float = 15.0,
         channel: str = "rgb",
         queue_size: int = 120,
+        resume: bool = False,
     ):
         self.task_id = task_id
         self.output_dir = output_dir
@@ -64,6 +65,15 @@ class AnnotatedHLSWriter:
         self.fps = fps
         self.channel = channel
         self.m3u8_path = self.output_dir / f"stream_{channel}.m3u8"
+        self._resume = resume
+
+        # 续存模式：备份旧 m3u8 内容，stop 时合并新旧分段
+        self._old_m3u8_content: Optional[str] = None
+        if resume and self.m3u8_path.exists():
+            try:
+                self._old_m3u8_content = self.m3u8_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
 
         self._queue: queue.Queue = queue.Queue(maxsize=queue_size)
         self._write_thread: Optional[threading.Thread] = None
@@ -80,6 +90,7 @@ class AnnotatedHLSWriter:
         self._hw_encoder_is_hw: bool = False
         self._consecutive_failures = 0
         self._queue_drops = 0
+        self._log_file = None
 
         self._frame_interval = 1.0 / fps if fps > 0 else 0.067
 
@@ -125,7 +136,7 @@ class AnnotatedHLSWriter:
         hls_time = 1
         gop = int(self.fps * hls_time)
 
-        # V4.7: 720p 标注流 — 降低 BGR→NV12 转换 + 编码负载
+        # 720p 标注流 — 降低 BGR→NV12 转换 + 编码负载，固定分辨率避免花屏
         annot_w = 1280
         annot_h = 720
         vf_scale = f"scale={annot_w}:{annot_h}"
@@ -155,6 +166,7 @@ class AnnotatedHLSWriter:
                 "-g", str(gop),
                 "-pix_fmt", "nv12",
                 "-bf", "0",
+                "-r", str(self.fps),
             ]
         else:
             raise RuntimeError(
@@ -162,14 +174,24 @@ class AnnotatedHLSWriter:
                 "Hardware encoding (NVENC/QSV) is required."
             )
         
+        # 续存模式：追加到旧 m3u8，正确设置 start_number
+        has_old_segments = self.m3u8_path.exists() and self._resume
+        if has_old_segments:
+            start_num = self._get_last_segment_number(self.m3u8_path)
+            hls_flags = "append_list+program_date_time+omit_endlist+independent_segments"
+        else:
+            start_num = 0
+            hls_flags = "program_date_time+omit_endlist+independent_segments"
+
         base_cmd += [
             "-fflags", "+genpts",
             "-avoid_negative_ts", "make_zero",
             "-f", "hls",
             "-hls_time", str(hls_time),
             "-hls_list_size", "0",
-            "-hls_flags", "program_date_time+omit_endlist+independent_segments",
+            "-hls_flags", hls_flags,
             "-hls_segment_type", "mpegts",
+            "-start_number", str(start_num),
             "-hls_segment_filename", str(self.output_dir / "stream_annotated%d.ts"),
             str(self.m3u8_path),
         ]
@@ -186,17 +208,23 @@ class AnnotatedHLSWriter:
         logger.info(f"[AnnotatedHLSWriter] FFmpeg cmd: {' '.join(ffmpeg_cmd)}")
         
         try:
-            log_file = open(
+            # 关闭旧的 log_file（防止 FD 泄漏）
+            if self._log_file:
+                try:
+                    self._log_file.close()
+                except Exception:
+                    pass
+            self._log_file = open(
                 self.output_dir / f"ffmpeg_{self.channel}.log", "a", encoding="utf-8"
             )
             self.process = subprocess.Popen(
                 ffmpeg_cmd,
                 stdin=subprocess.PIPE,
-                stdout=log_file,
+                stdout=self._log_file,
                 stderr=subprocess.STDOUT,
             )
             
-            # V3.3: 启动后检查 FFmpeg 是否立即退出
+            # 启动后检查 FFmpeg 是否立即退出
             time.sleep(0.2)
             poll_result = self.process.poll()
             if poll_result is not None:
@@ -230,12 +258,19 @@ class AnnotatedHLSWriter:
                 except Exception:
                     self.process.kill()
             self.process = None
-    
+
+        if self._log_file:
+            try:
+                self._log_file.close()
+            except Exception:
+                pass
+            self._log_file = None
+
     def _write_loop(self):
         """
-        逐帧写入 FFmpeg stdin。现在上游保证恒定 15fps 输入。
+        逐帧写入 FFmpeg stdin。上游保证恒定帧率输入。
         """
-        _last_diag_time = time.time()
+        _last_diag_time = time.monotonic()
         _write_times: list[float] = []  # 最近 50 次写入耗时
 
         while not self._stop_event.is_set():
@@ -253,24 +288,20 @@ class AnnotatedHLSWriter:
             try:
                 if frame.shape != (self.height, self.width, 3):
                     frame = _resize_frame(frame, self.width, self.height)
-                write_start = time.time()
+                write_start = time.monotonic()
                 self.process.stdin.write(frame.tobytes())
-                write_elapsed = time.time() - write_start
+                write_elapsed = time.monotonic() - write_start
                 self._frame_count += 1
 
-                # 收集写入耗时样本
                 _write_times.append(write_elapsed)
                 if len(_write_times) > 50:
                     _write_times.pop(0)
 
-                # 每 5 秒输出诊断
-                now = time.time()
+                now = time.monotonic()
                 if now - _last_diag_time >= 5.0:
                     _last_diag_time = now
-                    avg_write_ms = sum(_write_times) / len(_write_times) * 1000 if _write_times else 0
                     max_write_ms = max(_write_times) * 1000 if _write_times else 0
                     ffmpeg_alive = self.process.poll() is None if self.process else False
-                    # V4.10: 按百分位追踪写入耗时
                     p50_ms = 0
                     p90_ms = 0
                     p99_ms = 0
@@ -301,7 +332,7 @@ class AnnotatedHLSWriter:
                 logger.error(f"[AnnotatedHLSWriter] Write error: {e}")
     
     def _handle_crash(self):
-        now = time.time()
+        now = time.monotonic()
         self._crash_timestamps = [t for t in self._crash_timestamps if now - t < self._retry_window]
         self._crash_timestamps.append(now)
         
@@ -325,8 +356,19 @@ class AnnotatedHLSWriter:
         if self._started:
             return
 
-        # V4.1: 清理上次任务的残留文件（m3u8 可能带 ENDLIST，hls.js 会误判为 VOD）
-        self._cleanup_old_segments()
+        existing_ts = list(self.output_dir.glob(f"stream_{self.channel}*.ts"))
+        has_old_segments = len(existing_ts) > 0
+
+        if self._resume and has_old_segments:
+            # 续存模式：保留旧分片，仅清除 ENDLIST
+            self._strip_endlist()
+            logger.info(
+                f"[AnnotatedHLSWriter] Resume mode for {self.task_id}: "
+                f"keeping {len(existing_ts)} old segments"
+            )
+        else:
+            # 全新启动：清理旧文件
+            self._cleanup_old_segments()
 
         self._stop_event.clear()
         self._frame_count = 0
@@ -353,7 +395,95 @@ class AnnotatedHLSWriter:
                         pass
         except Exception as e:
             logger.warning(f"[AnnotatedHLSWriter] Cleanup warning: {e}")
-    
+
+    def _strip_endlist(self):
+        """续存模式：从 m3u8 中移除 ENDLIST 标记，让 FFmpeg 可以继续追加分段"""
+        if not self.m3u8_path.exists():
+            return
+        try:
+            content = self.m3u8_path.read_text(encoding="utf-8")
+            if "#EXT-X-ENDLIST" in content:
+                cleaned = content.replace("#EXT-X-ENDLIST", "")
+                self.m3u8_path.write_text(cleaned, encoding="utf-8")
+                logger.info(f"[AnnotatedHLSWriter] Stripped ENDLIST from {self.m3u8_path.name}")
+        except Exception as e:
+            logger.warning(f"[AnnotatedHLSWriter] ENDLIST strip failed: {e}")
+
+    def _merge_m3u8(self):
+        """续存模式：将旧 m3u8 的分段条目合并到新 m3u8 中，保证历史时长正确"""
+        import re
+        try:
+            new_content = self.m3u8_path.read_text(encoding="utf-8")
+            old_content = self._old_m3u8_content
+
+            old_segments = []
+            lines = old_content.splitlines()
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                if line.startswith("#EXTINF:"):
+                    extinf = line
+                    if i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        if next_line and not next_line.startswith("#"):
+                            old_segments.append((extinf, next_line))
+                            i += 2
+                            continue
+                i += 1
+
+            if not old_segments:
+                return
+
+            new_header_lines = []
+            new_segments = []
+            found_first_extinf = False
+            for line in new_content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#EXTINF:"):
+                    found_first_extinf = True
+                if not found_first_extinf:
+                    new_header_lines.append(line)
+                else:
+                    if stripped.startswith("#EXTINF:"):
+                        extinf = stripped
+                    elif stripped and not stripped.startswith("#") and not stripped.startswith("#EXT"):
+                        new_segments.append((extinf, stripped))
+
+            merged_lines = list(new_header_lines)
+            for extinf, seg in old_segments:
+                merged_lines.append(extinf)
+                merged_lines.append(seg)
+            for extinf, seg in new_segments:
+                merged_lines.append(extinf)
+                merged_lines.append(seg)
+            merged_lines.append("#EXT-X-ENDLIST")
+
+            self.m3u8_path.write_text("\n".join(merged_lines) + "\n", encoding="utf-8")
+            logger.info(
+                f"[AnnotatedHLSWriter] Merged m3u8 for {self.task_id}: "
+                f"{len(old_segments)} old + {len(new_segments)} new segments"
+            )
+        except Exception as e:
+            logger.warning(f"[AnnotatedHLSWriter] m3u8 merge failed: {e}")
+
+    @staticmethod
+    def _get_last_segment_number(m3u8_path: Path) -> int:
+        """从 m3u8 中提取最后一个分段编号，用于续存模式的 start_number"""
+        if not m3u8_path.exists():
+            return 0
+        try:
+            import re
+            content = m3u8_path.read_text(encoding="utf-8", errors="ignore")
+            numbers = re.findall(r"stream_annotated(\d+)\.ts", content)
+            if numbers:
+                return int(numbers[-1]) + 1
+            media_seqs = re.findall(r"#EXT-X-MEDIA-SEQUENCE:(\d+)", content)
+            if media_seqs:
+                return int(media_seqs[-1])
+            return 0
+        except Exception:
+            return 0
+
     def put_frame(self, frame: np.ndarray) -> bool:
         """
         将帧放入异步队列（不阻塞）
@@ -371,11 +501,6 @@ class AnnotatedHLSWriter:
                 self._queue.get_nowait()
                 self._queue.put_nowait(frame)
                 self._queue_drops += 1
-                if self._queue_drops % 10 == 1:
-                    logger.warning(
-                        f"[AnnotatedHLSWriter] Queue full, dropping frame "
-                        f"(drops={self._consecutive_failures}, qsize={self._queue.qsize()})"
-                    )
                 return True
             except Exception:
                 return False
@@ -400,7 +525,11 @@ class AnnotatedHLSWriter:
             self._write_thread.join(timeout=5)
         
         self._stop_ffmpeg()
-        
+
+        # 续存模式：合并旧 m3u8 与新 m3u8，确保历史分段不丢失
+        if self._old_m3u8_content and self.m3u8_path.exists():
+            self._merge_m3u8()
+
         logger.info(f"[AnnotatedHLSWriter] Stopped for {self.task_id}")
     
     @property

@@ -31,9 +31,16 @@ class DirectHLSWriter:
             return 0
         try:
             content = m3u8_path.read_text(encoding="utf-8", errors="ignore")
-            numbers = re.findall(r"#EXTINF:.*,\s*seg_(\d+)\.ts", content)
-            if numbers:
-                return int(numbers[-1]) + 1
+            # 匹配所有 .ts 分段文件名中的尾部数字（兼容 stream_rgb0.ts, stream_annotated0.ts 等）
+            numbers = re.findall(r"(\w+)\.ts", content)
+            # 从匹配到的文件名中提取尾部数字
+            seg_nums = []
+            for name in numbers:
+                m = re.search(r"(\d+)$", name)
+                if m:
+                    seg_nums.append(int(m.group(1)))
+            if seg_nums:
+                return max(seg_nums) + 1
             media_seqs = re.findall(r"#EXT-X-MEDIA-SEQUENCE:(\d+)", content)
             if media_seqs:
                 return int(media_seqs[-1])
@@ -41,7 +48,7 @@ class DirectHLSWriter:
         except Exception:
             return 0
 
-    def __init__(self, task_id: str, source_url: str, output_dir: Path, channel: str = "rgb"):
+    def __init__(self, task_id: str, source_url: str, output_dir: Path, channel: str = "rgb", resume: bool = False):
         self.task_id = task_id
         self.source_url = source_url
         self.channel = channel
@@ -53,9 +60,17 @@ class DirectHLSWriter:
         self._stop_event = threading.Event()
         self._ready_event = threading.Event()
         self._lock = threading.Lock()
+        self._resume = resume
         existing_ts = list(self.output_dir.glob(f"stream_{channel}*.ts")) if self.output_dir.exists() else []
-        self._initial_seg_count = len(existing_ts)
-        self._is_resume = self._initial_seg_count > 0
+        self._initial_seg_count = len(existing_ts) if resume else 0
+        self._is_resume = resume and self._initial_seg_count > 0
+        # 续存模式：备份旧 m3u8 内容，stop 时合并新旧分段
+        self._old_m3u8_content: str | None = None
+        if self._is_resume and self.m3u8_path.exists():
+            try:
+                self._old_m3u8_content = self.m3u8_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
 
         self._encode_level = 0
         self._hw_encoder: str = ""
@@ -129,6 +144,17 @@ class DirectHLSWriter:
         return base_cmd
 
     def start(self):
+        if self._resume and self._is_resume:
+            # 续存模式：保留旧分片，仅清除 ENDLIST 标记让 FFmpeg 继续追加
+            self._strip_endlist()
+            logger.info(
+                f"[DirectHLSWriter] Resume mode for {self.task_id}: "
+                f"keeping {self._initial_seg_count} old segments"
+            )
+        else:
+            self._cleanup_old_segments()
+            self._initial_seg_count = 0
+            self._is_resume = False
         threading.Thread(target=self._run_daemon, daemon=True).start()
         logger.info(f"[DirectHLSWriter] Daemon started for {self.task_id}. Recording will begin shortly.")
 
@@ -137,7 +163,7 @@ class DirectHLSWriter:
         retry_window = 120.0
         crash_timestamps = []
 
-        # V4.10: CPU affinity 移除 — 交由 OS 自由调度，测试动态资源分配
+        # CPU affinity 移除 — 交由 OS 自由调度，测试动态资源分配
 
         while not self._stop_event.is_set():
             try:
@@ -189,11 +215,13 @@ class DirectHLSWriter:
                             f"[DirectHLSWriter] FFmpeg crashed (code {ret}) for {self.task_id} "
                             f"[encode_level={self._encode_level}]"
                         )
+                        # 仅在异常退出后清理僵尸进程，正常启动时跳过
+                        self._ensure_no_zombie_ffmpeg()
 
                         self._consecutive_failures += 1
 
                         if self._consecutive_failures >= self._max_failures_before_escalate:
-                            # V4.10: 驱动已更新至 8 路并发，恢复 L0→L1 升级策略
+                            # 驱动已更新至 8 路并发，恢复 L0→L1 升级策略
                             max_level = 1 if self._hw_encoder_is_hw else 0
                             if self._encode_level < max_level:
                                 old_level = self._encode_level
@@ -244,7 +272,7 @@ class DirectHLSWriter:
     def _ensure_no_zombie_ffmpeg(self):
         try:
             import psutil
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            for proc in psutil.process_iter(['pid', 'name']):
                 try:
                     if proc.info['name'] and 'ffmpeg' in proc.info['name'].lower():
                         cmdline = " ".join(proc.info['cmdline'] or [])
@@ -299,6 +327,94 @@ class DirectHLSWriter:
         current_ts = list(self.output_dir.glob(f"stream_{self.channel}*.ts"))
         return max(0, len(current_ts) - self._initial_seg_count)
 
+    def _cleanup_old_segments(self):
+        """删除旧的分片和 playlist，避免残留 ENDLIST 或跨会话混合分段"""
+        try:
+            for pattern in [f"stream_{self.channel}*.ts", f"stream_{self.channel}*.m3u8*"]:
+                for f in self.output_dir.glob(pattern):
+                    try:
+                        f.unlink()
+                        logger.debug(f"[DirectHLSWriter] Cleaned up: {f.name}")
+                    except OSError:
+                        pass
+        except Exception as e:
+            logger.warning(f"[DirectHLSWriter] Cleanup warning: {e}")
+
+    def _strip_endlist(self):
+        """续存模式：从 m3u8 中移除 ENDLIST 标记，让 FFmpeg 可以继续追加分段"""
+        if not self.m3u8_path.exists():
+            return
+        try:
+            content = self.m3u8_path.read_text(encoding="utf-8")
+            if "#EXT-X-ENDLIST" in content:
+                cleaned = content.replace("#EXT-X-ENDLIST", "")
+                self.m3u8_path.write_text(cleaned, encoding="utf-8")
+                logger.info(f"[DirectHLSWriter] Stripped ENDLIST from {self.m3u8_path.name}")
+        except Exception as e:
+            logger.warning(f"[DirectHLSWriter] ENDLIST strip failed: {e}")
+
+    def _merge_m3u8(self):
+        """续存模式：将旧 m3u8 的分段条目合并到新 m3u8 中，保证历史时长正确"""
+        try:
+            new_content = self.m3u8_path.read_text(encoding="utf-8")
+            old_content = self._old_m3u8_content
+
+            # 从旧 m3u8 提取 EXTINF + 分段文件名行（成对出现）
+            old_segments = []
+            lines = old_content.splitlines()
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                if line.startswith("#EXTINF:"):
+                    extinf = line
+                    # 下一行是非注释行 = 分段文件名
+                    if i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        if next_line and not next_line.startswith("#"):
+                            old_segments.append((extinf, next_line))
+                            i += 2
+                            continue
+                i += 1
+
+            if not old_segments:
+                return
+
+            # 从新 m3u8 提取头部（EXTM3U 到最后一个头部行）和分段条目
+            new_header_lines = []
+            new_segments = []
+            found_first_extinf = False
+            for line in new_content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#EXTINF:") or (stripped and not stripped.startswith("#") and not found_first_extinf is False):
+                    pass
+                if stripped.startswith("#EXTINF:"):
+                    found_first_extinf = True
+                if not found_first_extinf:
+                    new_header_lines.append(line)
+                else:
+                    if stripped.startswith("#EXTINF:"):
+                        extinf = stripped
+                    elif stripped and not stripped.startswith("#") and not stripped.startswith("#EXT"):
+                        new_segments.append((extinf, stripped))
+
+            # 合并：头部 + 旧分段 + 新分段 + ENDLIST
+            merged_lines = list(new_header_lines)
+            for extinf, seg in old_segments:
+                merged_lines.append(extinf)
+                merged_lines.append(seg)
+            for extinf, seg in new_segments:
+                merged_lines.append(extinf)
+                merged_lines.append(seg)
+            merged_lines.append("#EXT-X-ENDLIST")
+
+            self.m3u8_path.write_text("\n".join(merged_lines) + "\n", encoding="utf-8")
+            logger.info(
+                f"[DirectHLSWriter] Merged m3u8 for {self.task_id}: "
+                f"{len(old_segments)} old + {len(new_segments)} new segments"
+            )
+        except Exception as e:
+            logger.warning(f"[DirectHLSWriter] m3u8 merge failed: {e}")
+
     def stop(self) -> None:
         self._stop_event.set()
         with self._lock:
@@ -327,6 +443,11 @@ class DirectHLSWriter:
                     except Exception:
                         pass
                 self.process = None
+
+        # 续存模式：合并旧 m3u8 与新 m3u8，确保历史分段不丢失
+        if self._old_m3u8_content and self.m3u8_path.exists():
+            self._merge_m3u8()
+
         logger.info(f"[DirectHLSWriter] Stopped HLS pipeline for task {self.task_id}")
 
 
@@ -343,7 +464,7 @@ class StorageManager:
         self._lock = threading.Lock()
 
     def start_recording(
-        self, task_id: str, source_url: str, channel: str = "rgb"
+        self, task_id: str, source_url: str, channel: str = "rgb", resume: bool = False
     ) -> Optional[DirectHLSWriter]:
         with self._lock:
             writer_key = f"{task_id}_{channel}"
@@ -355,7 +476,7 @@ class StorageManager:
                 del self._writers[writer_key]
 
             task_dir = self.storage_dir / task_id
-            writer = DirectHLSWriter(task_id, source_url, task_dir, channel=channel)
+            writer = DirectHLSWriter(task_id, source_url, task_dir, channel=channel, resume=resume)
             writer.start()
             self._writers[writer_key] = writer
             return writer
@@ -456,7 +577,7 @@ class StorageManager:
         if not annotated_m3u8.exists() and not raw_m3u8.exists():
             raise HTTPException(status_code=404, detail="Stream playlist not found")
 
-        # V4.5: 优先标注流，但快照过短（< 预期的 50%）时回退到原始流
+        # 优先标注流，但快照过短（< 预期的 50%）时回退到原始流
         snapshot = None
         duration = 0.0
 

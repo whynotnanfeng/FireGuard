@@ -12,6 +12,8 @@ erDiagram
     USER ||--o{ TASK : "创建"
     DETECTION_MODEL ||--o{ TASK : "被引用"
     TASK ||--o{ RESULT : "产生"
+    TASK ||--o{ DETECTION_RECORD : "产生"
+    TASK ||--o{ DETECTION_EVENT : "产生"
 
     USER {
         string id PK
@@ -30,6 +32,8 @@ erDiagram
         string description
         string status
         string label_config "JSON string (标签映射)"
+        string class_names "JSON string (类别名列表)"
+        float default_threshold "默认阈值"
         datetime created_at
     }
 
@@ -42,7 +46,9 @@ erDiagram
         string status
         string source_type "upload/url/rtsp"
         string source_path
-        float progress
+        string description "任务描述"
+        int progress
+        string error_msg "错误信息"
         string detection_config "JSON string"
         bool use_gpu "是否使用 GPU 推理 (v1.9.0)"
         bool has_history
@@ -53,6 +59,32 @@ erDiagram
         float cumulative_running_seconds "累计运行秒数 (v1.9.4)"
         datetime session_start_time "本次会话开始时间 (v1.9.4)"
         datetime created_at
+        datetime updated_at
+    }
+
+    DETECTION_RECORD {
+        string id PK
+        string task_id FK
+        string class_name
+        float confidence
+        string box "JSON [x1,y1,x2,y2]"
+        datetime detected_at
+    }
+
+    DETECTION_EVENT {
+        string id PK
+        string task_id FK
+        int track_id
+        string event_type "enter/leave"
+        string class_name
+        float confidence
+        string box "JSON [x1,y1,x2,y2]"
+        datetime entered_at
+        datetime left_at
+        int duration_ms
+        float max_confidence
+        float avg_confidence
+        int update_count
     }
 ```
 
@@ -83,12 +115,28 @@ erDiagram
 - **session_start_time** (v1.9.4 新增): 本次会话开始时间（`initializing → running` 时记录），用于与 `cumulative_running_seconds` 配合计算当前实时运行时长。
 
 ### 2.5 检测记录表 (DetectionRecord)
-存储每次检测的结果。
+存储每次检测的结果（每帧一条记录）。
 - **task_id**: 关联的任务 ID。
 - **class_name**: 检测到的类别名称。
 - **confidence**: 检测置信度 (0-1)。
 - **box**: 检测框坐标 `[x1, y1, x2, y2]`，存储为 JSON 字符串。
-- **detected_at**: 检测时间（北京时间）。
+- **detected_at**: 检测时间（北京时间），已建立索引。
+
+### 2.6 检测事件表 (DetectionEvent)
+事件驱动的检测记录模型，每个目标生命周期一条记录（Enter -> Update x N -> Leave）。
+相比 DetectionRecord 的每帧一条记录，数据量减少 99.8%。
+- **task_id**: 关联的任务 ID。
+- **track_id**: 目标追踪 ID。
+- **event_type**: 事件类型 (`enter` / `leave`)。
+- **class_name**: 检测到的类别名称。
+- **confidence**: 检测置信度 (0-1)。
+- **box**: 检测框坐标，存储为 JSON 字符串。
+- **entered_at**: 目标进入时间。
+- **left_at**: 目标离开时间（leave 事件时填充）。
+- **duration_ms**: 目标持续时间（毫秒）。
+- **max_confidence**: 生命周期内最高置信度。
+- **avg_confidence**: 生命周期内平均置信度。
+- **update_count**: 更新次数。
 
 ### 3. 用户表 (User)
 基础登录信息。密码经过加密哈希处理（在 `auth.py` 中处理）。

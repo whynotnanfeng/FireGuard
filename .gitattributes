@@ -1,0 +1,19 @@
+# Normalize all text files to LF in the repository
+* text=auto eol=lf
+
+# Explicitly mark binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.bmp binary
+*.ico binary
+*.onnx binary
+*.pt binary
+*.pth binary
+*.pkl binary
+*.mp4 binary
+*.avi binary
+*.mkv binary
+*.hls binary
+*.m3u8 binary

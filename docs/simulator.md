@@ -225,23 +225,24 @@ BPP = 总码率(bps) / (宽 × 高 × 帧率)
 - 后端 `MediaServerManager` 启动时通过 `ServiceRegistry.get_simulator_ports()` 查询 Simulator 实际运行端口
 - 消除硬编码问题，支持多实例部署
 
-### 端口配置 (v1.9.7 更新)
+### 端口配置
 
 | 服务 | 端口 | 说明 |
 |---|---|---|
-| go2rtc RTSP | 8554 | RTSP 推流/拉流端口 |
-| go2rtc WebRTC | 8555/tcp | WebRTC 低延迟播放端口 |
-| go2rtc API | 1984 | REST API 管理端口 |
+| MediaMTX RTSP | 8554 | RTSP 推流/拉流端口 |
+| MediaMTX HLS | 8888 | HLS 播放端口 |
+| MediaMTX WebRTC | 8889 | WebRTC 低延迟播放端口 |
+| MediaMTX API | 9997 | REST API 管理端口 |
 | Simulator | 8001 | 模拟器 Web 服务端口 |
 
-> **重要**：v1.9.7 之前 RTSP 和 WebRTC 共用 8555 端口，导致 FFmpeg 推流失败（Broken pipe）。现已分离为 8554 (RTSP) 和 8555 (WebRTC)。
+> **重要**：v2.0.0 起从 go2rtc 迁移至 MediaMTX v1.18.1，RTSP/HLS/WebRTC 端口完全分离，消除协议冲突。
 
 ### 依赖
 
 - Python 3.9+
 - FastAPI + Uvicorn
 - FFmpeg (内置)
-- go2rtc (内置, v1.9.12)
+- MediaMTX (内置, v1.18.1)
 
 ---
 

@@ -81,9 +81,17 @@ def build_hls_encode_args(encoder: str, is_hw: bool, fps: float = 15.0, hls_time
             "-bf", "0",
         ]
         if "nvenc" in encoder:
-            args += ["-preset", "p1", "-tune", "ll", "-rc", "vbr", "-gpu", "0"]
+            args += [
+                "-preset", "p1",
+                "-tune", "ll",
+                "-rc", "cbr",
+                "-b:v", "2M",
+                "-maxrate", "2M",
+                "-bufsize", "2M",
+                "-gpu", "0",
+            ]
         elif "qsv" in encoder:
-            args += ["-preset", "veryfast"]
+            args += ["-preset", "veryfast", "-b:v", "3M"]
     else:
         args += [
             "-preset", "ultrafast",

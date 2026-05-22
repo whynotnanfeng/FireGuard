@@ -1,4 +1,4 @@
-# 项目概览：火灾监测系统 (FireGuard) v2.7.0 "Performance Optimization Edition"
+# 项目概览：火灾监测系统 (FireGuard) v2.9.0 "Storage Quota Extension & UI/UX Perfection Edition"
 
 ## 1. 愿景与目标
 

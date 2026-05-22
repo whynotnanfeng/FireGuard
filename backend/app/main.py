@@ -1,5 +1,5 @@
 import os
-# 【V1.4.6 终极净化】：在任何 OpenCV 导入前禁止其输出任何日志到 stderr
+# 禁止 OpenCV 输出日志到 stderr（必须在 cv2 import 前设置）
 # 此设置必须位于入口文件的最顶端
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
@@ -7,7 +7,7 @@ os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|threads;1"
 
 import cv2  # 确保环境变量设置后，系统的后续模块再去 import cv2
-# 【V1.4.7 性能优化】：主进程限制 OpenCV 线程
+# 主进程限制 OpenCV 线程数
 cv2.setNumThreads(1)
 import asyncio  # noqa: E402
 import json  # noqa: E402
@@ -23,6 +23,9 @@ from jose import JWTError  # noqa: E402
 from starlette.responses import Response  # noqa: E402
 from starlette.types import Scope  # noqa: E402
 from starlette import requests as starlette_requests  # noqa: E402
+from slowapi import _rate_limit_exceeded_handler  # noqa: E402
+from slowapi.errors import RateLimitExceeded  # noqa: E402
+from app.limiter import limiter  # noqa: E402
 
 class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope: Scope) -> Response:
@@ -91,7 +94,7 @@ from app.utils.clock_monitor import clock_monitor  # noqa: E402
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 【V2 优化】：启动前清理可能残留的孤儿进程 (针对 Windows 热重载优化)
+    # 启动前清理可能残留的孤儿进程 (Windows 热重载场景)
     import psutil
     current_pid = os.getpid()
     try:
@@ -126,9 +129,7 @@ async def lifespan(app: FastAPI):
     if hasattr(broker, 'set_loop'):
         broker.set_loop(asyncio.get_running_loop())
 
-    # [V3 修复]：移除 HIGH_PRIORITY_CLASS，避免饿死模拟器 FFmpeg 进程
-    # 推理 Worker 已是独立进程（不受 GIL），无需主进程抢占 CPU
-    # 开发环境下保持 NORMAL 优先级即可确保各进程公平调度
+    # 推理 Worker 是独立进程（不受 GIL），主进程保持 NORMAL 优先级即可
 
     create_db_and_tables()
     
@@ -143,16 +144,16 @@ async def lifespan(app: FastAPI):
     # 清理上一次非正常退出遗留的 fg_ 动态路径
     media_gateway.clear_all_proxies()
 
-    # [新增] 启动全局推理进程池 (以 1 个进程作为种子启动，后续根据任务量扩容)
+    # 启动全局推理进程池 (初始 1 个进程，后续按任务量扩容)
     stream_manager.start_inference_pool(worker_count=1)
     
     # 启动后台任务和监控器
     asyncio.create_task(task_runner.start())
     stream_manager.start_monitor()
     
-    logger.info("🔥 Fire Detection API started")
+    logger.info("Fire Detection API started")
     
-    # [V1.8.10] 优化心跳：频率降至 60s，并增加活跃指标监控
+    # 心跳监控：每 60s 输出一次活跃指标
     async def heartbeat():
         from app.services.task_runner import stream_manager
         while True:
@@ -170,7 +171,7 @@ async def lifespan(app: FastAPI):
     # --- Shutdown ---
     logger.info("Fireguard Backend shutting down...")
     
-    # [新增] 停止并清理推理池
+    # 停止并清理推理池
     stream_manager.stop_inference_pool()
     stream_manager.stop_monitor()
     
@@ -185,7 +186,7 @@ async def lifespan(app: FastAPI):
     # 停止时钟偏移监控
     clock_monitor.stop()
     
-    # [新增] 断开消息总线连接
+    # 断开消息总线连接
     await broker.disconnect()
     
     # 注销服务并关闭配置中心
@@ -193,20 +194,27 @@ async def lifespan(app: FastAPI):
     registry.unregister_service()
     registry.close()
     
-    # [新增] 停止内置 Redis
+    # 停止内置 Redis
     redis_server.stop()
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
+_is_production = config.FIREGUARD_MODE == "production"
+
 app = FastAPI(
     title="火灾目标检测系统",
     description="Fire Detection Platform API",
-    version="1.4.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
+    version="2.9.0",
+    docs_url=None if _is_production else "/api/docs",
+    redoc_url=None if _is_production else "/api/redoc",
+    openapi_url=None if _is_production else "/api/openapi.json",
     lifespan=lifespan,
 )
+
+# ── Rate Limiting ────────────────────────────────────────────────────────────
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 
@@ -214,8 +222,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=config.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
     max_age=config.CORS_MAX_AGE,
 )
 
@@ -237,9 +245,10 @@ app.mount("/api/results", StaticFiles(directory=str(config.RESULTS_DIR)), name="
 # --- RT Storage Mounting ---
 # --- Live HLS endpoint: 截断 m3u8 避免无限增长导致 hls.js 性能恶化 ---
 
-# 【性能优化】：m3u8 内容内存缓存，TTL 1 秒，减少高并发下的磁盘 I/O
+# 【性能优化】：m3u8 内容内存缓存，TTL 1 秒，最大 100 条，避免长期运行内存泄漏
 _m3u8_cache: dict[str, tuple[str, float]] = {}
-_M3U8_CACHE_TTL = 1.0  # 1 秒缓存
+_M3U8_CACHE_TTL = 1.0
+_M3U8_CACHE_MAX = 100
 
 
 @app.get("/api/streams/{task_id}/live.m3u8")
@@ -314,7 +323,10 @@ async def live_m3u8(
             result_lines.extend(seg)
         result = "\n".join(result_lines)
 
-    # 写入缓存
+    # 写入缓存，超过上限时清理最旧条目
+    if len(_m3u8_cache) >= _M3U8_CACHE_MAX:
+        oldest_key = min(_m3u8_cache, key=lambda k: _m3u8_cache[k][1])
+        del _m3u8_cache[oldest_key]
     _m3u8_cache[cache_key] = (result, now)
 
     return PlainTextResponse(result, media_type="application/vnd.apple.mpegurl")
@@ -329,7 +341,15 @@ app.mount("/storage", NoCacheStaticFiles(directory=str(config.VIDEO_STORAGE_DIR)
 # ── WebSocket: Notifications ──────────────────────────────────────────────────
 
 @app.websocket("/ws/notifications")
-async def websocket_notifications(websocket: WebSocket):
+async def websocket_notifications(websocket: WebSocket, token: str = Query(...)):
+    # Validate token before accepting connection
+    try:
+        from app.dependencies import decode_token
+        decode_token(token)
+    except Exception:
+        await websocket.close(code=4001, reason="Invalid or missing token")
+        return
+
     await notifier.connect(websocket)
     try:
         while True:
@@ -349,7 +369,7 @@ async def websocket_stream(
     task_id: str,
     token: str = Query(...),
 ):
-    # V10.1: ENSURE SCOPE SAFETY - Move crucial imports to top to avoid UnboundLocalError
+    # 在函数顶部导入，避免 UnboundLocalError
     from app.database import engine
     from app.models.task import Task
     from sqlmodel import Session
@@ -428,6 +448,12 @@ async def websocket_stream(
     finally:
         receive_task.cancel()
         send_task.cancel()
+        # 清空队列积压消息，避免内存残留
+        try:
+            while not q.empty():
+                q.get_nowait()
+        except Exception:
+            pass
         await broker.unsubscribe(channel, q)
         try:
             if websocket.client_state != WebSocketState.DISCONNECTED:
@@ -487,7 +513,7 @@ async def webrtc_proxy(request: starlette_requests.Request, stream: str = Query(
     except Exception as e:
         logger.error(f"[WebRTC Proxy] Error: {e}")
         return FastAPIResponse(
-            content=f'{{"error":"{str(e)}"}}',
+            content='{"error":"WebRTC signaling failed"}',
             status_code=502,
             media_type="application/json",
         )

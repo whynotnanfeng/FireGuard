@@ -50,6 +50,7 @@ frontend/.stylelintcache
 **/build/
 **/dist/
 **/*.egg-info/
+backend/.env
 
 # --- Project Data & Databases (Ignore all local state) ---
 data/
@@ -92,3 +93,6 @@ backend/test_*.py
 # --- Root HTML Design Proposals & Plans ---
 /*.html
 
+
+# Claude Code MCP config (contains secrets)
+.claude/mcp.json

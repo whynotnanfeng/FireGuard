@@ -21,26 +21,34 @@
 ├── App.vue                 # 根组件 (渲染全局配置与路由占位)
 ├── style.css               # 全局样式 (AntD 主题覆写与工具类)
 ├── router/
-│   └── index.ts            # 动态路由配置与权限守卫
+│   └── index.ts            # 路由配置与权限守卫 (/login, /, /monitor, /tasks, /models)
 ├── api/
 │   ├── request.ts          # Axios 统一拦截器 (处理 Token 与 401)
 │   ├── auth.ts             # 用户认证相关
 │   ├── tasks.ts            # 任务执行与状态查询
 │   └── models.ts           # 模型文件与标签映射管理
 ├── views/
-│   ├── Layout.vue          # 侧边栏布局 (火灾监测系统品牌展示)
+│   ├── Layout.vue          # 侧边栏布局 (火灾监测系统品牌展示, v1.3.1)
 │   ├── Login.vue           # 极简现代化登录页
 │   ├── TaskList.vue        # 任务列表 (集成搜索与状态筛选)
 │   ├── TaskCreate.vue      # 任务创建引导弹窗
 │   ├── ModelList.vue       # 模型库管理 (集成删除冲突保护)
+│   ├── MonitorDashboard.vue # 大屏监控看板 (v2.6.0, 多路自适应网格)
 │   └── ResultViewer.vue    # 核心结果查看页 (重绘 V2 布局)
 ├── components/
 │   ├── LabelMappingEditor.vue # 核心组件：模型标签可视化编辑器
+│   ├── DetectionConfig.vue    # 检测配置组件 (类别/阈值)
+│   ├── DetectionEventsPanel.vue # 事件驱动检测记录面板
 │   ├── TaskStatus.vue      # 任务状态 Badge 封装
-│   └── VideoPlayer.vue     # 基于 mpegts.js 的画框视频播放器
+│   ├── VideoPlayer.vue     # 基于 hls.js 的画框视频播放器 (双 URL HLS 架构)
+│   ├── WebRTCPlayer.vue    # WebRTC 低延迟播放器
+│   └── CustomPagination.vue # 自定义分页组件
 ├── stores/
 │   ├── auth.ts             # 用户登录信息与 Token
 │   └── task.ts             # 任务执行状态轮询
+├── utils/
+│   ├── logger.ts           # 前端日志工具
+│   └── diagLogger.ts       # 前端诊断日志工具 (上报至 /logs/diag)
 ```
 
 ## 核心设计规范
@@ -65,8 +73,9 @@
 - **UI 优化**: 移除了复杂的批量解析 Tab，保留直观的增删改表格。
 
 ### 视频结果回放 (VideoPlayer)
-- **实时支持**: 基于 HLS 架构的实时帧渲染。
+- **实时支持**: 基于 hls.js 的 HLS 架构实时帧渲染。
 - **文件播放**: 自动适配后台生成的 HLS 视频流。
+- **WebRTC 支持**: 通过 WebRTCPlayer 组件提供低延迟播放选项。
 
 ---
 

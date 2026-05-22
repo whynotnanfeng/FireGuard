@@ -325,7 +325,7 @@ paths:
                     f"[MediaServer] Starting MediaMTX on RTSP:{rtsp_port} API:{api_port}"
                 )
 
-                # V4.10: 端口冲突前先清理僵尸 MediaMTX 进程
+                # 端口冲突前先清理僵尸 MediaMTX 进程
                 if self._is_port_in_use(rtsp_port):
                     self._kill_orphaned_mediamtx()
 

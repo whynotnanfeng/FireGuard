@@ -1,5 +1,5 @@
 """
-V5.1: 服务端帧嵌入渲染 — 帧精确检测框对齐
+服务端帧嵌入渲染 — 帧精确检测框对齐
 
 AnnotatedHLSWriter + OverlayInjector 恢复，与 tracker/event_processor 共存。
 720p 输出 + 10fps 降低 CPU 负载，避免之前的卡顿问题。
@@ -36,6 +36,7 @@ class TaskPipelineManager:
         tracker_max_disappeared: int = 30,
         tracker_iou_threshold: float = 0.3,
         enable_annotated_stream: bool = True,
+        resume: bool = False,
     ):
         self.task_id = task_id
         self.output_dir = output_dir
@@ -63,6 +64,7 @@ class TaskPipelineManager:
                 height=height,
                 fps=fps,
                 channel="annotated",
+                resume=resume,
             )
 
         self._frame_count = 0
@@ -76,7 +78,7 @@ class TaskPipelineManager:
         if self.annotated_writer:
             self.annotated_writer.start()
         self._started = True
-        logger.info(f"[TaskPipeline-{self.task_id}] Started (V5.1 server-render mode)")
+        logger.info(f"[TaskPipeline-{self.task_id}] Started (server-render mode)")
 
     def inject_and_write(
         self,
@@ -128,6 +130,35 @@ class TaskPipelineManager:
         if not self._started:
             return
         self._started = False
+        self._flush_active_tracks()
         if self.annotated_writer:
             self.annotated_writer.stop()
         logger.info(f"[TaskPipeline-{self.task_id}] Stopped")
+
+    def _flush_active_tracks(self):
+        """停止时为所有活跃轨迹生成 LEAVE 事件，确保 ENTER 记录不会成为孤立记录"""
+        import time as _time
+
+        active_ids = list(self.tracker.tracks.keys())
+        if not active_ids:
+            return
+
+        now_ms = int(_time.time() * 1000)
+        for track_id in active_ids:
+            track = self.tracker.tracks[track_id]
+            event = TrackEvent(
+                track_id=track_id,
+                state=TrackState.LEAVE,
+                class_name=track.class_name,
+                box=track.last_box,
+                confidence=track.avg_confidence,
+                timestamp_ms=now_ms,
+                duration_ms=track.duration_ms,
+            )
+            self.event_processor.process_event(event)
+
+        self.tracker.tracks.clear()
+        logger.info(
+            f"[TaskPipeline-{self.task_id}] Flushed {len(active_ids)} "
+            f"active tracks on stop"
+        )

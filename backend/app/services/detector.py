@@ -1,6 +1,8 @@
 """
 Unified inference engine supporting:
   - ONNX .onnx via onnxruntime (YOLOv8 format)
+  - RT-DETR multi-modal (RGB-IR) models
+  - Multiple output format detection (YOLOv5/v8/RT-DETR)
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ class Detection:
         }
 
 
-# 鈹€鈹€ Model cache (avoid reloading on every task) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── Model cache (avoid reloading on every task) ──────────────────────────
 
 _model_cache: Dict[str, "Detector"] = {}
 
@@ -46,7 +48,7 @@ def get_detector(model_path: str, use_gpu: bool = False) -> "Detector":
     return _model_cache[cache_key]
 
 
-# 鈹€鈹€ Detector 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── Detector ─────────────────────────────────────────────────────────────
 
 
 class Detector:
@@ -65,7 +67,7 @@ class Detector:
         self._diag_counter = 0
         self._load(model_path)
 
-    # 鈹€鈹€ Loading 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # ── Loading ──────────────────────────────────────────────────────────
 
     def _load(self, path: str) -> None:
         if path.endswith(".onnx"):
@@ -80,12 +82,8 @@ class Detector:
             opts = ort.SessionOptions()
             opts.log_severity_level = 4
             opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            if self.use_gpu:
-                opts.enable_mem_pattern = True
-                opts.enable_mem_reuse = True
-            else:
-                opts.enable_mem_pattern = True
-                opts.enable_mem_reuse = True
+            opts.enable_mem_pattern = True
+            opts.enable_mem_reuse = True
             opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
 
             providers = self._get_providers(self.use_gpu)
@@ -272,7 +270,7 @@ class Detector:
             raise
         return ["CPUExecutionProvider"]
 
-    # 鈹€鈹€ Inference 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # ── Inference ────────────────────────────────────────────────────────
 
     def detect(
         self,
@@ -453,7 +451,7 @@ class Detector:
         pad_w = (size - new_w) // 2
         padded = np.full((size, size, 3), 114, dtype=np.uint8)
         padded[pad_h : pad_h + new_h, pad_w : pad_w + new_w] = resized
-        # BGR 鈫?RGB, normalize, NCHW
+        # BGR -> RGB, normalize, NCHW
         rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         tensor = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1))[np.newaxis])
         return tensor, ratio, (pad_w, pad_h)
@@ -583,6 +581,8 @@ class Detector:
                 boxes_for_nms = np.stack([x1, y1, bw, bh], axis=1)
 
             # NMS
+            # NMS IoU threshold 0.45: balance between suppressing overlapping boxes
+            # and keeping nearby but distinct detections (typical range 0.4-0.5)
             indices = cv2.dnn.NMSBoxes(
                 boxes_for_nms.tolist(), confidences.tolist(), conf_thresh, 0.45
             )
@@ -707,11 +707,11 @@ class Detector:
             )
         return detections
 
-    # 鈹€鈹€ Drawing helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # ── Drawing helpers ──────────────────────────────────────────────────
 
     @staticmethod
     def draw_boxes(image: np.ndarray, detections: List[Detection]) -> np.ndarray:
-        """Draw bounding boxes on image (in-place copy) with labels and confidence."""
+        """Draw bounding boxes on a copy of the image with labels and confidence."""
         img = image.copy()
         # BGR Colors
         colors = {

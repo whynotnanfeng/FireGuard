@@ -1,4 +1,5 @@
 import os
+from functools import cached_property
 from pathlib import Path
 from typing import List
 
@@ -23,7 +24,12 @@ class Config:
     # simulator:   Simulator mode (backend doesn't start MediaMTX)
     # development: Dev mode (backend uses simulator's MediaMTX ports 8555/9996)
     FIREGUARD_MODE: str = os.getenv("FIREGUARD_MODE", "development")
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "fire-detection-dev-secret-do-not-use-in-production")
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "")
+    if not SECRET_KEY:
+        import sys
+        print("[FATAL] SECRET_KEY environment variable is not set. Refusing to start with insecure defaults.", file=sys.stderr)
+        print("[FATAL] Set SECRET_KEY in backend/.env or as an environment variable.", file=sys.stderr)
+        sys.exit(1)
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
     MAX_CONCURRENT_TASKS: int = int(os.getenv("MAX_CONCURRENT_TASKS", "4"))
@@ -45,10 +51,10 @@ class Config:
 
     # --- [SECTION 3: DETECTION ENGINE] ---
     # 推理 FPS 上限。0 表示不限。
-    # V3.9: 改为自适应调度，此处仅作为硬上限。默认 15（与源帧率对齐）。
+    # 自适应调度硬上限，默认 15（与源帧率对齐）
     DETECTION_FPS_STREAM: int = int(os.getenv("DETECTION_FPS_STREAM", "15"))
-    DETECTION_FPS_VIDEO: int = int(os.getenv("DETECTION_FPS_VIDEO", "0"))
-    DETECTION_FPS_IMAGE: int = int(os.getenv("DETECTION_FPS_IMAGE", "0"))
+    DETECTION_FPS_VIDEO: int = int(os.getenv("DETECTION_FPS_VIDEO", "5"))
+    DETECTION_FPS_IMAGE: int = int(os.getenv("DETECTION_FPS_IMAGE", "10"))
     
     # 【P0优化】：缩短批处理窗口从 200ms 到 100ms，减少检测框延迟
     DETECTION_BATCH_WINDOW_MS: int = int(os.getenv("DETECTION_BATCH_WINDOW_MS", "100"))
@@ -71,17 +77,15 @@ class Config:
     # FFmpeg Hardware Acceleration (auto/nvenc/qsv/amf/cpu)
     HW_ACCEL_DECODER: str = os.getenv("HW_ACCEL_DECODER", "auto")
 
-    @property
+    @cached_property
     def IS_WSL(self) -> bool:
-        """检测是否在 WSL/WSL2 环境中运行（结果缓存）。"""
-        if not hasattr(self, '_is_wsl'):
-            try:
-                with open("/proc/version", "r") as f:
-                    content = f.read().lower()
-                    self._is_wsl = "microsoft" in content or "wsl" in content
-            except (FileNotFoundError, PermissionError):
-                self._is_wsl = False
-        return self._is_wsl
+        """检测是否在 WSL/WSL2 环境中运行。"""
+        try:
+            with open("/proc/version", "r") as f:
+                content = f.read().lower()
+                return "microsoft" in content or "wsl" in content
+        except (FileNotFoundError, PermissionError):
+            return False
     
     @property
     def HW_ACCEL_PRIORITY(self) -> list[str] | None:
@@ -103,7 +107,7 @@ class Config:
     ]
 
     # --- [SECTION 6: MEDIA GATEWAY (PROPERTIES)] ---
-    @property
+    @cached_property
     def MEDIAMTX_API_PORT(self) -> int:
         """MediaMTX API 端口（默认 9997，development 模式下优先从注册表读取模拟器实际端口）"""
         try:
@@ -120,7 +124,7 @@ class Config:
                 pass
         return env_val
 
-    @property
+    @cached_property
     def MEDIAMTX_RTSP_PORT(self) -> int:
         """MediaMTX RTSP 端口（默认 8554，development 模式下优先从注册表读取模拟器实际端口）"""
         try:
@@ -160,7 +164,7 @@ class Config:
         """MediaMTX HLS 基础 URL"""
         return os.getenv("MEDIAMTX_HLS_URL", f"http://127.0.0.1:{self.MEDIAMTX_HLS_PORT}/")
 
-    @property
+    @cached_property
     def FFMPEG_PATH(self) -> str:
         env_path = os.getenv("FFMPEG_PATH")
         if env_path and os.path.exists(env_path):
@@ -172,7 +176,7 @@ class Config:
                 return str(path)
         return "ffmpeg"
 
-    @property
+    @cached_property
     def FFPROBE_PATH(self) -> str:
         env_path = os.getenv("FFPROBE_PATH")
         if env_path and os.path.exists(env_path):

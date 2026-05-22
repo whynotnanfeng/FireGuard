@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -10,6 +10,7 @@ from app.dependencies import (
     verify_password,
 )
 from app.models.user import User
+from app.limiter import limiter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -40,7 +41,8 @@ class UserResponse(BaseModel):
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/register", response_model=UserResponse, status_code=201)
-def register(body: RegisterRequest, session: Session = Depends(get_session)):
+@limiter.limit("5/minute")
+def register(request: Request, body: RegisterRequest, session: Session = Depends(get_session)):
     # Check username already taken
     existing = session.exec(select(User).where(User.username == body.username)).first()
     if existing:
@@ -69,7 +71,8 @@ import logging
 logger = logging.getLogger("app")
 
 @router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest, session: Session = Depends(get_session)):
+@limiter.limit("10/minute")
+def login(request: Request, body: LoginRequest, session: Session = Depends(get_session)):
     logger.debug(f"[Auth] Login attempt for user: {body.username}")
     try:
         user = session.exec(select(User).where(User.username == body.username)).first()
