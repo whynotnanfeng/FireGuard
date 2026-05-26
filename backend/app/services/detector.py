@@ -311,6 +311,21 @@ class Detector:
 
             # Run inference
             input_feed = {"rgb": rgb_tensor, "ir": ir_tensor}
+
+            # ---- 诊断：预处理张量统计（仅前5帧） ----
+            self._rgbir_preproc_diag = getattr(self, '_rgbir_preproc_diag', 0) + 1
+            if self._rgbir_preproc_diag <= 5:
+                logger.info(
+                    f"[DIAG-RGBIR-PRE] rgb_tensor: shape={rgb_tensor.shape} "
+                    f"min={float(rgb_tensor.min()):.4f} max={float(rgb_tensor.max()):.4f} "
+                    f"mean={float(rgb_tensor.mean()):.4f} std={float(rgb_tensor.std()):.4f}"
+                )
+                logger.info(
+                    f"[DIAG-RGBIR-PRE] ir_tensor: shape={ir_tensor.shape} "
+                    f"min={float(ir_tensor.min()):.4f} max={float(ir_tensor.max()):.4f} "
+                    f"mean={float(ir_tensor.mean()):.4f} std={float(ir_tensor.std()):.4f}"
+                )
+
             if self._use_io_binding:
                 io_binding = self.session.io_binding()
                 io_binding.bind_cpu_input("rgb", rgb_tensor)
@@ -322,16 +337,45 @@ class Detector:
             else:
                 outputs = self.session.run(None, input_feed)
 
+            # ---- 诊断：ONNX 输出元数据（仅前3帧） ----
+            if self._rgbir_preproc_diag <= 3:
+                out_infos = self.session.get_outputs()
+                for i, (out, meta) in enumerate(zip(outputs, out_infos)):
+                    logger.info(
+                        f"[DIAG-RGBIR-OUT] Output[{i}] name='{meta.name}' shape={out.shape} "
+                        f"dtype={out.dtype} min={float(out.min()):.6f} max={float(out.max()):.6f} "
+                        f"mean={float(out.mean()):.6f}"
+                    )
+                    # 打印前3个查询的原始值
+                    if out.ndim >= 2:
+                        flat = out.reshape(-1, out.shape[-1])
+                        for q in range(min(3, flat.shape[0])):
+                            logger.info(
+                                f"[DIAG-RGBIR-OUT]   query[{q}] = {flat[q].tolist()}"
+                            )
+
             # RT-DETR variant post-processing
-            # Guide says: Output 1: pred_scores (Batch, 300, 3), Output 2: pred_boxes (Batch, 300, 4)
-            # Usually Index 0 is pred_boxes, Index 1 is pred_scores or vice-versa.
-            # We check shapes to be sure.
-            pred_boxes, pred_scores = None, None
-            for out in outputs:
-                if out.shape[-1] == 4:
+            # Model has 3 outputs: pred_logits(300,4), pred_boxes(300,4), pred_ious(300,1)
+            # ONNX export applies sigmoid+drop_background → pred_scores(300,3)
+            # Identify by output NAME, not shape (pred_boxes and pred_scores both have dim=4 or 3)
+            out_names = [out.name for out in self.session.get_outputs()]
+            pred_boxes, pred_scores, pred_ious = None, None, None
+            for out, name in zip(outputs, out_names):
+                n = name.lower()
+                if "box" in n:
                     pred_boxes = out
-                if out.shape[-1] == 3:
-                    pred_scores = out  # 3 classes as per guide
+                elif "logit" in n or "score" in n:
+                    pred_scores = out
+                elif "iou" in n:
+                    pred_ious = out
+
+            # Fallback: shape-based identification if names don't match
+            if pred_boxes is None or pred_scores is None:
+                for out in outputs:
+                    if out.shape[-1] == 4 and pred_boxes is None:
+                        pred_boxes = out
+                    elif out.shape[-1] == 3 and pred_scores is None:
+                        pred_scores = out
 
             if pred_boxes is not None and pred_scores is not None:
                 return self._postprocess_rgbir(
@@ -343,10 +387,12 @@ class Detector:
                     pad,
                     conf,
                     label_mapping,
+                    pred_ious,
                 )
             else:
                 logger.error(
-                    f"[Detector] RGB-IR output shapes mismatch. Outputs: {[o.shape for o in outputs]}"
+                    f"[Detector] RGB-IR output shapes mismatch. "
+                    f"Outputs: {list(zip(out_names, [o.shape for o in outputs]))}"
                 )
                 return []
 
@@ -571,7 +617,7 @@ class Detector:
                 boxes_for_nms[:, 2] = boxes_xyxy[:, 2] - boxes_xyxy[:, 0]  # w = x2 - x1
                 boxes_for_nms[:, 3] = boxes_xyxy[:, 3] - boxes_xyxy[:, 1]  # h = y2 - y1
             else:
-                # cx, cy, w, h 鈫?x1,y1,x2,y2
+                # cx, cy, w, h -> x1,y1,x2,y2
                 cx, cy, bw, bh = pred[:, 0], pred[:, 1], pred[:, 2], pred[:, 3]
                 x1 = cx - bw / 2
                 y1 = cy - bh / 2
@@ -656,54 +702,112 @@ class Detector:
         pad: Tuple[int, int],
         conf_thresh: float,
         label_mapping: Optional[dict] = None,
+        pred_ious: Optional[np.ndarray] = None,
     ) -> List[Detection]:
-        """Post-process for RT-DETR variant (No NMS)."""
+        """Post-process for RGBIR RT-DETR model.
+
+        Training code reference (models/rgbir_net.py):
+          - pred_boxes: normalized cxcywh [0,1]
+          - pred_scores: sigmoid(logits)[..., :-1] (background removed)
+          - final_scores = pred_scores * sigmoid(pred_ious)
+          - cxcywh -> xyxy -> denormalize by (orig_w, orig_h)
+          - No NMS (DETR-style)
+        """
         if pred_boxes.ndim == 3:
             pred_boxes = pred_boxes[0]
         if pred_scores.ndim == 3:
             pred_scores = pred_scores[0]
+        if pred_ious is not None and pred_ious.ndim == 3:
+            pred_ious = pred_ious[0]
 
-        detections = []
+        # IoU-aware score fusion (matches training post_process)
+        if pred_ious is not None:
+            iou_scores = 1.0 / (1.0 + np.exp(-pred_ious))  # sigmoid(pred_ious)
+            if iou_scores.ndim == 2:
+                iou_scores = iou_scores.squeeze(-1)  # (300,1) -> (300,)
+            pred_scores = pred_scores * iou_scores[:, np.newaxis]
+
+        # ---- 诊断日志 ----
+        self._rgbir_diag_counter = getattr(self, '_rgbir_diag_counter', 0) + 1
+        if self._rgbir_diag_counter <= 5 or self._rgbir_diag_counter % 50 == 0:
+            _box_min = float(np.min(pred_boxes)) if pred_boxes.size > 0 else 0.0
+            _box_max = float(np.max(pred_boxes)) if pred_boxes.size > 0 else 0.0
+            _score_min = float(np.min(pred_scores)) if pred_scores.size > 0 else 0.0
+            _score_max = float(np.max(pred_scores)) if pred_scores.size > 0 else 0.0
+            _max_per_query = np.max(pred_scores, axis=1)
+            _high_conf_count = int(np.sum(_max_per_query >= conf_thresh))
+            _bins = [0, 0.01, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.50, 0.70, 1.01]
+            _hist, _ = np.histogram(_max_per_query, bins=_bins)
+            _hist_str = " ".join(f"{b}:{int(c)}" for b, c in zip(_bins[:-1], _hist))
+            logger.info(
+                f"[DIAG-RGBIR-POST] box_range=[{_box_min:.6f}, {_box_max:.6f}] "
+                f"score_range=[{_score_min:.6f}, {_score_max:.6f}] "
+                f"conf_thresh={conf_thresh} high_conf={_high_conf_count}/{len(pred_scores)} "
+                f"ratio={ratio:.4f} pad=({pad[0]},{pad[1]}) orig=({orig_w}x{orig_h})\n"
+                f"[DIAG-RGBIR-HIST] max_score分布: {_hist_str}"
+            )
+
         pad_w, pad_h = pad
+        detections: List[Detection] = []
 
+        # Per-query processing (no NMS — DETR-style set prediction)
+        max_scores = np.max(pred_scores, axis=1)  # (300,)
         for i in range(len(pred_scores)):
-            scores = pred_scores[i]
-            cls_idx = int(np.argmax(scores))
-            conf = float(scores[cls_idx])
+            conf = float(max_scores[i])
+            if conf < conf_thresh:
+                continue
 
-            if conf >= conf_thresh:
-                cx, cy, bw, bh = pred_boxes[i]
+            cls_idx = int(np.argmax(pred_scores[i]))
+            cx, cy, bw, bh = pred_boxes[i]
 
-                # Inverse Normalization (to 640x640 scale)
-                # x_center = cx * 640
-                # x_min = (x_center - half_w - pad_x) / ratio
-                bx1 = int(((cx - bw / 2) * self.INPUT_SIZE - pad_w) / ratio)
-                by1 = int(((cy - bh / 2) * self.INPUT_SIZE - pad_h) / ratio)
-                bx2 = int(((cx + bw / 2) * self.INPUT_SIZE - pad_w) / ratio)
-                by2 = int(((cy + bh / 2) * self.INPUT_SIZE - pad_h) / ratio)
+            # cxcywh -> xyxy in 640x640 letterboxed space
+            x1 = cx - bw / 2.0
+            y1 = cy - bh / 2.0
+            x2 = cx + bw / 2.0
+            y2 = cy + bh / 2.0
 
-                # Clamp
-                bx1, by1 = max(0, bx1), max(0, by1)
-                bx2, by2 = min(orig_w, bx2), min(orig_h, by2)
+            # Inverse letterbox to original image space
+            bx1 = (x1 * self.INPUT_SIZE - pad_w) / ratio
+            by1 = (y1 * self.INPUT_SIZE - pad_h) / ratio
+            bx2 = (x2 * self.INPUT_SIZE - pad_w) / ratio
+            by2 = (y2 * self.INPUT_SIZE - pad_h) / ratio
 
-                # Mapping
-                cls_name = f"Class {cls_idx}"
-                if label_mapping:
-                    cls_name = label_mapping.get(
-                        cls_idx, label_mapping.get(str(cls_idx), cls_name)
-                    )
-                elif cls_idx < len(self.class_names):
-                    cls_name = self.class_names[cls_idx]
-
-                detections.append(
-                    Detection(
-                        box=[bx1, by1, bx2, by2], confidence=conf, class_name=cls_name
-                    )
+            # ---- 诊断日志 ----
+            if self._rgbir_diag_counter <= 5 and i < 3:
+                logger.info(
+                    f"[DIAG-RGBIR-BOX] i={i} cxcywh=({cx:.4f},{cy:.4f},{bw:.4f},{bh:.4f}) "
+                    f"xyxy_640=({x1*640:.0f},{y1*640:.0f},{x2*640:.0f},{y2*640:.0f}) "
+                    f"orig=({bx1:.0f},{by1:.0f},{bx2:.0f},{by2:.0f}) "
+                    f"conf={conf:.4f} cls={cls_idx}"
                 )
 
-        if self._diag_counter % 100 == 0:
+            # Clamp
+            bx1, by1 = max(0, bx1), max(0, by1)
+            bx2, by2 = min(orig_w, bx2), min(orig_h, by2)
+
+            # Skip degenerate boxes
+            if bx2 <= bx1 or by2 <= by1:
+                continue
+
+            cls_name = f"Class {cls_idx}"
+            if label_mapping:
+                cls_name = label_mapping.get(
+                    cls_idx, label_mapping.get(str(cls_idx), cls_name)
+                )
+            elif cls_idx < len(self.class_names):
+                cls_name = self.class_names[cls_idx]
+
+            detections.append(
+                Detection(
+                    box=[int(bx1), int(by1), int(bx2), int(by2)],
+                    confidence=conf,
+                    class_name=cls_name,
+                )
+            )
+
+        if self._rgbir_diag_counter % 100 == 0:
             logger.debug(
-                f"[Detector] RGB-IR post-process success: {len(detections)} detections"
+                f"[Detector] RGB-IR post-process: {len(detections)} detections"
             )
         return detections
 

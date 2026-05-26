@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import queue
+
 import subprocess
 import threading
 import time
@@ -148,10 +149,12 @@ class AnnotatedHLSWriter:
                 "-preset", "p1",
                 "-tune", "ll",
                 "-rc", "cbr",
-                "-b:v", "2M",
-                "-maxrate", "2M",
-                "-bufsize", "2M",
+                "-b:v", "3M",           # 5.5: 从2M提升到3M，复杂场景无blocking artifacts
+                "-maxrate", "3M",
+                "-bufsize", "6M",        # 5.5: 2秒缓冲，应对场景突变
                 "-g", str(gop),
+                "-force_key_frames", "expr:gte(t,n_forced*1)",  # 5.4: 每秒强制关键帧，HLS分段对齐
+                "-sc_threshold", "0",    # 5.4: 禁用场景切换检测，避免随机关键帧
                 "-pix_fmt", "nv12",
                 "-bf", "0",
                 "-gpu", "0",
@@ -186,13 +189,14 @@ class AnnotatedHLSWriter:
         base_cmd += [
             "-fflags", "+genpts",
             "-avoid_negative_ts", "make_zero",
+            "-max_muxing_queue_size", "4096",  # 5.6: 避免muxing队列溢出导致花屏
             "-f", "hls",
             "-hls_time", str(hls_time),
             "-hls_list_size", "0",
             "-hls_flags", hls_flags,
             "-hls_segment_type", "mpegts",
             "-start_number", str(start_num),
-            "-hls_segment_filename", str(self.output_dir / "stream_annotated%d.ts"),
+            "-hls_segment_filename", str(self.output_dir / f"stream_{self.channel}%d.ts"),
             str(self.m3u8_path),
         ]
         
@@ -266,6 +270,30 @@ class AnnotatedHLSWriter:
                 pass
             self._log_file = None
 
+    def _write_frame_safe(self, frame_bytes: bytes, timeout: float = 0.08) -> bool:
+        """带超时的帧写入。FFmpeg阻塞时丢帧保持实时性。
+
+        使用线程+超时检测管道可写性，超时则丢弃当前帧。
+        这是从架构层面解决卡顿/撕裂的关键：避免 write() 永久阻塞。
+        注意：不使用 select()，因为 Windows 不支持对管道使用 select()。
+        """
+        if self.process is None or self.process.stdin is None:
+            return False
+        try:
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(self.process.stdin.write, frame_bytes)
+                try:
+                    future.result(timeout=timeout)
+                    return True
+                except FuturesTimeoutError:
+                    self._queue_drops += 1
+                    return False
+        except (BrokenPipeError, OSError):
+            self._consecutive_failures += 1
+            self._handle_crash()
+            return False
+
     def _write_loop(self):
         """
         逐帧写入 FFmpeg stdin。上游保证恒定帧率输入。
@@ -289,13 +317,14 @@ class AnnotatedHLSWriter:
                 if frame.shape != (self.height, self.width, 3):
                     frame = _resize_frame(frame, self.width, self.height)
                 write_start = time.monotonic()
-                self.process.stdin.write(frame.tobytes())
+                wrote = self._write_frame_safe(frame.tobytes())
                 write_elapsed = time.monotonic() - write_start
-                self._frame_count += 1
 
-                _write_times.append(write_elapsed)
-                if len(_write_times) > 50:
-                    _write_times.pop(0)
+                if wrote:
+                    self._frame_count += 1
+                    _write_times.append(write_elapsed)
+                    if len(_write_times) > 50:
+                        _write_times.pop(0)
 
                 now = time.monotonic()
                 if now - _last_diag_time >= 5.0:
@@ -324,10 +353,6 @@ class AnnotatedHLSWriter:
                     )
                     _write_times.clear()
 
-            except (BrokenPipeError, OSError) as e:
-                logger.warning(f"[AnnotatedHLSWriter] Pipe broken: {e}")
-                self._consecutive_failures += 1
-                self._handle_crash()
             except Exception as e:
                 logger.error(f"[AnnotatedHLSWriter] Write error: {e}")
     
@@ -386,7 +411,7 @@ class AnnotatedHLSWriter:
     def _cleanup_old_segments(self):
         """删除旧的分片和 playlist，避免残留 ENDLIST 影响 hls.js"""
         try:
-            for pattern in ["stream_annotated*.ts", "stream_annotated*.m3u8*"]:
+            for pattern in [f"stream_{self.channel}*.ts", f"stream_{self.channel}*.m3u8*"]:
                 for f in self.output_dir.glob(pattern):
                     try:
                         f.unlink()

@@ -48,6 +48,15 @@ system_router = APIRouter(tags=["system"])
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
+class TaskModelInfo(BaseModel):
+    model_id: str
+    model_name: Optional[str] = None
+    weight: float = 1.0
+    per_class_thresholds: Optional[dict] = None
+    enabled_classes: Optional[list] = None
+    order_index: int = 0
+
+
 class TaskResponse(BaseModel):
     id: str
     name: str
@@ -55,6 +64,7 @@ class TaskResponse(BaseModel):
     input_types: list
     model_id: str
     model_name: Optional[str] = None
+    task_models: Optional[List[TaskModelInfo]] = None
     source_type: str
     source_path: str
     description: str
@@ -94,6 +104,23 @@ def _to_response(task: Task, session: Session, models_map: dict[str, str] | None
             dm = session.get(DetectionModel, task.model_id)
             if dm:
                 model_name = dm.name
+    # 多模型信息
+    task_models_info = None
+    from app.models.task_model import TaskModel
+    tms = list(session.exec(select(TaskModel).where(TaskModel.task_id == task.id)).all())
+    if tms:
+        task_models_info = []
+        for tm in sorted(tms, key=lambda t: t.order_index):
+            tm_dm = session.get(DetectionModel, tm.model_id)
+            task_models_info.append(TaskModelInfo(
+                model_id=tm.model_id,
+                model_name=tm_dm.name if tm_dm else None,
+                weight=tm.weight,
+                per_class_thresholds=json.loads(tm.per_class_thresholds) if tm.per_class_thresholds else None,
+                enabled_classes=json.loads(tm.enabled_classes) if tm.enabled_classes else None,
+                order_index=tm.order_index,
+            ))
+
     return TaskResponse(
         id=task.id,
         name=task.name,
@@ -101,6 +128,7 @@ def _to_response(task: Task, session: Session, models_map: dict[str, str] | None
         input_types=json.loads(task.input_types),
         model_id=task.model_id,
         model_name=model_name,
+        task_models=task_models_info,
         source_type=task.source_type,
         source_path=task.source_path,
         description=task.description,
@@ -185,7 +213,7 @@ async def create_task(
     name: str = Form(...),
     task_type: str = Form(...),           # image | video | stream
     input_types: str = Form(...),         # JSON array
-    model_id: str = Form(...),
+    model_id: str = Form(default=""),     # 单模型ID（向后兼容）
     source_type: str = Form(...),         # upload | url | rtsp
     source_url: Optional[str] = Form(default=None),
     description: str = Form(default=""),
@@ -196,6 +224,9 @@ async def create_task(
     enabled_classes: Optional[str] = Form(default=None),
     threshold: Optional[float] = Form(default=None),
     category_thresholds: Optional[str] = Form(default=None),
+    # 多模型字段（可选）
+    model_ids: Optional[str] = Form(default=None),  # JSON: [{model_id, weight, enabled_classes, per_class_thresholds}]
+    fusion_config: Optional[str] = Form(default=None),  # JSON: {wbf_iou_threshold: 0.55}
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -223,17 +254,51 @@ async def create_task(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid input_types")
 
-    # Validate model belongs to user and supports input types
-    dm = session.get(DetectionModel, model_id)
-    if not dm or dm.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Model not found")
-    model_types = json.loads(dm.input_types)
-    for t in types_list:
-        if t not in model_types:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Selected model does not support input type '{t}'",
-            )
+    # 多模型支持：解析 model_ids 或回退到单 model_id
+    parsed_model_ids = None  # [{model_id, weight, enabled_classes, per_class_thresholds}]
+    if model_ids:
+        try:
+            parsed_model_ids = json.loads(model_ids)
+            assert isinstance(parsed_model_ids, list) and len(parsed_model_ids) > 0
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid model_ids format")
+
+    # Validate models belong to user and support input types
+    dm = None
+    if parsed_model_ids:
+        for mi in parsed_model_ids:
+            _dm = session.get(DetectionModel, mi["model_id"])
+            if not _dm or _dm.user_id != current_user.id:
+                raise HTTPException(status_code=404, detail=f"Model {mi['model_id']} not found")
+            if dm is None:
+                dm = _dm  # 第一个模型作为主模型
+    else:
+        if not model_id:
+            raise HTTPException(status_code=400, detail="model_id or model_ids required")
+        dm = session.get(DetectionModel, model_id)
+        if not dm or dm.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Model not found")
+    # 多模型时验证所有模型的 input_types 并集
+    if parsed_model_ids:
+        all_model_types: set = set()
+        for mi in parsed_model_ids:
+            _dm = session.get(DetectionModel, mi["model_id"])
+            if _dm:
+                all_model_types.update(json.loads(_dm.input_types))
+        for t in types_list:
+            if t not in all_model_types:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Selected models do not collectively support input type '{t}'",
+                )
+    else:
+        model_types = json.loads(dm.input_types)
+        for t in types_list:
+            if t not in model_types:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Selected model does not support input type '{t}'",
+                )
 
     # Process detection config from multiple Form fields
     detection_config = {}
@@ -267,9 +332,14 @@ async def create_task(
                 detection_config["categories"] = categories_list
 
     # Create task record
+    # 多模型时 model_id 使用第一个模型（向后兼容），fusion_config 存入 detection_config
+    effective_model_id = model_id if not parsed_model_ids else parsed_model_ids[0]["model_id"]
+    if fusion_config and parsed_model_ids:
+        detection_config["fusion_config"] = json.loads(fusion_config)
+
     task = Task(
         user_id=current_user.id,
-        model_id=model_id,
+        model_id=effective_model_id,
         name=name,
         task_type=task_type,
         input_types=json.dumps(types_list),
@@ -282,6 +352,22 @@ async def create_task(
     session.add(task)
     session.commit()
     session.refresh(task)
+
+    # 多模型：创建 TaskModel 关联记录
+    if parsed_model_ids:
+        from app.models.task_model import TaskModel
+        for idx, mi in enumerate(parsed_model_ids):
+            tm = TaskModel(
+                task_id=task.id,
+                model_id=mi["model_id"],
+                weight=mi.get("weight", 1.0),
+                per_class_thresholds=json.dumps(mi.get("per_class_thresholds", {})),
+                enabled_classes=json.dumps(mi.get("enabled_classes", [])),
+                order_index=idx,
+            )
+            session.add(tm)
+        session.commit()
+        logger.info(f"[Tasks] Created {len(parsed_model_ids)} TaskModel records for task {task.id}")
 
     # Handle source
     try:
@@ -506,8 +592,10 @@ async def delete_task(
     if result_dir.exists():
         shutil.rmtree(result_dir, ignore_errors=True)
 
-    # Delete detection records (批量删除，避免全量加载到内存)
+    # Delete detection records and task-model associations (批量删除，避免全量加载到内存)
     from sqlalchemy import delete as sa_delete
+    from app.models.task_model import TaskModel
+    session.exec(sa_delete(TaskModel).where(TaskModel.task_id == task_id))
     session.exec(sa_delete(DetectionRecord).where(DetectionRecord.task_id == task_id))
     session.exec(sa_delete(DetectionEvent).where(DetectionEvent.task_id == task_id))
 
@@ -583,16 +671,71 @@ async def execute_task(
 
     if task.task_type == "stream":
         from app.models.model import DetectionModel
-        dm = session.get(DetectionModel, task.model_id)
-        if not dm:
-            raise HTTPException(status_code=404, detail="Model not found")
-        
+        from app.models.task_model import TaskModel
+
+        # 多模型支持：优先从 task_models 表加载，回退到单 model_id
+        task_models = list(session.exec(
+            select(TaskModel).where(TaskModel.task_id == task.id)
+        ).all())
+
+        model_configs = None
+        fusion_config = None
+        dm = None
         mapping = None
-        if dm.label_config:
-            try:
-                mapping = json.loads(dm.label_config)
-            except Exception:
-                pass
+
+        if task_models:
+            # 多模型模式
+            model_configs = []
+            for tm in sorted(task_models, key=lambda t: t.order_index):
+                tm_dm = session.get(DetectionModel, tm.model_id)
+                if not tm_dm:
+                    raise HTTPException(status_code=404, detail=f"Model {tm.model_id} not found")
+                tm_mapping = None
+                if tm_dm.label_config:
+                    try:
+                        tm_mapping = json.loads(tm_dm.label_config)
+                    except Exception:
+                        pass
+                # 解析 per_class_config
+                per_class_config = {}
+                thresholds = json.loads(tm.per_class_thresholds) if tm.per_class_thresholds else {}
+                enabled = json.loads(tm.enabled_classes) if tm.enabled_classes else []
+                model_classes = {}
+                if tm_dm.label_config:
+                    model_classes = json.loads(tm_dm.label_config)
+                elif tm_dm.class_names:
+                    model_classes = {str(i): name for i, name in enumerate(json.loads(tm_dm.class_names))}
+                for cid, cname in model_classes.items():
+                    per_class_config[cname] = {
+                        "enabled": cid in enabled if enabled else True,
+                        "threshold": thresholds.get(cid, 0.6),
+                    }
+                model_input_types = json.loads(tm_dm.input_types) if tm_dm.input_types else ["rgb"]
+                model_configs.append({
+                    "model_id": tm.model_id,
+                    "model_path": tm_dm.file_path,
+                    "label_mapping": tm_mapping,
+                    "weight": tm.weight,
+                    "input_types": model_input_types,
+                    "is_rgbir": len(model_input_types) > 1 and "ir" in model_input_types,
+                    "per_class_config": per_class_config,
+                })
+            # 第一个模型作为主模型（兼容）
+            dm = session.get(DetectionModel, task_models[0].model_id)
+            mapping = model_configs[0]["label_mapping"]
+            # 从 detection_config 中提取 fusion_config
+            det_cfg = json.loads(task.detection_config) if task.detection_config else {}
+            fusion_config = det_cfg.get("fusion_config", {})
+        else:
+            # 单模型模式（向后兼容）
+            dm = session.get(DetectionModel, task.model_id)
+            if not dm:
+                raise HTTPException(status_code=404, detail="Model not found")
+            if dm.label_config:
+                try:
+                    mapping = json.loads(dm.label_config)
+                except Exception:
+                    pass
 
         # V12: 强制冷启动 - 先停止旧流（如有），保证资源干净
         old_stream = stream_manager.get_stream(task.id)
@@ -670,12 +813,16 @@ async def execute_task(
 
         # V12: 在线程池中启动流，避免 start_grabbers() 的 RTSP 重试阻塞事件循环
         loop = asyncio.get_running_loop()
+        _mc = model_configs  # 闭包捕获
+        _fc = fusion_config
         future = loop.run_in_executor(
             None,
             lambda: stream_manager.start_stream(
                 task.id, task.source_path, dm.file_path, mapping,
                 is_resume=is_resume, use_gpu=task.use_gpu,
                 main_loop=loop,
+                model_configs=_mc,
+                fusion_config=_fc,
             ),
         )
         future.add_done_callback(
@@ -797,12 +944,16 @@ def get_result(
 
     result_dir = config.RESULTS_DIR / current_user.id / task_id
     filenames = sorted([f for f in os.listdir(result_dir) if f.startswith("annotated_")]) if os.path.exists(result_dir) else []
+    ir_filenames = sorted([f for f in os.listdir(result_dir) if f.startswith("ir_annotated_")]) if os.path.exists(result_dir) else []
     urls = [f"{base_url}/{f}" for f in filenames]
+    ir_urls = [f"{base_url}/{f}" for f in ir_filenames]
     return {
         "type": task.task_type,
         "url": urls[0] if urls else "",
         "urls": urls,
+        "ir_urls": ir_urls,
         "filenames": filenames,
+        "ir_filenames": ir_filenames,
         "detections": detections,
     }
 

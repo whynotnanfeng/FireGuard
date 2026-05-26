@@ -2,6 +2,42 @@
 
 All notable changes to the FireGuard project will be documented in this file.
 
+## [v2.10.0] - 2026-05-26 "Multi-Model Multimodal Fusion Edition"
+
+### 背景
+全面补齐图像、视频文件任务的多模型多模态检测支持，修复流媒体管线多模型结果路由丢失 bug，实现所有任务类型统一的多模型融合检测能力。
+
+### Added
+- **全任务类型多模型多模态支持 (Critical)**:
+  - 图像任务（`_process_image`）和视频文件任务（`_process_video`）现在完整支持多模型配置。
+  - 执行时自动从 `TaskModel` 关联表加载所有模型配置（`model_configs`），按模态（RGB/IR/DUAL）分派到对应模型。
+  - 集成 `FusionEngine` 三层融合管线：阈值过滤 → 光照感知自适应权重 → WBF 加权框融合。
+  - 多模态图像任务自动保存 IR 标注图（`ir_annotated_*` 前缀）。
+  - 多模态视频任务自动输出 IR 标注视频（`ir_annotated_*.webm`）。
+- **API 响应扩展 IR 标注资源**:
+  - `GET /tasks/{task_id}/result` 响应新增 `ir_urls` 和 `ir_filenames` 字段，用于前端展示 IR 标注结果。
+- **前端任务列表多模型展示**:
+  - `Task` 类型新增 `task_models: TaskModelInfo[]` 字段，与后端 `TaskResponse` 对齐。
+  - 任务列表"模型"列：单模型和多模型任务统一使用蓝色标签展示模型名称，视觉风格一致。
+
+### Fixed
+- **流媒体多模型 DUAL 推理结果路由丢失 (P0)**:
+  - `_dispatch_multi_model()` 中 RGBIR 模型的 DUAL payload（13 元素）未携带 `model_id`，导致推理结果绕过 per-model 缓冲区，融合引擎只能看到单模型结果。
+  - 修复：DUAL payload 追加 `mc["model_id"]`（14 元素），`inference_worker.py` 解包提取 `_model_id`。
+  - 修复后：RGBIR 和 RGB 模型结果各自路由到 `_latest_results_by_model`，融合引擎正确融合。
+- **IR 视频流滚动花屏 (P0)**:
+  - `FFmpegCapture` 缺少 `-vf scale` 滤镜，IR 源分辨率（如 900×720）与采集器期望分辨率（1920×1080）不一致，导致帧字节错位产生滚动撕裂。
+  - 修复：添加 `-vf scale={self.width}:{self.height}` 强制输出分辨率归一化。
+- **LightDetector EMA 冷启动导致图像任务暗光失效**:
+  - `_smoothed_lum` 初始值硬编码 128.0（中等光照），首帧 EMA 混合后亮度被拉高至 ~93（实际 10），远超阈值 40，暗光图片下 LightDetector 永远不触发。
+  - 修复：首帧直接使用实际亮度（`_smoothed_lum = raw_lum`），后续帧走 EMA 平滑。图像任务单帧即准确，视频任务首帧基线更准。
+- **LightDetector 每帧计算 cv2.cvtColor 性能浪费**:
+  - 光照变化不频繁，但每帧都执行 `cv2.cvtColor` 转灰度计算亮度。
+  - 优化：新增 `COMPUTE_INTERVAL = 20`，每 20 帧计算一次光照，中间帧复用缓存结果。
+- **推理 Worker 缓存 Key 不一致导致多模型 Worker 未命中**:
+  - `ensure_model_workers()` 使用 `_infer_use_gpu_from_configs()`（始终 True）生成 cache key，但 `get_model_queue()` 使用调用方传入的 `use_gpu`（可能为 False），导致 key 不匹配、Worker 未命中。
+  - 修复：`get_model_queue()` 统一使用 `_infer_use_gpu_from_configs([])` 推断 GPU 状态，与 `ensure_model_workers()` 一致。
+
 ## [v2.9.0] - 2026-05-20 "Storage Quota Extension & UI/UX Perfection Edition"
 
 ### 背景

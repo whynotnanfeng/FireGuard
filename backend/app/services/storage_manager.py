@@ -17,12 +17,11 @@ logger = logging.getLogger(__name__)
 
 class DirectHLSWriter:
     """
-    FFmpeg HLS 录制器（wall clock时间戳 + 三级编码降级）。
+    FFmpeg HLS 录制器（wall clock时间戳 + 二级编码降级）。
 
     编码降级策略：
     - Level 0: -c:v copy (零编码，优先)
     - Level 1: -c:v h264_nvenc/qsv/amf (HW编码)
-    - V4.8: Level 2 (libx264) 已移除 — SW编码无法维持实时性能
     """
 
     @staticmethod
@@ -143,6 +142,22 @@ class DirectHLSWriter:
 
         return base_cmd
 
+    @staticmethod
+    def _is_rtsp_source_gone(log_path: Path) -> bool:
+        """检查FFmpeg日志末尾是否包含RTSP 404错误，表示源已断开。"""
+        try:
+            if not log_path.exists():
+                return False
+            # 读取最后2KB足够覆盖最后几行日志
+            with open(log_path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 2048))
+                tail = f.read().decode("utf-8", errors="replace")
+            return "404 Not Found" in tail
+        except Exception:
+            return False
+
     def start(self):
         if self._resume and self._is_resume:
             # 续存模式：保留旧分片，仅清除 ENDLIST 标记让 FFmpeg 继续追加
@@ -217,6 +232,15 @@ class DirectHLSWriter:
                         )
                         # 仅在异常退出后清理僵尸进程，正常启动时跳过
                         self._ensure_no_zombie_ffmpeg()
+
+                        # RTSP 源不存在（404）时跳过重试，源不会自动恢复
+                        if self._is_rtsp_source_gone(ffmpeg_log_path):
+                            logger.warning(
+                                f"[DirectHLSWriter] RTSP source gone (404) for {self.task_id}, "
+                                f"stopping daemon"
+                            )
+                            self.error_msg = "视频流源已断开（RTSP 404），录制停止"
+                            break
 
                         self._consecutive_failures += 1
 

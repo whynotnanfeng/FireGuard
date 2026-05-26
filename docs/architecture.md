@@ -1,4 +1,4 @@
-# 架构设计文档 (v2.9.0 服务端帧嵌入渲染版)
+# 架构设计文档 (v2.10.0 多模型融合检测版)
 
 本系统在 **v2.5.1** 版本中恢复服务端帧嵌入渲染（帧精确检测框对齐），通过 720p/10fps 降低编码负载消除卡顿。GPU 推理全链路打通（CUDAExecutionProvider），采集恢复加入指数退避。架构核心原则：解码/编码/推理/采集恢复各自独立，互不阻塞。
 
@@ -126,6 +126,36 @@ FFmpegCapture → _latest_frames (@15fps)
 - **CPU 利用率映射**：<50%→全速, 50-70%→75%, 70-85%→55%, >85%→保底 5fps。
 - **速率范围**：5fps (Frigate 默认) ~ source_fps (动态检测)。
 - **配置项**：`DETECTION_FPS_STREAM` 默认 15（与源帧率对齐），`detection_config.fps` 为用户期望上限。
+
+### 多模型融合检测架构 (v2.10.0 新增)
+
+所有任务类型（image/video/stream）统一支持多模型多模态检测，通过 `FusionEngine` 三层融合管线输出最终结果。
+
+**数据流（以流媒体为例）**：
+```
+_dispatch_multi_model()
+  ├── RGBIR 模型 ← [rgb_frame, ir_frame] (DUAL payload, 14元素, 含model_id)
+  ├── RGB 模型  ← rgb_frame (SharedMemory payload, 10元素, 含model_id)
+  └── IR 模型   ← ir_frame (SharedMemory payload, 10元素, 含model_id)
+        ↓
+inference_worker.py → 结果携带 model_id → task_runner.py 路由
+        ↓
+_latest_results_by_model[model_id] ← 每模型独立缓冲区
+        ↓
+FusionEngine.fuse(model_results, rgb_frame)
+  ├── 第一层: 阈值过滤 (每模型每类别)
+  ├── 第二层: LightDetector 光照感知自适应 (仅 RGB-only + RGBIR 混合时)
+  └── 第三层: WeightedBoxFusion (IoU聚类 + 加权合并)
+        ↓
+最终检测结果 → 绘制标注框 → HLS 输出
+```
+
+**图像/视频文件任务**：`_execute()` 从 `TaskModel` 表加载 `model_configs`，`_process_image()`/`_process_video()` 内按模态分派、同步收集结果、`FusionEngine.fuse()` 融合，同时输出 RGB 标注和 IR 标注。
+
+**关键设计**：
+- `ModelDetection` 数据类携带 `model_id`、`model_weight`、`input_types`、`is_rgbir`、`per_class_config`，贯穿融合管线。
+- `LightDetector` 仅在 RGB-only + RGBIR 模型混合时自动启用，暗光下提升 RGBIR 权重、抑制 RGB-only 权重。首帧直接使用实际亮度（无 EMA 冷启动），后续帧每 20 帧计算一次光照（EMA 防抖），兼顾图像任务单帧准确性和视频任务性能。
+- WBF 按同类别 IoU 聚类，加权平均框坐标，置信度取加权最大值。
 
 ### GPU 资源分配策略 (v2.3.0)
 

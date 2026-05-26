@@ -170,17 +170,19 @@ async def lifespan(app: FastAPI):
     
     # --- Shutdown ---
     logger.info("Fireguard Backend shutting down...")
-    
-    # 停止并清理推理池
+
+    # 1. 先停止所有活跃流（需要 MediaMTX 仍在运行才能正常注销路径）
+    stream_manager.stop_all_streams()
+
+    # 2. 停止推理池和监控
     stream_manager.stop_inference_pool()
     stream_manager.stop_monitor()
-    
-    # 清理当前正在运行的网关路径
+
+    # 3. 清理网关路径和资源
     media_gateway.clear_all_proxies()
-    # 释放 httpx 资源池
     media_gateway.close()
-    
-    # 停止内置 MediaMTX 网关
+
+    # 4. 停止内置 MediaMTX（此时所有流已清理完毕）
     media_server.stop()
     
     # 停止时钟偏移监控

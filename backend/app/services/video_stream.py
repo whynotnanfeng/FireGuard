@@ -31,7 +31,7 @@ import logging  # noqa: E402
 import threading  # noqa: E402
 import queue  # noqa: E402
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
-from typing import List, Optional  # noqa: E402
+from typing import Dict, List, Optional  # noqa: E402
 import numpy as np  # noqa: E402
 from app.config import config  # noqa: E402
 from app.utils.time import now_beijing  # noqa: E402
@@ -51,17 +51,46 @@ DETECTION_CONF_FLOOR = 0.35
 db_executor = ThreadPoolExecutor(max_workers=4)
 
 
+class DoubleBuffer:
+    """双缓冲：写入端和读取端各用一个缓冲区，原子交换。
+
+    消除 consumer/writer/dispatcher 三线程对同一把锁的竞争。
+    写入端调用 write() + swap()，读取端调用 read()，互不阻塞。
+    """
+
+    __slots__ = ("_buffers", "_write_idx", "_lock")
+
+    def __init__(self):
+        self._buffers = [None, None]
+        self._write_idx = 0
+        self._lock = threading.Lock()  # 仅保护 _write_idx 交换
+
+    def write(self, data):
+        """写入当前写缓冲区（只有写入端调用）"""
+        self._buffers[self._write_idx] = data
+
+    def swap(self):
+        """原子交换读写缓冲区"""
+        with self._lock:
+            self._write_idx = 1 - self._write_idx
+
+    def read(self):
+        """读取当前读缓冲区（只有读取端调用）"""
+        return self._buffers[1 - self._write_idx]
+
+
 class VideoStream:
     """
-    AI Analysis Worker with zero-copy HLS recording.
+    视频流 AI 分析与 HLS 录制 Worker。
 
     Architecture:
-    1. DirectHLSWriter (ffmpeg -c:v copy) handles video recording independently
-    2. This class only grabs frames for AI inference
-    3. Detection results are pushed to task_message_queues for WebSocket streaming
-    4. Status updates broadcast via notifier
+    1. TaskPipelineManager + AnnotatedHLSWriter 处理标注帧 HLS 录制
+    2. DirectHLSWriter (ffmpeg -c:v copy) 处理原始视频 HLS 录制
+    3. 本类负责帧采集、推理调度、检测结果分发
+    4. 检测结果通过 broker (Redis/InMemory pub/sub) 推送到 WebSocket
+    5. 状态更新通过 notifier 广播
 
-    States: connecting -> [retryx5] -> loading -> running / exception
+    States: pending -> connecting -> [retryx5] -> loading -> running -> draining / exception
     """
 
     MSG_CONNECTING = "connecting"
@@ -86,6 +115,8 @@ class VideoStream:
         token: object,
         label_mapping: Optional[dict] = None,
         use_gpu: bool = False,
+        model_configs: Optional[List[dict]] = None,
+        fusion_config: Optional[dict] = None,
     ):
         self.task_id = task_id
         self.source = source
@@ -131,11 +162,7 @@ class VideoStream:
         self._is_draining = False  # 优雅退出标志
         self._drain_done = threading.Event()  # drain 完成信号
 
-        # 跨线程重连信号，用于 _dispatch_single 触发流重建
-        self._force_reconnect = threading.Event()
-        self._reconnect_lock = threading.Lock()
-
-        # P0 修复：混合时间戳策略相关字段
+        # 混合时间戳策略相关字段
         self._frame_count = 0  # 累计帧计数
         self._fps_estimate = 15.0  # 源帧率（由 FFmpegCapture 启动后动态更新）
         self._last_pts_ms = 0.0  # 上次 PTS 值
@@ -149,14 +176,33 @@ class VideoStream:
         self.pipeline = None
         self._pipeline_initialized = False
 
+        # 多模型支持
+        self.model_configs: Optional[List[dict]] = model_configs
+        _mc = model_configs or []
+        self.is_multi_model = len(_mc) > 1
+        if self.is_multi_model:
+            from app.services.fusion_engine import FusionEngine
+            self._fusion_engine = FusionEngine(config=fusion_config or {})
+            # 每个模型的结果缓冲区 {model_id: [Detection, ...]}
+            self._latest_results_by_model: Dict[str, List[Detection]] = {
+                mc["model_id"]: [] for mc in _mc
+            }
+            self._results_by_model_lock = threading.Lock()
+            self._results_by_model_wall_time: Dict[str, float] = {
+                mc["model_id"]: 0.0 for mc in _mc
+            }
+            # 帧级同步：记录每个模型最新结果对应的帧时间戳
+            self._results_by_model_frame_ts: Dict[str, float] = {
+                mc["model_id"]: 0.0 for mc in _mc
+            }
+        else:
+            self._fusion_engine = None
+            self._latest_results_by_model = {}
+            self._results_by_model_lock = threading.Lock()
+            self._results_by_model_wall_time = {}
+
         # 判断是否为多模态 (判断传入的源是否有分号或列表长度 >= 2)
         self.is_multimodal = len(self.sources) >= 2
-
-        # 只有多模态才初始化对齐缓冲区
-        if self.is_multimodal:
-            from app.services.alignment import RGBTAlignmentBuffer
-
-            self.alignment_buffer = RGBTAlignmentBuffer(max_tolerance_sec=0.05)
 
     def _get_task_session(self):
         """Context manager yielding (session, task) for DB operations."""
@@ -180,14 +226,17 @@ class VideoStream:
             from app.services.task_pipeline_manager import TaskPipelineManager
             from app.config import config
 
-            width = 1280
-            height = 720
             fps = self.detection_config.get("fps", 15) if self.detection_config else 15
             _hls_fps = 10.0  # 10fps 标注输出, 大幅降低编码 CPU
 
+            # 关键：标注流分辨率必须与 _frame_buffer 中的帧分辨率一致（1280x720）
+            # 否则 FFmpeg 收到的 rawvideo 字节数与预期不符，导致花屏
+            width = 1280
+            height = 720
+
             logger.info(
                 f"[VideoStream] Pipeline init: task_id={self.task_id}, "
-                f"resume={self._is_resuming}"
+                f"resume={self._is_resuming}, resolution={width}x{height}"
             )
             self.pipeline = TaskPipelineManager(
                 task_id=self.task_id,
@@ -196,6 +245,7 @@ class VideoStream:
                 height=height,
                 fps=_hls_fps,
                 enable_annotated_stream=True,
+                enable_ir_stream=self.is_multimodal,
                 resume=self._is_resuming,
             )
             self.pipeline.start()
@@ -243,13 +293,12 @@ class VideoStream:
             if wait_remaining > 0.001:
                 self._stop_event.wait(max(0.010, wait_remaining))
 
+            # 主源帧读取（Lock 保护）
             with self._lock:
                 frame = self._latest_frames[0]
-                frame_ts = (
-                    self._latest_frame_timestamps[0]
-                    if len(self._latest_frame_timestamps) > 0
-                    else 0.0
-                )
+                frame_ts = self._latest_frame_timestamps[0]
+            if frame is None:
+                frame_ts = 0.0
 
             if not self.pipeline or not self._pipeline_initialized:
                 next_write_time = time.time() + 0.01
@@ -257,17 +306,25 @@ class VideoStream:
 
             has_new_frame = frame is not None and frame_ts != last_written_ts
 
+            # 检测结果是否过期（超过1秒无新结果）
+            results_fresh = self._results_are_fresh(now)
+
             if has_new_frame:
                 repeat_count = 0
                 try:
-                    with self._latest_results_lock:
-                        detections = (
-                            list(self._latest_results) if self._latest_results else []
-                        )
+                    if results_fresh:
+                        detections = self._get_current_detections(frame)
+                    else:
+                        detections = []  # 结果过期：清空检测框，避免"粘滞"
+                    ir_frame = None
+                    if self.is_multimodal:
+                        with self._lock:
+                            ir_frame = self._latest_frames[1] if len(self._latest_frames) > 1 else None
                     self.pipeline.inject_and_write(
                         frame=frame.copy(),
                         detections=detections,
                         copy=False,
+                        ir_frame=ir_frame.copy() if ir_frame is not None else None,
                     )
                     last_written_ts = frame_ts
                     last_frame = frame
@@ -275,25 +332,30 @@ class VideoStream:
                 except Exception as e:
                     logger.error(f"[VideoStream] HLS writer error: {e}")
 
-            elif last_frame is not None and repeat_count < 50:
+            elif last_frame is not None and repeat_count < 30:
                 repeat_count += 1
                 try:
-                    with self._latest_results_lock:
-                        detections = (
-                            list(self._latest_results) if self._latest_results else []
-                        )
+                    if results_fresh:
+                        detections = self._get_current_detections(last_frame)
+                    else:
+                        detections = []
+                    ir_frame = None
+                    if self.is_multimodal:
+                        with self._lock:
+                            ir_frame = self._latest_frames[1] if len(self._latest_frames) > 1 else None
                     self.pipeline.inject_and_write(
                         frame=last_frame.copy(),
                         detections=detections,
                         copy=False,
+                        ir_frame=ir_frame.copy() if ir_frame is not None else None,
                     )
                     writer_frame_count += 1
                 except Exception as e:
                     logger.error(f"[VideoStream] HLS writer repeat error: {e}")
 
-                if repeat_count == 50:
+                if repeat_count == 30:
                     logger.warning(
-                        f"[VideoStream] HLS writer starved: 50 repeats (5s) "
+                        f"[VideoStream] HLS writer starved: 30 repeats (3s) "
                         f"for {self.task_id}, last_new_ts={last_written_ts:.3f}s"
                     )
 
@@ -316,6 +378,55 @@ class VideoStream:
             f"[VideoStream] Source-rate HLS writer stopped for {self.task_id} "
             f"(total_frames={writer_frame_count})"
         )
+
+    def _results_are_fresh(self, now: float) -> bool:
+        """检测结果是否在有效期内（1秒内有新结果）。
+
+        兼容两种路径：多模型→_results_by_model_wall_time，多模态→_latest_results_wall_time
+        """
+        latest = 0.0
+        if self.is_multi_model:
+            with self._results_by_model_lock:
+                if self._results_by_model_wall_time:
+                    latest = max(self._results_by_model_wall_time.values())
+        # 回退：也检查单模型缓冲区（多模态 dispatch 路径更新此处）
+        with self._latest_results_lock:
+            latest = max(latest, self._latest_results_wall_time)
+        return (now - latest) < 1.0
+
+    def _get_current_detections(self, frame: np.ndarray) -> list[Detection]:
+        """获取当前检测结果：多模型时融合，单模型时直接返回。
+
+        兼容两种结果路由路径：
+        - 多模型 dispatch（携带 model_id）→ _latest_results_by_model
+        - 多模态 dispatch（无 model_id）→ _latest_results
+        """
+        if self.is_multi_model and self._fusion_engine is not None:
+            from app.services.fusion_engine import ModelDetection
+
+            model_results: list[ModelDetection] = []
+            with self._results_by_model_lock:
+                for mc in self.model_configs or []:
+                    mid = mc["model_id"]
+                    dets = list(self._latest_results_by_model.get(mid, []))
+                    model_results.append(ModelDetection(
+                        model_id=mid,
+                        model_weight=mc.get("weight", 1.0),
+                        detections=dets,
+                        input_types=mc.get("input_types", ["rgb"]),
+                        is_rgbir=mc.get("is_rgbir", False),
+                        per_class_config=mc.get("per_class_config", {}),
+                    ))
+            fused = self._fusion_engine.fuse(model_results, rgb_frame=frame)
+            # 回退：多模型融合无结果时，检查单模型缓冲区（多模态 dispatch 路径）
+            if not fused:
+                with self._latest_results_lock:
+                    if self._latest_results:
+                        return list(self._latest_results)
+            return fused
+        else:
+            with self._latest_results_lock:
+                return list(self._latest_results) if self._latest_results else []
 
     def _preload_resolution(self):
         try:
@@ -600,8 +711,16 @@ class VideoStream:
                 f"subscribers={shared_g.subscriber_count})"
             )
 
-        # [新增] 根据模态类型，启动不同的投递线程
-        if self.is_multimodal:
+        # [新增] 根据模态和模型数量，启动不同的投递线程
+        if self.is_multi_model:
+            t_dispatch = threading.Thread(
+                target=self._dispatch_multi_model, daemon=True
+            )
+            logger.info(
+                f"[VideoStream] Multi-model dispatch thread started for {self.task_id} "
+                f"({len(self.model_configs or [])} models)"
+            )
+        elif self.is_multimodal:
             t_dispatch = threading.Thread(
                 target=self._alignment_and_dispatch_dual, daemon=True
             )
@@ -860,20 +979,21 @@ class VideoStream:
                 self._stop_event.wait(wait_ms / 1000.0)
                 continue
 
-            # 时间戳预检：先读轻量级时间戳，只在变化后才拷贝帧
+            # 主源帧读取（Lock 保护）
             frame = None
             frame_timestamp = 0.0
             with self._lock:
-                if self._latest_frames[0] is not None:
-                    _ts = self._latest_frame_timestamps[0]
-                    if (
-                        _ts != last_dispatched_timestamp
-                        or last_dispatched_timestamp == 0
-                    ):
-                        frame = self._latest_frames[0].copy()
-                        frame_timestamp = _ts
-                    else:
-                        frame_timestamp = _ts  # 时间戳未变，记录当前值
+                _frame_ref = self._latest_frames[0]
+                _ts = self._latest_frame_timestamps[0]
+            if _frame_ref is not None:
+                if (
+                    _ts != last_dispatched_timestamp
+                    or last_dispatched_timestamp == 0
+                ):
+                    frame = _frame_ref.copy()
+                    frame_timestamp = _ts
+                else:
+                    frame_timestamp = _ts
 
             if frame is None:
                 # 无新帧时静默等待，SharedGrabber 独立恢复采集
@@ -882,9 +1002,6 @@ class VideoStream:
                 continue
 
             last_dispatched_timestamp = frame_timestamp
-
-            if self._force_reconnect.is_set():
-                self._force_reconnect.clear()
 
             try:
                 _encode_t0 = time.time()
@@ -1015,57 +1132,255 @@ class VideoStream:
                 self._stop_event.wait(0.05)
                 continue
 
-            pair = self.alignment_buffer.get_aligned_pair()
-            if pair:
-                frame_timestamp, f_rgb, f_ir = pair
+            # 直接从 _latest_frames 读取 RGB + IR（无对齐缓冲区）
+            with self._lock:
+                f_rgb = self._latest_frames[0]
+                f_ir = self._latest_frames[1] if len(self._latest_frames) > 1 else None
+                frame_timestamp = self._latest_frame_timestamps[0] if self._latest_frame_timestamps else 0.0
 
-                # 【P0 修复】：检测 timestamp 停滞，跳过重复投递
-                if (
-                    frame_timestamp == last_dispatched_timestamp
-                    and last_dispatched_timestamp > 0
-                ):
-                    stale_frame_count += 1
-                    if stale_frame_count == 100:
-                        logger.warning(
-                            f"[VideoStream] Dual-mode timestamp stagnation: "
-                            f"timestamp={frame_timestamp:.3f}s stale for {stale_frame_count} frames. Skipping."
-                        )
-                    self._stop_event.wait(0.05)
-                    continue
-                else:
-                    if stale_frame_count > 0:
-                        logger.info(
-                            f"[VideoStream] Dual-mode timestamp resumed: was stale for {stale_frame_count} frames."
-                        )
-                    stale_frame_count = 0
-                    last_dispatched_timestamp = frame_timestamp
-
-                # 【P0回滚】：多模态恢复 JPEG 编码传递
-                encode_params = [cv2.IMWRITE_JPEG_QUALITY, 75]
-                _, jpeg_rgb = cv2.imencode(".jpg", f_rgb, encode_params)
-                _, jpeg_ir = cv2.imencode(".jpg", f_ir, encode_params)
-
-                payload = (
-                    self.task_id,
-                    frame_timestamp,
-                    self.model_path,
-                    self.label_mapping,
-                    DETECTION_CONF_FLOOR,
-                    [jpeg_rgb.tobytes(), jpeg_ir.tobytes()],
-                    self.use_gpu,
-                )
-                try:
-                    stream_manager.global_inference_in_q.put_nowait(payload)
-                    last_detect_time = now
-                except queue.Full:
-                    if self._dispatch_count % 50 == 0:
-                        logger.warning(
-                            f"[VideoStream] Dual-mode inference queue full for {self.task_id}, "
-                            f"dropping frame (depth={current_queue_depth})"
-                        )
-                    pass
-            else:
+            if f_rgb is None or f_ir is None:
                 self._stop_event.wait(0.05)
+                continue
+
+            # timestamp 停滞检测
+            if (
+                frame_timestamp == last_dispatched_timestamp
+                and last_dispatched_timestamp > 0
+            ):
+                stale_frame_count += 1
+                if stale_frame_count == 100:
+                    logger.warning(
+                        f"[VideoStream] Dual-mode timestamp stagnation: "
+                        f"timestamp={frame_timestamp:.3f}s stale for {stale_frame_count} frames. Skipping."
+                    )
+                self._stop_event.wait(0.05)
+                continue
+            else:
+                if stale_frame_count > 0:
+                    logger.info(
+                        f"[VideoStream] Dual-mode timestamp resumed: was stale for {stale_frame_count} frames."
+                    )
+                stale_frame_count = 0
+                last_dispatched_timestamp = frame_timestamp
+
+            # SharedMemory 双帧零拷贝派发
+            try:
+                if not hasattr(self, '_rgb_ring') or self._rgb_ring is None:
+                    h_r, w_r = f_rgb.shape[:2]
+                    h_i, w_i = f_ir.shape[:2]
+                    from app.utils.shared_frame import SharedFrameRing
+                    self._rgb_ring = SharedFrameRing(
+                        n_buffers=3, shape=(h_r, w_r, 3),
+                        name_prefix=f"shm_rgb_{self.task_id}",
+                    )
+                    self._ir_ring = SharedFrameRing(
+                        n_buffers=3, shape=(h_i, w_i, 3),
+                        name_prefix=f"shm_ir_{self.task_id}",
+                    )
+                    logger.info(
+                        f"[VideoStream] Dual SharedMemory rings created for {self.task_id} "
+                        f"(rgb={w_r}x{h_r}, ir={w_i}x{h_i})"
+                    )
+
+                rgb_shm_name, rgb_shm_shape, rgb_shm_dtype, _ = self._rgb_ring.put(f_rgb)
+                ir_shm_name, ir_shm_shape, ir_shm_dtype, _ = self._ir_ring.put(f_ir)
+            except Exception as shm_err:
+                logger.error(f"[VideoStream] Dual SharedMemory error: {shm_err}")
+                self._stop_event.wait(0.5)
+                continue
+
+            payload = (
+                self.task_id,
+                frame_timestamp,
+                self.model_path,
+                self.label_mapping,
+                DETECTION_CONF_FLOOR,
+                "DUAL",                            # shm_name = 标记位
+                rgb_shm_shape, rgb_shm_dtype,       # RGB 元数据
+                self.use_gpu,
+                rgb_shm_name,                       # [9] RGB shm_name
+                ir_shm_name,                        # [10] IR shm_name
+                ir_shm_shape,                       # [11] IR shape
+                ir_shm_dtype,                       # [12] IR dtype
+            )
+            try:
+                stream_manager.global_inference_in_q.put_nowait(payload)
+                last_detect_time = now
+                self._dispatch_count = getattr(self, '_dispatch_count', 0) + 1
+                if self._dispatch_count == 1:
+                    logger.info(
+                        f"[VideoStream] Dual SharedMemory first dispatch OK for {self.task_id} "
+                        f"(ts={frame_timestamp:.3f}, rgb={f_rgb.shape}, ir={f_ir.shape})"
+                    )
+                if self._dispatch_count % 50 == 0:
+                    logger.info(
+                        f"[DIAG-DUAL-DISP] task={self.task_id} "
+                        f"dispatched={self._dispatch_count} "
+                        f"qdepth={current_queue_depth} "
+                        f"last_ts={frame_timestamp:.3f}s"
+                    )
+            except queue.Full:
+                if getattr(self, '_dispatch_count', 0) % 50 == 0:
+                    logger.warning(
+                        f"[VideoStream] Dual-mode inference queue full for {self.task_id}, "
+                        f"dropping frame (depth={current_queue_depth})"
+                    )
+
+    def _dispatch_multi_model(self):
+        """多模型统一派发线程：按模态分类派发，每个payload携带model_id。
+
+        模型分类：
+        - rgbir模型 → JPEG双帧编码（RGB+IR）
+        - rgb-only模型 → SharedMemory零拷贝（仅RGB帧）
+        - ir-only模型 → SharedMemory零拷贝（仅IR帧）
+        """
+        from app.services.task_runner import stream_manager
+
+        assert self.model_configs is not None
+        rgbir_configs = [mc for mc in self.model_configs if mc.get("is_rgbir")]
+        rgb_configs = [mc for mc in self.model_configs
+                       if not mc.get("is_rgbir") and "rgb" in mc.get("input_types", [])]
+        ir_configs = [mc for mc in self.model_configs
+                      if not mc.get("is_rgbir") and mc.get("input_types") == ["ir"]]
+
+        logger.info(
+            f"[VideoStream] Multi-model dispatch for {self.task_id}: "
+            f"rgbir={len(rgbir_configs)}, rgb={len(rgb_configs)}, ir={len(ir_configs)}"
+        )
+
+        last_dispatched_ts = 0.0
+        fps_target = (
+            self.detection_config.get("fps", config.DETECTION_FPS_STREAM)
+            if self.detection_config
+            else config.DETECTION_FPS_STREAM
+        )
+        min_interval = 1.0 / fps_target if fps_target > 0 else 0.0
+        last_detect_time = 0.0
+        dispatch_gap = 0.02  # 模型间错开20ms，避免瞬时队列过载
+
+        while not self._stop_event.is_set():
+            if self._is_draining:
+                break
+
+            now = time.time()
+            if (now - last_detect_time) < min_interval:
+                self._stop_event.wait(0.02)
+                continue
+
+            # 主源帧读取（Lock 保护）
+            with self._lock:
+                frame = self._latest_frames[0]
+                frame_ts = self._latest_frame_timestamps[0]
+            if frame is None:
+                self._stop_event.wait(0.05)
+                continue
+            if frame_ts == last_dispatched_ts and last_dispatched_ts > 0:
+                self._stop_event.wait(0.02)
+                continue
+            last_dispatched_ts = frame_ts
+
+            # 模态分类派发
+            try:
+                # 1. RGBIR模型：SharedMemory 双帧
+                if rgbir_configs and self.is_multimodal:
+                    ir_frame = self._get_secondary_frame(1)
+                    if ir_frame is not None:
+                        try:
+                            if not hasattr(self, '_rgb_ring') or self._rgb_ring is None:
+                                h_r, w_r = frame.shape[:2]
+                                h_i, w_i = ir_frame.shape[:2]
+                                from app.utils.shared_frame import SharedFrameRing
+                                self._rgb_ring = SharedFrameRing(
+                                    n_buffers=3, shape=(h_r, w_r, 3),
+                                    name_prefix=f"shm_rgb_{self.task_id}",
+                                )
+                                self._ir_ring = SharedFrameRing(
+                                    n_buffers=3, shape=(h_i, w_i, 3),
+                                    name_prefix=f"shm_ir_{self.task_id}",
+                                )
+                            rgb_n, rgb_s, rgb_d, _ = self._rgb_ring.put(frame)
+                            ir_n, ir_s, ir_d, _ = self._ir_ring.put(ir_frame)
+                        except Exception as shm_err:
+                            logger.error(f"[VideoStream] Multi-model dual SHM error: {shm_err}")
+                            continue
+                        for mc in rgbir_configs:
+                            payload = (
+                                self.task_id, frame_ts,
+                                mc["model_path"], mc["label_mapping"],
+                                DETECTION_CONF_FLOOR,
+                                "DUAL", rgb_s, rgb_d,
+                                self.use_gpu,
+                                rgb_n, ir_n, ir_s, ir_d,
+                                mc["model_id"],
+                            )
+                            # 路由到 per-model worker 队列（并行推理）
+                            model_q = stream_manager.get_model_queue(mc["model_path"], self.use_gpu)
+                            if model_q:
+                                model_q.put_nowait(payload)
+                            else:
+                                stream_manager.global_inference_in_q.put_nowait(payload)
+                            time.sleep(dispatch_gap)
+
+                # 2. RGB-only模型：SharedMemory
+                for mc in rgb_configs:
+                    self._dispatch_shared_frame(frame, frame_ts, mc)
+                    time.sleep(dispatch_gap)
+
+                # 3. IR-only模型：SharedMemory
+                if ir_configs and self.is_multimodal:
+                    ir_frame = self._get_secondary_frame(1)
+                    if ir_frame is not None:
+                        for mc in ir_configs:
+                            self._dispatch_shared_frame(ir_frame, frame_ts, mc)
+                            time.sleep(dispatch_gap)
+
+                last_detect_time = now
+            except queue.Full:
+                pass
+
+    def _get_secondary_frame(self, idx: int):
+        """获取副源帧（如IR），线程安全。"""
+        with self._lock:
+            return self._latest_frames[idx] if idx < len(self._latest_frames) else None
+
+    def _dispatch_shared_frame(self, frame, timestamp, model_config):
+        """单帧SharedMemory派发，携带model_id。"""
+        from app.services.task_runner import stream_manager
+
+        if self._frame_ring is None:
+            h, w = frame.shape[:2]
+            from app.utils.shared_frame import SharedFrameRing
+            for _retry in range(3):
+                try:
+                    self._frame_ring = SharedFrameRing(
+                        n_buffers=3, shape=(h, w, 3),
+                        name_prefix=f"shm_{self.task_id}",
+                    )
+                    break
+                except FileExistsError:
+                    import shutil, os
+                    _dir = f"/dev/shm/shm_{self.task_id}"
+                    if os.path.exists(_dir):
+                        shutil.rmtree(_dir, ignore_errors=True)
+            if self._frame_ring is None:
+                self._frame_ring = SharedFrameRing(
+                    n_buffers=3, shape=(h, w, 3),
+                    name_prefix=f"shm_{self.task_id}",
+                )
+        shm_name, shm_shape, shm_dtype, _ = self._frame_ring.put(frame)
+        payload = (
+            self.task_id, timestamp,
+            model_config["model_path"], model_config["label_mapping"],
+            DETECTION_CONF_FLOOR,
+            shm_name, shm_shape, shm_dtype,
+            self.use_gpu, model_config["model_id"],
+        )
+        # 路由到 per-model worker 队列（并行推理）
+        model_q = stream_manager.get_model_queue(model_config["model_path"], self.use_gpu)
+        if model_q:
+            model_q.put_nowait(payload)
+        else:
+            stream_manager.global_inference_in_q.put_nowait(payload)
 
     # 纯帧消费者 — 采集帧 + 写入缓冲区（原分辨率，供推理和 Canvas overlay 使用）
     def _shared_frame_consumer(self, shared_grabber, idx: int, source_url: str):
@@ -1075,41 +1390,59 @@ class VideoStream:
         last_diag = time.time()
 
         while not self._stop_event.is_set():
-            pts_ms = shared_grabber.latest_pts_ms
+            # 事件驱动：阻塞等待新帧到达，消除15ms轮询延迟和CPU浪费
+            frame, pts_ms = shared_grabber.latest_frame_and_pts(timeout=0.1)
+            if frame is None:
+                continue
             timestamp = pts_ms / 1000.0
             if timestamp == last_frame_ts:
-                self._stop_event.wait(0.015)
                 continue
 
-            frame = shared_grabber.latest_frame
-            if frame is not None:
-                frame = cv2.resize(
-                    frame, (1280, 720), interpolation=cv2.INTER_LINEAR
-                )  # 720p 降载
-                last_frame_ts = timestamp
-                _capture_wall_clock = time.time()
+            # frame 已由 latest_frame_and_pts 内部 copy，无需再次拷贝
+            frame = cv2.resize(
+                frame, (1280, 720), interpolation=cv2.INTER_LINEAR
+            )  # 720p 降载
+            last_frame_ts = timestamp
+            _capture_wall_clock = time.time()
+
+            if idx == 0:
+                # 主源：锁保护写入
+                with self._lock:
+                    self._latest_frames[0] = frame
+                    self._latest_frame_timestamps[0] = timestamp
+                    self._latest_frame_wall_clocks[0] = _capture_wall_clock
+            else:
+                # 副源（IR等）：保持原有锁保护
                 with self._lock:
                     self._latest_frames[idx] = frame
                     self._latest_frame_timestamps[idx] = timestamp
                     self._latest_frame_wall_clocks[idx] = _capture_wall_clock
-                    self._frame_wall_clock_map[timestamp] = (
-                        _capture_wall_clock  # PTS→墙钟
-                    )
-                    # 限制 map 大小，保留最近 300 条
-                    if len(self._frame_wall_clock_map) > 300:
-                        _oldest = sorted(self._frame_wall_clock_map.keys())[:-200]
-                        for _k in _oldest:
-                            del self._frame_wall_clock_map[_k]
-                    self._ret = True
-                    self._last_frame_time = _capture_wall_clock
-                if not self._cap_opened:
-                    self._cap_opened = True
-                if not self._history_marked:
-                    self._mark_has_history()
-                    self._history_marked = True
-                if not self.natural_width:
-                    h, w = frame.shape[:2]
-                    self._save_resolution_sync(w, h)
+
+            # grabber 首帧日志
+            if idx == 0 and not hasattr(self, '_grabber_feed_logged'):
+                self._grabber_feed_logged = True
+                logger.info(f"[VideoStream] Grabber started for {self.task_id}")
+
+            # 以下元数据仅消费者写入，用 _lock 保护跨线程可见性
+            with self._lock:
+                self._frame_wall_clock_map[timestamp] = (
+                    _capture_wall_clock  # PTS→墙钟
+                )
+                # 限制 map 大小，保留最近 300 条
+                if len(self._frame_wall_clock_map) > 300:
+                    _oldest = sorted(self._frame_wall_clock_map.keys())[:-200]
+                    for _k in _oldest:
+                        del self._frame_wall_clock_map[_k]
+                self._ret = True
+                self._last_frame_time = _capture_wall_clock
+            if not self._cap_opened:
+                self._cap_opened = True
+            if not self._history_marked:
+                self._mark_has_history()
+                self._history_marked = True
+            if not self.natural_width:
+                h, w = frame.shape[:2]
+                self._save_resolution_sync(w, h)
 
             if time.time() - last_diag >= 60:
                 logger.info(
@@ -1119,7 +1452,7 @@ class VideoStream:
                 )
                 last_diag = time.time()
 
-            self._stop_event.wait(0.015)
+            # 无需额外等待：latest_frame_and_pts(timeout=0.1) 已阻塞等待新帧
 
         grabber_registry.unsubscribe(source_url, self.task_id)
 
@@ -1148,9 +1481,8 @@ class VideoStream:
                     self._broadcast_status(self.MSG_ERROR, self._error_msg, force=True)
                     break
 
-                has_frame = False
-                with self._lock:
-                    has_frame = self._ret and self._latest_frames[0] is not None
+                # 检查是否有帧
+                has_frame = self._latest_frames[0] is not None
 
                 # 每 10 轮输出诊断 (≈ 每 5 秒)
                 if _diag_count % 10 == 0:

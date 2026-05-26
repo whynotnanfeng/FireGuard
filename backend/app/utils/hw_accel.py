@@ -85,9 +85,9 @@ def build_hls_encode_args(encoder: str, is_hw: bool, fps: float = 15.0, hls_time
                 "-preset", "p1",
                 "-tune", "ll",
                 "-rc", "cbr",
-                "-b:v", "2M",
-                "-maxrate", "2M",
-                "-bufsize", "2M",
+                "-b:v", "3M",       # 从2M提升到3M，复杂场景无blocking artifacts
+                "-maxrate", "3M",
+                "-bufsize", "6M",    # 2秒缓冲，应对场景突变
                 "-gpu", "0",
             ]
         elif "qsv" in encoder:

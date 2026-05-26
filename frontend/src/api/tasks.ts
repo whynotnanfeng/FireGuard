@@ -1,5 +1,14 @@
 import request from './request'
 
+export interface TaskModelInfo {
+  model_id: string
+  model_name: string | null
+  weight: number
+  per_class_thresholds: string | null
+  enabled_classes: string | null
+  order_index: number
+}
+
 export interface Task {
   id: string
   name: string
@@ -7,6 +16,7 @@ export interface Task {
   input_types: string[]
   model_id: string
   model_name: string | null
+  task_models: TaskModelInfo[] | null
   source_type: string
   source_path: string
   description: string

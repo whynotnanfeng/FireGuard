@@ -12,6 +12,8 @@ erDiagram
     USER ||--o{ TASK : "创建"
     DETECTION_MODEL ||--o{ TASK : "被引用"
     TASK ||--o{ RESULT : "产生"
+    TASK ||--o{ TASK_MODEL : "包含多个模型"
+    TASK_MODEL }o--|| DETECTION_MODEL : "引用"
     TASK ||--o{ DETECTION_RECORD : "产生"
     TASK ||--o{ DETECTION_EVENT : "产生"
 
@@ -60,6 +62,17 @@ erDiagram
         datetime session_start_time "本次会话开始时间 (v1.9.4)"
         datetime created_at
         datetime updated_at
+    }
+
+    TASK_MODEL {
+        string id PK
+        string task_id FK
+        string model_id FK
+        float weight "融合权重 (默认1.0)"
+        string per_class_thresholds "JSON: {class_id: threshold}"
+        string enabled_classes "JSON: [class_id, ...]"
+        int order_index "模型排序"
+        datetime created_at "创建时间"
     }
 
     DETECTION_RECORD {
@@ -113,6 +126,16 @@ erDiagram
 - **resolution_width / resolution_height**: 视频分辨率，用于检测框坐标映射。
 - **cumulative_running_seconds** (v1.9.4 新增): 累计运行秒数（不含停止期间），用于前端实时模式独立计时器计算直播时长。每次任务停止/异常时，将本次会话运行时间累加到此字段。
 - **session_start_time** (v1.9.4 新增): 本次会话开始时间（`initializing → running` 时记录），用于与 `cumulative_running_seconds` 配合计算当前实时运行时长。
+
+### 2.4 多模型关联表 (TaskModel) (v2.10.0 新增)
+记录任务与模型的多对多关联关系，支持一个任务配置多个检测模型。
+- **task_id**: 关联的任务 ID。
+- **model_id**: 关联的模型 ID。
+- **weight**: 该模型在融合时的权重（默认 1.0），用于 WBF 加权框融合。
+- **per_class_thresholds**: JSON 字符串，存储每类别的检测阈值覆盖（如 `{"0": 0.7, "1": 0.5}`）。
+- **enabled_classes**: JSON 字符串，存储该模型启用的类别 ID 列表（如 `["0", "1"]`）。
+- **order_index**: 模型排序索引，决定加载和展示顺序。
+- **created_at**: 记录创建时间。
 
 ### 2.5 检测记录表 (DetectionRecord)
 存储每次检测的结果（每帧一条记录）。

@@ -1,4 +1,4 @@
-# API 文档 (FireGuard v2.9.0)
+# API 文档 (FireGuard v2.10.0)
 
 ## 基础信息
 
@@ -83,6 +83,16 @@
       "input_types": ["rgb"],
       "model_id": "model-uuid",
       "model_name": "fire-detection-v1",
+      "task_models": [
+        {
+          "model_id": "model-uuid-1",
+          "model_name": "fire-detection-v1",
+          "weight": 1.0,
+          "per_class_thresholds": {"0": 0.7},
+          "enabled_classes": ["0", "1"],
+          "order_index": 0
+        }
+      ],
       "source_type": "rtsp",
       "source_path": "rtsp://...",
       "description": "正门监控",
@@ -101,11 +111,29 @@
   ]
 }
 ```
+- **Note**: `task_models` (v2.10.0 新增) 为多模型任务的关联模型列表，单模型任务时为 `null`。
+```
 
 ### 创建检测任务
 - **Method**: `POST /tasks`
 - **Success Status**: `201 Created`
-- **Request (form-data)**: `name`, `task_type`, `model_id`, `rgb_files`, `use_gpu` (optional, boolean, default `False`)
+- **Request (form-data)**:
+    - `name` (string, required): 任务名称
+    - `task_type` (string, required): `image` | `video` | `stream`
+    - `input_types` (string, required): JSON 数组，如 `["rgb"]` 或 `["rgb", "ir"]`
+    - `model_id` (string, optional): 单模型 ID（向后兼容，与 `model_ids` 二选一）
+    - `model_ids` (string, optional): JSON 数组，多模型配置（v2.10.0 新增）。格式：`[{"model_id": "uuid", "weight": 1.0, "enabled_classes": ["0","1"], "per_class_thresholds": {"0": 0.7}}]`
+    - `fusion_config` (string, optional): JSON 对象，融合引擎配置（v2.10.0 新增）。格式：`{"wbf_iou_threshold": 0.55}`
+    - `source_type` (string, required): `upload` | `url` | `rtsp`
+    - `source_url` (string, optional): 当 `source_type` 为 `url` 或 `rtsp` 时必填
+    - `description` (string, optional): 任务描述
+    - `use_gpu` (boolean, optional, default `False`): 是否使用 GPU 推理
+    - `rgb_files` (file, optional): RGB 图像/视频文件（`source_type=upload` 时）
+    - `ir_files` (file, optional): 红外图像/视频文件（多模态任务时）
+    - `enabled_classes` (string, optional): JSON 数组，启用的类别 ID 列表
+    - `threshold` (float, optional): 全局检测阈值
+    - `category_thresholds` (string, optional): JSON 对象，每类别阈值覆盖
+- **Note**: `model_id` 和 `model_ids` 至少提供一个。多模型任务自动创建 `TaskModel` 关联记录，融合配置存储在 `detection_config.fusion_config` 中。
 
 ### 检查 GPU 状态 [v1.9.0 新增]
 - **Method**: `GET /tasks/gpu/status`
@@ -184,6 +212,31 @@
 }
 ```
 
+### 获取任务检测结果
+- **Method**: `GET /tasks/{id}/result`
+- **Auth**: JWT Bearer Token
+- **Success Status**: `200 OK`
+- **Description**: 获取已完成任务的检测结果和标注文件。图像/视频任务返回标注文件 URL 和检测数据；流媒体任务返回 WebSocket URL。
+- **Response (图像/视频)**:
+```json
+{
+  "type": "image",
+  "url": "/api/results/user_id/task_id/annotated_img001.jpg",
+  "urls": ["/api/results/user_id/task_id/annotated_img001.jpg", "..."],
+  "ir_urls": ["/api/results/user_id/task_id/ir_annotated_img001.jpg", "..."],
+  "filenames": ["annotated_img001.jpg", "..."],
+  "ir_filenames": ["ir_annotated_img001.jpg", "..."],
+  "detections": { "annotated_img001.jpg": [{ "class_name": "fire", "confidence": 0.95, "box": [x1,y1,x2,y2] }] }
+}
+```
+- **Response (流媒体)**:
+```json
+{
+  "type": "stream",
+  "websocket_url": "ws://host/ws/stream/task_id"
+}
+```
+
 ### 获取任务快照 (Hot Start)
 - **Method**: `GET /tasks/{id}/snapshot`
 - **Auth**: JWT Bearer Token
@@ -200,7 +253,9 @@
   "has_history": true,
   "server_time": 1716200000000,
   "ntp_offset_ms": 0.0,
-  "ntp_synced": false
+  "ntp_avg_offset_ms": 0.0,
+  "ntp_synced": false,
+  "ntp_offset_stats": { "samples": 0, "min_ms": 0.0, "max_ms": 0.0, "avg_ms": 0.0 }
 }
 ```
 

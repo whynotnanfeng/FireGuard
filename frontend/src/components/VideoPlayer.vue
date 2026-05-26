@@ -119,7 +119,7 @@
             </a-button>
           </a-tooltip>
 
-          <a-tooltip :title="currentChannel === 'annotated' ? '切换到原始画面' : '切换到标注画面'">
+          <a-tooltip :title="currentChannel === 'annotated' ? '切换到IR标注流' : '切换到RGB标注流'">
             <a-button
               v-show="isDualStream"
               shape="circle"
@@ -563,7 +563,7 @@ function stopLiveTimeCounter() {
 }
 
 // Dual-channel support
-const currentChannel = ref<'annotated' | 'rgb' | 'ir'>('annotated')  // V5.1: 服务端渲染标注流
+const currentChannel = ref<'annotated' | 'rgb' | 'ir' | 'ir_annotated'>('annotated')  // V5.1: 服务端渲染标注流
 const currentTask = computed(() => taskStore.tasks.find(t => t.id === props.taskId))
 const isDualStream = computed(() => {
   return currentTask.value?.input_types?.includes('ir') || false
@@ -2394,7 +2394,7 @@ function toggleChannel() {
   timeCalibrationMs = 0;
   calibrationInitialized = false;
 
-  currentChannel.value = currentChannel.value === 'annotated' ? 'rgb' : 'annotated';
+  currentChannel.value = currentChannel.value === 'annotated' ? 'ir_annotated' : 'annotated';
 
   if (playbackMode.value === 'webrtc') {
     switchToHLS();
@@ -2425,7 +2425,7 @@ function toggleChannel() {
     }
   }, 1500);
   
-  message.success(`已切换至 ${currentChannel.value === 'rgb' ? '可见光' : '红外'} 画面`);
+  message.success(`已切换至 ${currentChannel.value === 'ir_annotated' ? 'IR标注流' : 'RGB标注流'}`);
   sendDebugLog('CHANNEL_SWAP', { channel: currentChannel.value, time: timeToRestore });
 }
 

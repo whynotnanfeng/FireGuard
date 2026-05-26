@@ -28,41 +28,78 @@
 
         <div class="form-section">
           <div class="section-title">模型配置</div>
-          <div class="form-row">
-            <a-form-item label="选择模型" name="model_id" class="form-col-3">
-              <a-select 
-                v-model:value="form.model_id" 
-                placeholder="请选择检测模型"
-                :loading="loadingModels"
-                @change="handleModelChange"
-                style="width: 100%"
-              >
-                <a-select-option 
-                  v-for="m in filteredModels" 
-                  :key="m.id" 
-                  :value="m.id" 
+
+          <!-- 多模型列表 -->
+          <div v-for="(sm, idx) in selectedModels" :key="idx" class="multi-model-row">
+            <div class="model-row-header">
+              <span class="model-row-label">模型 {{ idx + 1 }}</span>
+              <a-button v-if="selectedModels.length > 1" type="link" size="small" danger @click="removeModel(idx)">
+                移除
+              </a-button>
+            </div>
+            <div class="form-row">
+              <a-form-item label="选择模型" class="form-col-2">
+                <a-select
+                  v-model:value="sm.model_id"
+                  placeholder="请选择检测模型"
+                  :loading="loadingModels"
+                  @change="(val: string) => handleMultiModelChange(idx, val)"
+                  style="width: 100%"
                 >
-                  {{ m.name }} ({{ m.input_types.map(t => t.toUpperCase()).join(', ') }})
-                </a-select-option>
-              </a-select>
-              <div v-if="form.model_id" class="model-requirement-hint fade-in">
-                <span class="hint-label">模型要求输入类型:</span>
-                <a-tag v-for="t in form.input_types" :key="t" color="blue" class="requirement-tag">
-                  {{ t.toUpperCase() }}
-                </a-tag>
-              </div>
+                  <a-select-option
+                    v-for="m in filteredModels"
+                    :key="m.id"
+                    :value="m.id"
+                    :disabled="isModelSelectedByOther(m.id, idx)"
+                  >
+                    {{ m.name }} ({{ m.input_types.map((t: string) => t.toUpperCase()).join(', ') }})
+                  </a-select-option>
+                </a-select>
+              </a-form-item>
+              <a-form-item label="权重" class="form-col-1">
+                <a-slider v-model:value="sm.weight" :min="0.1" :max="3.0" :step="0.1" />
+              </a-form-item>
+            </div>
+            <div v-if="sm.model_id" class="model-requirement-hint fade-in">
+              <span class="hint-label">输入类型:</span>
+              <a-tag v-for="t in sm.input_types" :key="t" color="blue" class="requirement-tag">
+                {{ t.toUpperCase() }}
+              </a-tag>
+              <template v-if="selectedModels.length > 1">
+                <a-button size="small" style="margin-left: 12px" @click="configuringModelIndex = idx; showPerModelConfig = true">
+                  配置类别和阈值
+                </a-button>
+                <span class="config-summary">
+                  {{ sm.categories.filter(c => c.selected).length }}/{{ sm.categories.length }} 类别已启用
+                </span>
+              </template>
+            </div>
+          </div>
+
+          <a-button type="dashed" block @click="addModel" class="add-model-btn">
+            + 添加模型
+          </a-button>
+
+          <!-- 融合配置（多模型时显示） -->
+          <div v-if="selectedModels.length > 1" class="fusion-config-section">
+            <div class="config-header">
+              <span class="config-title">融合配置</span>
+            </div>
+            <a-form-item label="WBF IoU 阈值">
+              <a-slider v-model:value="fusionConfig.wbf_iou_threshold" :min="0.3" :max="0.8" :step="0.05" />
+              <div class="config-hint">同类别检测框 IoU 超过此值时融合（默认 0.55）</div>
             </a-form-item>
           </div>
-          
-          <div v-if="form.model_id" class="inference-device-section">
+
+          <div v-if="hasAnyModelSelected" class="inference-device-section">
             <a-form-item label="推理设备" class="device-item">
               <a-radio-group v-model:value="form.use_gpu">
                 <a-radio :value="false">CPU 推理</a-radio>
                 <a-radio :value="true" :disabled="!gpuAvailable && !gpuChecking">GPU 推理</a-radio>
               </a-radio-group>
-              <a-button 
-                size="small" 
-                @click="checkGpuStatus" 
+              <a-button
+                size="small"
+                @click="checkGpuStatus"
                 :loading="gpuChecking"
                 style="margin-left: 8px"
               >
@@ -75,7 +112,7 @@
             </a-form-item>
           </div>
           
-          <div v-if="form.model_id" class="detection-config-section">
+          <div v-if="selectedModels.length === 1 && selectedModels[0].model_id" class="detection-config-section">
             <div class="config-header">
               <span class="config-title">检测配置</span>
               <a-button size="small" @click="showDetectionConfig = true">
@@ -99,7 +136,7 @@
           <div class="section-title">数据来源</div>
           
           <!-- 模型未选时的占位 -->
-          <div v-if="!form.model_id" class="model-not-selected-placeholder">
+          <div v-if="!hasAnyModelSelected" class="model-not-selected-placeholder">
             <div class="placeholder-content">
               <InfoCircleOutlined class="icon" />
               <span>请先选择模型，系统将根据模型要求自动开放上传区域</span>
@@ -152,10 +189,20 @@
               </div>
             </template>
 
-            <a-form-item v-else label="资源地址" name="source_url">
-              <a-input 
-                v-model:value="form.source_url" 
-                :placeholder="sourceUrlPlaceholder"
+            <a-form-item v-else label="RGB 源地址" name="source_url">
+              <a-input
+                v-model:value="form.source_url"
+                :placeholder="hasIrModel ? 'RGB 视频流地址' : sourceUrlPlaceholder"
+              >
+                <template #prefix>
+                  <LinkOutlined style="color: var(--text-muted)" />
+                </template>
+              </a-input>
+            </a-form-item>
+            <a-form-item v-if="source_type !== 'upload' && hasIrModel" label="IR 源地址" name="source_url_ir">
+              <a-input
+                v-model:value="form.source_url_ir"
+                placeholder="IR 视频流地址"
               >
                 <template #prefix>
                   <LinkOutlined style="color: var(--text-muted)" />
@@ -185,6 +232,17 @@
        :initial-global-threshold="globalThreshold"
        @close="showDetectionConfig = false"
        @success="handleDetectionConfigSuccess"
+    />
+
+    <!-- 多模型：每模型类别配置 -->
+    <DetectionConfig
+      :task-id="''"
+       v-if="showPerModelConfig && configuringModelIndex >= 0"
+       :model-id="selectedModels[configuringModelIndex]?.model_id || ''"
+       :initial-categories="selectedModels[configuringModelIndex]?.categories || []"
+       :initial-global-threshold="selectedModels[configuringModelIndex]?.global_threshold || 0.6"
+       @close="showPerModelConfig = false"
+       @success="handlePerModelConfigSuccess"
     />
   </a-modal>
 </template>
@@ -221,8 +279,30 @@ const rgbFiles = ref<File[]>([])
 const irFiles = ref<File[]>([])
 
 const showDetectionConfig = ref(false)
+const showPerModelConfig = ref(false)
+const configuringModelIndex = ref<number>(-1)
 const categories = ref<Array<{ id: string; name: string; selected: boolean; threshold: number | null }>>([])
 const globalThreshold = ref<number>(0.6)
+
+// 多模型支持
+interface SelectedModel {
+  model_id: string
+  weight: number
+  input_types: string[]
+  categories: Array<{ id: string; name: string; selected: boolean; threshold: number | null }>
+  global_threshold: number
+}
+const selectedModels = ref<SelectedModel[]>([
+  { model_id: '', weight: 1.0, input_types: [], categories: [], global_threshold: 0.6 }
+])
+const fusionConfig = reactive({ wbf_iou_threshold: 0.55 })
+
+const hasIrModel = computed(() =>
+  selectedModels.value.some(sm => sm.input_types.includes('ir'))
+)
+const hasAnyModelSelected = computed(() =>
+  selectedModels.value.some(sm => sm.model_id !== '')
+)
 
 const selectedCategoriesCount = computed(() => {
   return categories.value.filter(c => c.selected).length
@@ -235,6 +315,7 @@ interface TaskForm {
   model_id: string
   source_type: 'upload' | 'url' | 'rtsp'
   source_url: string
+  source_url_ir: string
   description: string
   use_gpu: boolean
 }
@@ -246,6 +327,7 @@ const form = reactive<TaskForm>({
   model_id: '',
   source_type: 'upload',
   source_url: '',
+  source_url_ir: '',
   description: '',
   use_gpu: false
 })
@@ -325,9 +407,13 @@ const filteredModels = computed(() => {
 function handleTaskTypeChange() {
     form.model_id = ''
     form.source_url = ''
+    form.source_url_ir = ''
+    form.input_types = []
     rgbFiles.value = []
     irFiles.value = []
-    
+    selectedModels.value = [{ model_id: '', weight: 1.0, input_types: [], categories: [], global_threshold: 0.6 }]
+    categories.value = []
+
     if (form.task_type === 'stream') {
         form.source_type = 'rtsp'
     } else if (form.source_type === 'rtsp') {
@@ -337,6 +423,7 @@ function handleTaskTypeChange() {
 
 function handleSourceChange() {
     form.source_url = ''
+    form.source_url_ir = ''
     rgbFiles.value = []
     irFiles.value = []
 }
@@ -372,6 +459,64 @@ function handleModelChange(modelId: string) {
 
 function handleTypeChange() {
     // 移除原有的手动触发逻辑，改为由模型驱动
+}
+
+// ── 多模型函数 ──
+
+function addModel() {
+    selectedModels.value.push({
+        model_id: '', weight: 1.0, input_types: [], categories: [], global_threshold: 0.6
+    })
+}
+
+function removeModel(idx: number) {
+    selectedModels.value.splice(idx, 1)
+    syncInputTypes()
+    // 回到单模型时，同步 form.model_id 和类别配置
+    if (selectedModels.value.length === 1) {
+        const sm = selectedModels.value[0]
+        if (sm.model_id) {
+            form.model_id = sm.model_id
+            form.input_types = [...sm.input_types]
+            categories.value = [...sm.categories]
+            globalThreshold.value = sm.global_threshold
+        }
+    }
+}
+
+function isModelSelectedByOther(modelId: string, currentIdx: number): boolean {
+    return selectedModels.value.some((sm, i) => i !== currentIdx && sm.model_id === modelId)
+}
+
+function handleMultiModelChange(idx: number, modelId: string) {
+    const model = models.value.find(m => m.id === modelId)
+    if (!model) return
+    const sm = selectedModels.value[idx]
+    sm.input_types = [...model.input_types]
+    // 构建该模型的类别配置
+    let classList: Array<{ id: string; name: string }> = []
+    if (model.label_config && Object.values(model.label_config).length > 0) {
+        classList = Object.entries(model.label_config).map(([id, name]) => ({ id, name: name as string }))
+    } else if (model.class_names && model.class_names.length > 0) {
+        classList = model.class_names.map((name: string, i: number) => ({ id: String(i), name }))
+    }
+    if (classList.length === 0) classList = [{ id: 'default', name: '默认类别' }]
+    sm.categories = classList.map(cat => ({ ...cat, selected: true, threshold: null }))
+    sm.global_threshold = 0.6
+    // 同步到主 form（兼容单模型模式）
+    syncInputTypes()
+    if (selectedModels.value.length === 1) {
+        form.model_id = modelId
+        form.input_types = [...sm.input_types]
+        categories.value = [...sm.categories]
+        globalThreshold.value = sm.global_threshold
+    }
+}
+
+function syncInputTypes() {
+    const allTypes = new Set<string>()
+    selectedModels.value.forEach(sm => sm.input_types.forEach(t => allTypes.add(t)))
+    form.input_types = [...allTypes]
 }
 
 function triggerUpload(type: 'rgb'|'ir') {
@@ -432,38 +577,79 @@ async function submit() {
             message.warning('请上传 IR 文件')
             return
         }
+    } else if (form.source_type !== 'upload' && hasIrModel.value && !form.source_url_ir) {
+        message.warning('选中的模型包含 IR 输入，请提供 IR 源地址')
+        return
+    }
+
+    const validModels = selectedModels.value.filter(sm => sm.model_id)
+    if (validModels.length === 0) {
+        message.warning('请至少选择一个检测模型')
+        return
     }
 
     const fd = new FormData()
     fd.append('name', form.name)
     fd.append('task_type', form.task_type)
     fd.append('input_types', JSON.stringify(form.input_types))
-    fd.append('model_id', form.model_id)
     fd.append('source_type', form.source_type)
     fd.append('description', form.description)
     fd.append('use_gpu', String(form.use_gpu))
-    
-    const selectedCategoryIds = categories.value.filter(c => c.selected).map(c => c.id)
-    if (selectedCategoryIds.length > 0) {
-        fd.append('enabled_classes', JSON.stringify(selectedCategoryIds))
-    }
-    fd.append('threshold', String(globalThreshold.value))
-    
-    const categoryThresholds: Record<string, number> = {}
-    categories.value.forEach(cat => {
-        if (cat.selected && cat.threshold !== null) {
-            categoryThresholds[cat.id] = cat.threshold
+
+    if (validModels.length > 1) {
+        // 多模型模式：发送 model_ids + fusion_config
+        const modelIdsPayload = validModels.map(sm => {
+            const enabledClasses = sm.categories.filter(c => c.selected).map(c => c.id)
+            const perClassThresholds: Record<string, number> = {}
+            sm.categories.forEach(cat => {
+                if (cat.selected && cat.threshold !== null) {
+                    perClassThresholds[cat.id] = cat.threshold
+                }
+            })
+            return {
+                model_id: sm.model_id,
+                weight: sm.weight,
+                enabled_classes: enabledClasses,
+                per_class_thresholds: perClassThresholds,
+            }
+        })
+        fd.append('model_ids', JSON.stringify(modelIdsPayload))
+        fd.append('fusion_config', JSON.stringify(fusionConfig))
+        // 向后兼容：第一个模型作为主 model_id
+        fd.append('model_id', validModels[0].model_id)
+        fd.append('threshold', String(validModels[0].global_threshold))
+    } else {
+        // 单模型模式：从 selectedModels 派生，避免 form.model_id 不同步
+        const sm0 = validModels[0]
+        fd.append('model_id', sm0.model_id)
+        fd.append('threshold', String(sm0.global_threshold || globalThreshold.value))
+
+        const smCategories = sm0.categories.length > 0 ? sm0.categories : categories.value
+        const selectedCategoryIds = smCategories.filter(c => c.selected).map(c => c.id)
+        if (selectedCategoryIds.length > 0) {
+            fd.append('enabled_classes', JSON.stringify(selectedCategoryIds))
         }
-    })
-    if (Object.keys(categoryThresholds).length > 0) {
-        fd.append('category_thresholds', JSON.stringify(categoryThresholds))
+
+        const categoryThresholds: Record<string, number> = {}
+        smCategories.forEach(cat => {
+            if (cat.selected && cat.threshold !== null) {
+                categoryThresholds[cat.id] = cat.threshold
+            }
+        })
+        if (Object.keys(categoryThresholds).length > 0) {
+            fd.append('category_thresholds', JSON.stringify(categoryThresholds))
+        }
     }
 
     if (form.source_type === 'upload') {
         rgbFiles.value.forEach(f => fd.append('rgb_files', f))
         irFiles.value.forEach(f => fd.append('ir_files', f))
     } else {
-        fd.append('source_url', form.source_url)
+        // 有 IR 模型时，用分号拼接 RGB 和 IR 源地址
+        const url = hasIrModel.value && form.source_url_ir
+          ? `${form.source_url};${form.source_url_ir}`
+          : form.source_url
+        fd.append('source_url', url)
     }
 
     submitting.value = true
@@ -471,7 +657,8 @@ async function submit() {
         await taskStore.createTask(fd)
         message.success('任务创建成功')
         emit('success')
-    } catch(e) {
+    } catch(e: any) {
+        message.error('任务创建失败: ' + (e?.message || e?.detail || '未知错误'))
     } finally {
         submitting.value = false
     }
@@ -485,6 +672,19 @@ function handleDetectionConfigSuccess(config: any) {
         globalThreshold.value = config.globalThreshold
     }
     showDetectionConfig.value = false
+}
+
+function handlePerModelConfigSuccess(config: any) {
+    const idx = configuringModelIndex.value
+    if (idx < 0 || idx >= selectedModels.value.length) return
+    const sm = selectedModels.value[idx]
+    if (config.categories) {
+        sm.categories = config.categories
+    }
+    if (config.globalThreshold !== undefined) {
+        sm.global_threshold = config.globalThreshold
+    }
+    showPerModelConfig.value = false
 }
 </script>
 
@@ -517,6 +717,10 @@ function handleDetectionConfigSuccess(config: any) {
 
 .form-col-1 {
   flex: 1;
+}
+
+.form-col-2 {
+  flex: 2;
 }
 
 .form-col-3 {
@@ -712,6 +916,13 @@ function handleDetectionConfigSuccess(config: any) {
   display: flex;
   gap: 12px;
   align-items: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.model-row .config-summary {
+  display: inline;
+  margin-left: 8px;
   font-size: 12px;
   color: var(--text-secondary);
 }

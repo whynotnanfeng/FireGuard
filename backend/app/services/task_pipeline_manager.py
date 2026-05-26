@@ -36,6 +36,7 @@ class TaskPipelineManager:
         tracker_max_disappeared: int = 30,
         tracker_iou_threshold: float = 0.3,
         enable_annotated_stream: bool = True,
+        enable_ir_stream: bool = False,
         resume: bool = False,
     ):
         self.task_id = task_id
@@ -67,6 +68,18 @@ class TaskPipelineManager:
                 resume=resume,
             )
 
+        self.ir_writer: Optional[AnnotatedHLSWriter] = None
+        if enable_ir_stream:
+            self.ir_writer = AnnotatedHLSWriter(
+                task_id=task_id,
+                output_dir=output_dir,
+                width=width,
+                height=height,
+                fps=fps,
+                channel="ir_annotated",
+                resume=resume,
+            )
+
         self._frame_count = 0
         self._event_count = 0
         self._lock = threading.Lock()
@@ -77,8 +90,10 @@ class TaskPipelineManager:
             return
         if self.annotated_writer:
             self.annotated_writer.start()
+        if self.ir_writer:
+            self.ir_writer.start()
         self._started = True
-        logger.info(f"[TaskPipeline-{self.task_id}] Started (server-render mode)")
+        logger.info(f"[TaskPipeline-{self.task_id}] Started (server-render mode, ir_writer={'on' if self.ir_writer else 'off'})")
 
     def inject_and_write(
         self,
@@ -86,10 +101,14 @@ class TaskPipelineManager:
         detections: list[Detection],
         timestamp_ms: int | None = None,
         copy: bool = True,
+        ir_frame: np.ndarray | None = None,
     ) -> None:
         if self.annotated_writer and self._started:
             annotated = self.injector.inject(frame, detections, timestamp_ms or 0, copy=copy)
             self.annotated_writer.put_frame(annotated)
+        if self.ir_writer and self._started and ir_frame is not None:
+            ir_annotated = self.injector.inject(ir_frame, detections, timestamp_ms or 0, copy=copy)
+            self.ir_writer.put_frame(ir_annotated)
 
     def process_detections(
         self,
@@ -116,6 +135,7 @@ class TaskPipelineManager:
             "active_tracks": len(self.tracker.tracks),
             "next_track_id": self.tracker.next_track_id,
             "annotated_frames": self.annotated_writer.frame_count if self.annotated_writer else 0,
+            "ir_frames": self.ir_writer.frame_count if self.ir_writer else 0,
         }
 
     def reset(self):
@@ -133,6 +153,8 @@ class TaskPipelineManager:
         self._flush_active_tracks()
         if self.annotated_writer:
             self.annotated_writer.stop()
+        if self.ir_writer:
+            self.ir_writer.stop()
         logger.info(f"[TaskPipeline-{self.task_id}] Stopped")
 
     def _flush_active_tracks(self):

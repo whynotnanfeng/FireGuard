@@ -112,7 +112,14 @@
           </template>
 
           <template v-if="column.key === 'model_name'">
-             <span :title="record.model_name">{{ record.model_name }}</span>
+             <span v-if="record.task_models && record.task_models.length > 0" :title="record.task_models.map((m: any) => m.model_name || m.model_id).join(' + ')">
+               <a-tag v-for="(m, i) in record.task_models" :key="i" color="blue" style="margin: 1px 2px;">
+                 {{ m.model_name || m.model_id }}
+               </a-tag>
+             </span>
+             <span v-else :title="record.model_name">
+               <a-tag color="blue" style="margin: 1px 2px;">{{ record.model_name }}</a-tag>
+             </span>
           </template>
 
           <template v-if="column.key === 'description'">
@@ -273,7 +280,7 @@ const typeMap: any = { image: '图片', video: '视频', stream: '流媒体' }
 const columns = [
   { title: '任务名称', dataIndex: 'name', key: 'name', width: 180, ellipsis: true },
   { title: '类型', key: 'task_type', width: 90 },
-  { title: '模型', dataIndex: 'model_name', key: 'model_name', width: 160, ellipsis: true },
+  { title: '模型', dataIndex: 'model_name', key: 'model_name', width: 240, ellipsis: true },
   { title: '描述', dataIndex: 'description', key: 'description', width: 150, ellipsis: true },
   { title: '状态', key: 'status', width: 100 },
   { title: '创建时间', key: 'created_at', width: 170 },

@@ -218,17 +218,27 @@ interface ConfigState {
 - **GPU 环境检测按钮**：选择 GPU 时，旁边显示"检测 GPU"按钮，调用 `GET /api/tasks/gpu-status` 验证环境。环境不满足时阻止创建 GPU 任务。
 - **use_gpu 参数**：表单提交时携带 `use_gpu` 字段（布尔值），适用于所有任务类型（图片/视频/视频流）。
 
+**新增功能 (v2.10.0)**:
+- **多模型配置**：支持为单个任务配置多个检测模型，每个模型可独立设置权重、类别和阈值。
+- **模型添加/移除**：通过"+ 添加模型"按钮动态添加模型行，通过"移除"按钮删除多余模型。
+- **权重滑块**：每个模型配有独立的权重滑块（0.1-3.0），用于 WBF 加权框融合。
+- **每模型类别配置**：多模型时可为每个模型独立配置启用类别和检测阈值。
+- **融合配置**：支持配置 `wbf_iou_threshold`（IoU 聚合阈值，默认 0.55）。
+- **表单提交**：多模型时使用 `model_ids`（JSON 数组）替代单个 `model_id`，同时携带 `fusion_config`。
+
 **表单字段**:
 ```typescript
 interface TaskForm {
   name: string
   task_type: 'image' | 'video' | 'stream'
   input_types: ('rgb' | 'ir')[]
-  model_id: string
+  model_id: string           // 单模型（向后兼容）
+  model_ids?: string         // JSON: 多模型配置数组 (v2.10.0)
+  fusion_config?: string     // JSON: 融合引擎配置 (v2.10.0)
   source_type: 'upload' | 'url' | 'rtsp'
   source_url?: string
   description?: string
-  use_gpu?: boolean  // v1.9.0 新增
+  use_gpu?: boolean          // v1.9.0 新增
 }
 ```
 
@@ -265,6 +275,7 @@ interface TaskForm {
 - **响应式筛选栏**：第一行固定显示（任务名称/类型/状态/重置/更多筛选），高级筛选（模型/描述/创建时间）折叠展开
 - **前端分页**：支持快速跳转，删除数据后自动补位
 - **文本溢出**：长文本列自动省略号截断，悬停查看完整内容
+- **多模型标签展示 (v2.10.0)**：任务列表"模型"列统一使用蓝色标签展示模型名称，单模型和多模型任务视觉风格一致
 - 查看按钮：打开 ResultViewer 或 VideoPlayer
 - 配置按钮：打开 DetectionConfig
 - 执行按钮：启动任务

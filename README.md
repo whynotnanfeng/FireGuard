@@ -1,8 +1,8 @@
-# FireGuard (火灾监测系统) v2.9.0 "Storage Quota Extension & UI/UX Perfection Edition"
+# FireGuard (火灾监测系统) v2.10.0 "Multi-Model Multimodal Fusion Edition"
 
 FireGuard 是一个基于深度学习（ONNX 核心）的智能火灾目标监测系统。它提供了从模型管理、视频/视频流实时检测任务配置，到结果可视化查询、大屏多路监控的完整闭环功能。
 
-## 项目特点 (v2.9.0)
+## 项目特点 (v2.10.0)
 
 1. **零计算分发推理 (Zero-Compute Dispatch)**：采用 Raw Numpy IPC 传输架构，主进程 100% 卸载图像压缩开销，彻底解决 8Mbps+ 高码率流的抓取延迟。
 2. **工业级比特流稳定性**：基于 4MB 内核精密缓冲与全速同步解码技术，完美吸收 AI 模型加载时的 CPU 冲击，实现 RTSP 流 0 报错运行。
@@ -19,6 +19,7 @@ FireGuard 是一个基于深度学习（ONNX 核心）的智能火灾目标监�
 13. **多层性能缓存 (v2.7.0)**：目录大小 30s TTL 缓存、m3u8 直播 1s TTL 缓存、元数据 5s TTL 缓存，热路径日志降级为 DEBUG，异步健康监控改造，API 响应时间降低 99%。
 14. **HLS 播放抗卡顿与绝对时钟对齐 (v2.8.0)**：`liveSyncDurationCount` 调优至 5.5，`compensationMs` 校准为 -2500ms，彻底消除首屏卡顿与检测记录抢跑。
 15. **大文件上传配额扩展 (v2.9.0)**：用户存储空间配额和单文件限制从 1GB 提升至 20GB，彻底解决大文件上传卡死问题。
+16. **多模型多模态融合检测 (v2.10.0)**：全任务类型（图像/视频/流媒体）统一支持多模型配置，`FusionEngine` 三层融合管线（阈值过滤 → 光照感知自适应 → WBF 加权框融合），LightDetector 首帧无冷启动、每 20 帧自适应计算，推理 Worker 缓存 Key 统一。
 
 ## 详细文档 (Documentation)
 

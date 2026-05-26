@@ -8,6 +8,7 @@ from app.utils.time import now_beijing
 
 if TYPE_CHECKING:
     from app.models.model import DetectionModel
+    from app.models.task_model import TaskModel
     from app.models.result import TaskResult
     from app.models.user import User
     from app.models.detection_record import DetectionRecord
@@ -48,6 +49,7 @@ class Task(SQLModel, table=True):
 
     user: Optional["User"] = Relationship(back_populates="tasks")
     model: Optional["DetectionModel"] = Relationship(back_populates="tasks")
+    task_models: List["TaskModel"] = Relationship(back_populates="task", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
     result: Optional["TaskResult"] = Relationship(back_populates="task", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
     detection_records: List["DetectionRecord"] = Relationship(back_populates="task", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
     detection_events: List["DetectionEvent"] = Relationship(back_populates="task", sa_relationship_kwargs={"cascade": "all, delete-orphan"})

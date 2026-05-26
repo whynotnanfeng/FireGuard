@@ -381,6 +381,9 @@ paths:
 
     def stop(self):
         self._stop_event.set()
+        # 等待健康检查线程退出
+        if self._health_check_thread and self._health_check_thread.is_alive():
+            self._health_check_thread.join(timeout=3)
         if self.process:
             try:
                 self.process.terminate()

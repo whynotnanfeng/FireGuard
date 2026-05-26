@@ -1,7 +1,8 @@
 """
 Task Runner:
   - TaskRunner: asyncio queue for image/video tasks (single-concurrent)
-  - StreamManager: tracks stream task state (pause/resume/stop)
+  - StreamManager: stream lifecycle management, inference process pool,
+    elastic scaling, result dispatching, and multi-model worker orchestration
 """
 from __future__ import annotations
 
@@ -60,14 +61,18 @@ class StreamManager:
         self._dispatcher_dead = False
         self._lock = threading.Lock()
 
+        # ── Per-model worker pool (多模型并行推理) ──
+        # model_cache_key → { 'in_q': mp.Queue, 'out_q': mp.Queue, 'worker': Process, 'model_ids': set }
+        self._model_workers: Dict[str, dict] = {}
+
     def start_inference_pool(self, worker_count: int = 1):
         """启动全局推理进程池和结果分发线程"""
         from app.services.inference_worker import GlobalInferenceWorker
         import sys
         import os
-        
-        # 【P0 修复】Windows spawn 模式下，子进程默认使用系统 Python 而非虚拟环境
-        # 通过 set_executable 强制子进程使用当前虚拟环境的 Python
+
+        # Windows spawn 模式下，子进程默认使用系统 Python 而非虚拟环境
+        # 必须通过 set_executable 强制子进程使用当前虚拟环境的 Python
         if os.name == 'nt' and hasattr(mp, 'set_executable'):
             venv_python = os.path.join(sys.prefix, 'Scripts', 'python.exe')
             if os.path.exists(venv_python) and sys.executable != venv_python:
@@ -76,7 +81,7 @@ class StreamManager:
                     logger.info(f"[StreamManager] MP executable set to venv: {venv_python}")
                 except Exception as e:
                     logger.warning(f"[StreamManager] Failed to set MP executable: {e}")
-        
+
         # 0. [核心修复]: 仅在主进程中通过 lifespan 显式初始化一次 MP 资源
         if self._manager is None:
             logger.info("[StreamManager] Initializing Multiprocessing Resources...")
@@ -94,7 +99,7 @@ class StreamManager:
             self._dispatcher_dead = False
             logger.info("Started Results Dispatcher Thread.")
 
-        # 2. 补齐进程
+        # 2. 补齐共享队列 Worker（单模型流兼容）
         current_count = len(self.workers)
         if current_count < worker_count:
             for i in range(current_count, worker_count):
@@ -102,14 +107,91 @@ class StreamManager:
                 w.start()
                 self.workers.append(w)
                 logger.info(f"[StreamManager] Dynamic Scale-UP: Worker #{i} started (PID={w.pid})")
-        
-        logger.info(f"Inference Pool adjusted to {len(self.workers)} workers.")
-        
+
+        logger.info(f"Inference Pool adjusted to {len(self.workers)} shared workers.")
+
         # 3. 确保启动负载监视线程 (仅启动一次)
         if self._scaling_thread is None:
             self._scaling_thread = threading.Thread(target=self._background_scaling_loop, daemon=True)
             self._scaling_thread.start()
             logger.info("Started Elastic Scaling Background Monitor.")
+
+    def ensure_model_workers(self, model_configs: list):
+        """为多模型配置确保每个模型有独立的推理 Worker 进程（并行推理，消除串行瓶颈）"""
+        from app.services.inference_worker import GlobalInferenceWorker
+        import sys
+        import os
+
+        if os.name == 'nt' and hasattr(mp, 'set_executable'):
+            venv_python = os.path.join(sys.prefix, 'Scripts', 'python.exe')
+            if os.path.exists(venv_python) and sys.executable != venv_python:
+                try:
+                    mp.set_executable(venv_python)
+                except Exception:
+                    pass
+
+        for mc in model_configs:
+            model_path = mc["model_path"]
+            use_gpu = self._infer_use_gpu_from_configs(model_configs)
+            cache_key = f"{model_path}|gpu={use_gpu}"
+
+            if cache_key not in self._model_workers:
+                in_q = mp.Queue(maxsize=200)
+                out_q = mp.Queue(maxsize=200)
+                w = GlobalInferenceWorker(in_q, out_q, self.active_tasks_map)
+                w.start()
+                self._model_workers[cache_key] = {
+                    'in_q': in_q,
+                    'out_q': out_q,
+                    'worker': w,
+                    'model_ids': set(),
+                }
+                logger.info(
+                    f"[StreamManager] Per-model Worker started: {cache_key[:60]} (PID={w.pid})"
+                )
+            else:
+                # 清理复用 worker 的残留结果，防止旧任务的空结果污染新任务
+                entry = self._model_workers[cache_key]
+                _drained = 0
+                try:
+                    while True:
+                        entry['out_q'].get_nowait()
+                        _drained += 1
+                except queue.Empty:
+                    pass
+                if _drained:
+                    logger.info(
+                        f"[StreamManager] Drained {_drained} stale results from "
+                        f"per-model queue: {cache_key[:60]}"
+                    )
+
+            self._model_workers[cache_key]['model_ids'].add(mc["model_id"])
+
+        logger.info(
+            f"[StreamManager] Per-model workers: {len(self._model_workers)} pools "
+            f"for {len(model_configs)} models"
+        )
+
+    def get_model_queue(self, model_path: str, use_gpu: bool) -> Optional[mp.Queue]:
+        """根据模型路径获取对应的推理输入队列
+
+        注意: cache_key 必须与 ensure_model_workers() 一致，
+        两者都使用 _infer_use_gpu_from_configs() 推断的 GPU 状态。
+        """
+        # 与 ensure_model_workers 保持一致: 始终使用推断值而非调用方的 use_gpu
+        inferred_gpu = self._infer_use_gpu_from_configs([])
+        cache_key = f"{model_path}|gpu={inferred_gpu}"
+        entry = self._model_workers.get(cache_key)
+        return entry['in_q'] if entry else None
+
+    def get_model_output_queues(self) -> list:
+        """获取所有 per-model worker 的输出队列列表"""
+        return [entry['out_q'] for entry in self._model_workers.values()]
+
+    @staticmethod
+    def _infer_use_gpu_from_configs(model_configs: list) -> bool:
+        """从 model_configs 推断 GPU 使用状态。当前多模型流默认使用 GPU。"""
+        return True
 
     def _background_scaling_loop(self):
         """后台负载监视循环：每 15 秒检查一次 CPU 压力并动态扩缩容（增加冷却期防抖动）"""
@@ -144,11 +226,11 @@ class StreamManager:
         """根据系统实时负载，动态调整推理进程池大小 (弹性伸缩策略)"""
         from app.services.inference_worker import GlobalInferenceWorker
         import psutil
-        
+
         active_count = len(self._streams)
-        
+
         cpu_usage = psutil.cpu_percent(interval=None)
-        
+
         # 【P0 修复】：先清理已死亡的 Worker，防止计数虚高导致永不扩容
         alive_workers = []
         for w in self.workers:
@@ -158,14 +240,30 @@ class StreamManager:
                 logger.warning(f"[ElasticScaling] Dead worker detected (pid={w.pid}), removing and will respawn...")
         dead_count = len(self.workers) - len(alive_workers)
         self.workers = alive_workers
-        
+
+        # 清理已死亡的 per-model workers
+        dead_model_keys = [k for k, v in self._model_workers.items() if not v['worker'].is_alive()]
+        for k in dead_model_keys:
+            logger.warning(f"[ElasticScaling] Dead per-model worker detected: {k[:60]}, removing...")
+            del self._model_workers[k]
+
         # 即使没有活跃流，我们也保留 1 个"种子进程"以确保新任务秒开
         if active_count == 0:
             target_workers = 1
             strategy = "IDLE_SEED"
         else:
             # --- 弹性伸缩算法 (Elastic Scaling Algorithm) ---
-            if cpu_usage > config.CPU_THRESHOLD_SURVIVAL:
+            target_workers = 1
+            target_per_task = 1
+            strategy = "DEFAULT"
+            # 多模型流使用 per-model workers，不需要额外的 shared workers
+            per_model_count = len(self._model_workers)
+            if per_model_count > 0:
+                # 多模型模式：per-model workers 已处理推理，shared worker 仅保留种子
+                target_per_task = 1
+                target_workers = 1
+                strategy = "PER_MODEL (dedicated workers active)"
+            elif cpu_usage > config.CPU_THRESHOLD_SURVIVAL:
                 # 红色水位：极高负载。每路监控回归 1:1 分配，保命优先
                 target_per_task = 1
                 strategy = "SURVIVAL (1:1)"
@@ -177,22 +275,23 @@ class StreamManager:
                 # 绿色水位：负载健康。火力全开，加速单路推理
                 target_per_task = config.WORKERS_PER_TASK_LIMIT
                 strategy = "PERFORMANCE (MAX)"
-            
-            # 计算最终目标：受限于系统核心总上限
-            target_workers = min(active_count * target_per_task, config.MAX_TOTAL_WORKERS)
-            # 至少要有一个进程服务
-            target_workers = max(1, target_workers)
-            
+
+            if per_model_count == 0:
+                # 计算最终目标：受限于系统核心总上限
+                target_workers = min(active_count * target_per_task, config.MAX_TOTAL_WORKERS)
+                # 至少要有一个进程服务
+                target_workers = max(1, target_workers)
+
             # 改造：将 INFO 降级为 DEBUG，仅在策略变更时输出 INFO
             if not hasattr(self, '_last_strategy'): self._last_strategy = ""
             if strategy != self._last_strategy:
                 logger.info(f"[ElasticScaling] Strategy changed: {self._last_strategy} -> {strategy} (CPU: {cpu_usage}%)")
                 self._last_strategy = strategy
-            
-            logger.debug(f"[ElasticScaling] CPU: {cpu_usage}% | Strategy: {strategy} | Target Workers: {target_workers} (Streams: {active_count})")
+
+            logger.debug(f"[ElasticScaling] CPU: {cpu_usage}% | Strategy: {strategy} | Target Workers: {target_workers} (Streams: {active_count}, Per-model: {len(self._model_workers)})")
 
         current_workers = len(self.workers)
-        
+
         # 情况 1: 需要扩容（含死亡 Worker 重生）
         if target_workers > current_workers or dead_count > 0:
             # 稳定性加固：如果当前 CPU 已经很高，禁止扩容，防止新进程加载模型瞬间抢占解码资源导致 H.264 报错
@@ -208,11 +307,11 @@ class StreamManager:
                         w.start()
                         self.workers.append(w)
                         logger.info(f"[ElasticScaling] Dead worker respawned (PID={w.pid})")
-                
+
                 # 再按需扩容
                 if target_workers > len(self.workers):
                     self.start_inference_pool(target_workers)
-            
+
         # 情况 2: 需要缩容 (仅在任务数减少或负载过高时主动释放)
         elif target_workers < current_workers:
             # 为了 Windows 稳定性，我们采取温和缩容：一次仅杀掉 1 个多余进程，防止系统剧烈抖动
@@ -225,7 +324,7 @@ class StreamManager:
             except Exception:
                 pass
             # 提示：实际物理进程会在 Join 之后回收
-        
+
         # 回滚缩容逻辑
         # 为了 Windows 系统的绝对稳定，我们不再自动杀掉多余的进程。
         # 保持 1-2 个空闲进程对系统几乎无负荷，但能极大提升任务启动速度。
@@ -234,21 +333,34 @@ class StreamManager:
         """安全关闭进程池"""
         # 1. 发送停止信号
         self._stop_event.set()
-        
-        # 2. 停止所有 Worker 进程
+
+        # 2. 停止 per-model workers
+        for cache_key, entry in self._model_workers.items():
+            w = entry['worker']
+            w.stop()
+            try:
+                entry['in_q'].put(None, timeout=1.0)
+            except Exception:
+                pass
+            w.join(timeout=3.0)
+            if w.is_alive():
+                w.terminate()
+        self._model_workers.clear()
+
+        # 3. 停止所有共享 Worker 进程
         for w in self.workers:
             w.stop()
             try:
                 self.global_inference_in_q.put(None, timeout=1.0) # 塞毒丸
             except Exception:
                 pass
-        
+
         for w in self.workers:
             w.join(timeout=3.0)
             if w.is_alive():
                 w.terminate()
-        
-        # 3. 停止分发线程
+
+        # 4. 停止分发线程
         if self._dispatcher_thread:
             try:
                 # 加固：增加超时，防止由于队列满导致的退出挂起
@@ -257,10 +369,10 @@ class StreamManager:
                 pass
             self._dispatcher_thread.join(timeout=2.0)
 
-        # 4. 停止弹性伸缩线程
+        # 5. 停止弹性伸缩线程
         if self._scaling_thread:
             self._scaling_thread.join(timeout=2.0)
-        
+
         logger.info("[StreamManager] Inference Pool and background threads stopped.")
 
     def stop_monitor(self):
@@ -268,6 +380,36 @@ class StreamManager:
         if self._monitor_task:
             self._monitor_task.cancel()
             logger.info("[StreamManager] Monitor task cancelled.")
+
+    def stop_all_streams(self, timeout: float = 5.0):
+        """停止所有活跃流，等待 drain 完成。关闭前调用，确保 MediaMTX 注销正常。"""
+        import time
+        with self._lock:
+            task_ids = list(self._streams.keys())
+        if not task_ids:
+            return
+        logger.info(f"[StreamManager] Stopping {len(task_ids)} active streams...")
+        for task_id in task_ids:
+            try:
+                self.stop_stream(task_id)
+            except Exception as e:
+                logger.warning(f"[StreamManager] Error stopping stream {task_id}: {e}")
+        # 等待所有流 drain 完成
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                remaining = len(self._streams)
+            if remaining == 0:
+                break
+            time.sleep(0.2)
+        with self._lock:
+            remaining = len(self._streams)
+        if remaining > 0:
+            logger.warning(f"[StreamManager] {remaining} streams still draining after {timeout}s, forcing cleanup")
+            with self._lock:
+                self._streams.clear()
+        else:
+            logger.info("[StreamManager] All streams stopped cleanly.")
 
     def _result_dispatcher_loop(self):
         """核心路由：从全局队列拿结果，支持【批处理聚合】和【时序重排】"""
@@ -295,10 +437,25 @@ class StreamManager:
         
         while not self._stop_event.is_set():
             try:
-                try:
-                    result = self.global_inference_out_q.get(timeout=0.2)
-                except queue.Empty:
-                    result = None
+                # 从 per-model workers 和 shared queue 中获取结果
+                result = None
+                _result_source = "none"
+                # 1. 优先检查 per-model output queues（多模型并行推理）
+                for _mq in self.get_model_output_queues():
+                    try:
+                        result = _mq.get_nowait()
+                        _result_source = "per_model"
+                        break
+                    except queue.Empty:
+                        continue
+                # 2. 回退到共享队列（单模型流兼容）
+                if result is None:
+                    try:
+                        result = self.global_inference_out_q.get(timeout=0.1)
+                        if result is not None:
+                            _result_source = "shared"
+                    except queue.Empty:
+                        result = None
                 
                 if result is None:
                     now = time.time()
@@ -306,6 +463,11 @@ class StreamManager:
                         active_tasks = [t_id for t_id in self._streams if self.is_active(t_id, self._streams[t_id].token if t_id in self._streams else None)]
                         queue_size = self.global_inference_out_q.qsize()
                         in_queue_size = self.global_inference_in_q.qsize() if hasattr(self, 'global_inference_in_q') else 0
+                        # per-model queue sizes
+                        _model_q_sizes = {
+                            k[:8]: (v['in_q'].qsize(), v['out_q'].qsize())
+                            for k, v in self._model_workers.items()
+                        }
                         
                         # P0 修复：背压监控日志
                         if queue_size > BACKPRESSURE_THRESHOLD:
@@ -325,6 +487,7 @@ class StreamManager:
                             f"[DIAG-DISP] Heartbeat: processed {_dispatcher_result_count} results in last 30s, "
                             f"active_streams={len(active_tasks)}, active_buffers={list(batch_buffers.keys())}, "
                             f"queue_size={queue_size}, max_gap={_dispatcher_max_gap:.2f}s, "
+                            f"per_model_workers={len(self._model_workers)}, per_model_q={_model_q_sizes}, "
                             f"shared_grabbers={_gs['active_grabbers']}/{_gs['total_subscribers']}"
                         )
                         if _dispatcher_result_count == 0 and len(active_tasks) > 0:
@@ -355,11 +518,12 @@ class StreamManager:
                     logger.warning(f"[Dispatcher] Malformed inference result: {result}")
                     continue
 
-                # 解析结果：兼容多种格式（result[5] = provider 诊断信息）
+                # 解析结果：兼容多种格式（result[5] = provider 诊断信息, result[6] = model_id）
                 task_id, timestamp, raw_detections = result[0], result[1], result[2]
                 inference_time_ms = result[3] if len(result) >= 4 else 0
                 returned_jpeg_data = result[4] if len(result) >= 5 else None
                 _prov_info = result[5] if len(result) >= 6 else ""
+                _result_model_id = result[6] if len(result) >= 7 else None
                 if _prov_info and _dispatcher_result_count % 100 == 0:
                     logger.info(
                         f"[DIAG-INFERENCE] result#{_dispatcher_result_count} "
@@ -391,10 +555,26 @@ class StreamManager:
                 # 1. 应用过滤配置
                 detections = [Detection(**d) if isinstance(d, dict) else d for d in raw_detections]
                 filtered = stream._apply_detection_config(detections, stream.detection_config)
-                
+
+                # 诊断日志：多模型时记录每个结果的 max_conf 和过滤情况
+                if _result_model_id and _dispatcher_result_count % 5 == 0:
+                    _max_conf = max((d.confidence for d in detections), default=0.0)
+                    _max_conf_f = max((d.confidence for d in filtered), default=0.0)
+                    _gt = stream.detection_config.get("global_threshold", 0.25) if stream.detection_config else 0.25
+                    if _gt > 1: _gt = _gt / 100.0
+                    logger.info(
+                        f"[DIAG-MODEL] src={_result_source} model={_result_model_id[:8]} raw={len(detections)} "
+                        f"filtered={len(filtered)} max_conf={_max_conf:.4f} max_conf_f={_max_conf_f:.4f} "
+                        f"gt={_gt:.2f} ts={timestamp:.3f}"
+                    )
+
                 if not filtered and len(detections) > 0:
-                    logger.debug(f"[DIAG-DISP] Task {task_id}: {len(detections)} raw detections filtered to 0")
-                
+                    logger.warning(
+                        f"[DIAG-DISP] FILTERED_TO_ZERO: model={_result_model_id[:8] if _result_model_id else 'single'} "
+                        f"raw={len(detections)} max_conf={max((d.confidence for d in detections), default=0):.4f} "
+                        f"ts={timestamp:.3f}"
+                    )
+
                 # 2. 构造载荷
                 # 【P0 修复 - 时间戳基准统一】：
                 # timestamp 是相对时间（从会话开始的秒数，如 210.5s）
@@ -407,10 +587,24 @@ class StreamManager:
                 # 推理结果路径 —— 仅做追踪 + 事件处理 + 更新最新检测结果。
                 # 检测框绘制和 HLS 写入由 _annotated_frame_writer 线程独立处理
                 # （源帧率 15fps，与推理速率解耦）。
-                with stream._lock:
-                    stream._latest_results = filtered
-                    stream._latest_results_timestamp = timestamp
-                    stream._latest_results_wall_time = time.time()
+                # 多模型：按model_id路由到各自的缓冲区（不写全局缓冲区，避免双写竞态）
+                if _result_model_id and hasattr(stream, '_latest_results_by_model'):
+                    with stream._results_by_model_lock:
+                        stream._latest_results_by_model[_result_model_id] = filtered
+                        stream._results_by_model_wall_time[_result_model_id] = time.time()
+                        if hasattr(stream, '_results_by_model_frame_ts'):
+                            stream._results_by_model_frame_ts[_result_model_id] = timestamp
+                    if _dispatcher_result_count % 20 == 0:
+                        logger.info(
+                            f"[Dispatcher] Multi-model route: model_id={_result_model_id[:8]} "
+                            f"detections={len(filtered)} raw={len(raw_detections)} ts={timestamp:.3f}"
+                        )
+                else:
+                    # 单模型：更新全局缓冲区
+                    with stream._lock:
+                        stream._latest_results = filtered
+                        stream._latest_results_timestamp = timestamp
+                        stream._latest_results_wall_time = time.time()
 
                 if stream.pipeline and stream._pipeline_initialized:
                     # 卸载到线程池避免 process_detections 持有 GIL
@@ -613,8 +807,24 @@ class StreamManager:
             
             await asyncio.sleep(5)
 
-    def start_stream(self, task_id: str, source: str, model_path: str, mapping: Optional[dict], is_resume: bool = False, use_gpu: bool = False, main_loop: Optional[object] = None) -> "VideoStream":
-        """V12: 冷启动 - 始终创建新流实例（由调用方负责先stop旧流）"""
+    def start_stream(
+        self,
+        task_id: str,
+        source: str,
+        model_path: str,
+        mapping: Optional[dict],
+        is_resume: bool = False,
+        use_gpu: bool = False,
+        main_loop: Optional[object] = None,
+        model_configs: Optional[List[dict]] = None,
+        fusion_config: Optional[dict] = None,
+    ) -> "VideoStream":
+        """V12: 冷启动 - 始终创建新流实例（由调用方负责先stop旧流）
+
+        Args:
+            model_configs: 多模型配置列表，每个元素包含 model_path, label_mapping, model_id, weight 等
+            fusion_config: 融合引擎配置（如 wbf_iou_threshold）
+        """
         from app.services.video_stream import VideoStream
 
         # Add a short delay to ensure old thread sockets are fully closed by OS
@@ -636,14 +846,14 @@ class StreamManager:
                         if gt > 1:
                             detection_config["global_threshold"] = gt / 100.0
                             logger.info(f"[Migration] Normalized global_threshold for {task_id}: {gt} -> {gt/100.0}")
-                        
+
                         # 类别阈值迁移
                         for cat in detection_config.get("categories", []):
                             if cat.get("threshold") and cat["threshold"] > 1:
                                 old_t = cat["threshold"]
                                 cat["threshold"] = old_t / 100.0
                                 logger.debug(f"[Migration] Normalized cat {cat.get('name')} threshold: {old_t} -> {cat['threshold']}")
-                    
+
                     logger.info(f"Injected initial config for {task_id}")
                 except Exception as e:
                     logger.warning(f"Failed to parse initial config for {task_id}: {e}")
@@ -654,15 +864,36 @@ class StreamManager:
         self.active_tasks_map[task_id] = token_val
 
         # 模型预加载：向推理队列发送预加载指令（jpeg_data=None），让 Worker 提前加载模型
-        try:
-            preload_msg = (task_id, 0.0, model_path, mapping, 0.25, None, use_gpu)
-            self.global_inference_in_q.put(preload_msg, timeout=2.0)
-            logger.info(f"[Preload] Sent model preload for {task_id}: {model_path}")
-        except Exception as e:
-            logger.warning(f"[Preload] Failed to send preload for {task_id}: {e}")
+        if model_configs:
+            # 多模型模式：确保每个模型有独立 Worker，并预加载到对应队列
+            self.ensure_model_workers(model_configs)
+            for mc in model_configs:
+                try:
+                    preload_msg = (task_id, 0.0, mc["model_path"], mc["label_mapping"], 0.25, None, use_gpu)
+                    model_q = self.get_model_queue(mc["model_path"], use_gpu)
+                    if model_q:
+                        model_q.put(preload_msg, timeout=2.0)
+                        logger.info(f"[Preload] Sent model preload to PER-MODEL queue for {task_id}: {mc['model_path']}")
+                    else:
+                        self.global_inference_in_q.put(preload_msg, timeout=2.0)
+                        logger.warning(f"[Preload] Sent model preload to SHARED queue (get_model_queue returned None) for {task_id}: {mc['model_path']}")
+                except Exception as e:
+                    logger.warning(f"[Preload] Failed to send preload for {task_id}: {e}")
+        else:
+            try:
+                preload_msg = (task_id, 0.0, model_path, mapping, 0.25, None, use_gpu)
+                self.global_inference_in_q.put(preload_msg, timeout=2.0)
+                logger.info(f"[Preload] Sent model preload for {task_id}: {model_path}")
+            except Exception as e:
+                logger.warning(f"[Preload] Failed to send preload for {task_id}: {e}")
 
-        # 创建并启动新流 (注意：现在传入 model_path 而非 detector 实例)
-        new_stream = VideoStream(task_id, source, model_path, token_val, mapping, use_gpu=use_gpu)
+        # 创建并启动新流
+        new_stream = VideoStream(
+            task_id, source, model_path, token_val, mapping,
+            use_gpu=use_gpu,
+            model_configs=model_configs,
+            fusion_config=fusion_config,
+        )
         new_stream._main_loop = main_loop
         new_stream._is_resuming = is_resume
         new_stream.detection_config = detection_config # Inject config
@@ -673,7 +904,7 @@ class StreamManager:
         self._paused.discard(task_id)
 
         new_stream.start_grabbers()
-        
+
         # 动态调整进程池
         self._adjust_worker_count()
         
@@ -722,13 +953,52 @@ class StreamManager:
                 self.global_inference_in_q.put_nowait(item)
         except Exception:
             pass
+
+        # 排空 per-model 队列中该任务的积压帧
+        for entry in self._model_workers.values():
+            try:
+                temp_list = []
+                while not entry['in_q'].empty():
+                    item = entry['in_q'].get_nowait()
+                    if item and item[0] != task_id:
+                        temp_list.append(item)
+                for item in temp_list:
+                    entry['in_q'].put_nowait(item)
+            except Exception:
+                pass
             
         self._paused.discard(task_id)
-        
+
+        # 清理不再需要的 per-model workers
+        self._cleanup_idle_model_workers()
+
         # 动态调整进程池
         self._adjust_worker_count()
-        
+
         logger.info(f"Stream {task_id} logically detached (awaiting physical drain)")
+
+    def _cleanup_idle_model_workers(self):
+        """清理不再被任何活跃流使用的 per-model workers"""
+        # 收集所有活跃流仍在使用的 model_path|gpu 键
+        active_model_keys = set()
+        with self._lock:
+            for stream in self._streams.values():
+                if hasattr(stream, 'model_configs') and stream.model_configs:
+                    for mc in stream.model_configs:
+                        cache_key = f"{mc['model_path']}|gpu={stream.use_gpu}"
+                        active_model_keys.add(cache_key)
+
+        # 找出不再需要的 workers
+        idle_keys = [k for k in self._model_workers if k not in active_model_keys]
+        for k in idle_keys:
+            entry = self._model_workers.pop(k)
+            w = entry['worker']
+            w.stop()
+            try:
+                entry['in_q'].put(None, timeout=1.0)
+            except Exception:
+                pass
+            logger.info(f"[StreamManager] Cleaned up idle per-model worker: {k[:60]}")
 
     def _remove_stream(self, task_id: str, stream: object):
         """由 VideoStream 内部 Drain 完成后回调，彻底清理资源"""
@@ -793,6 +1063,7 @@ class TaskRunner:
         from app.database import engine
         from app.models.task import Task
         from app.models.model import DetectionModel
+        from app.models.task_model import TaskModel
 
         with Session(engine) as session:
             task = session.get(Task, task_id)
@@ -812,14 +1083,65 @@ class TaskRunner:
                 logger.info(f"Task {task_id} was cancelled before execution started")
                 return
 
-            dm = session.get(DetectionModel, task.model_id)
-            if not dm:
-                self._fail_task(session, task, "Model record not found")
-                return
+            # 多模型支持：优先从 task_models 表加载，回退到单 model_id
+            task_models = list(session.exec(
+                select(TaskModel).where(TaskModel.task_id == task.id)
+            ).all())
+
+            model_configs = None
+            fusion_config = None
+            dm = None
+            mapping = None
+
+            if task_models:
+                model_configs = []
+                for tm in sorted(task_models, key=lambda t: t.order_index):
+                    tm_dm = session.get(DetectionModel, tm.model_id)
+                    if not tm_dm:
+                        self._fail_task(session, task, f"Model {tm.model_id} not found")
+                        return
+                    tm_mapping = None
+                    if tm_dm.label_config:
+                        try:
+                            tm_mapping = json.loads(tm_dm.label_config)
+                        except Exception:
+                            pass
+                    per_class_config = {}
+                    thresholds = json.loads(tm.per_class_thresholds) if tm.per_class_thresholds else {}
+                    enabled = json.loads(tm.enabled_classes) if tm.enabled_classes else []
+                    model_classes = {}
+                    if tm_dm.label_config:
+                        model_classes = json.loads(tm_dm.label_config)
+                    elif tm_dm.class_names:
+                        model_classes = {str(i): name for i, name in enumerate(json.loads(tm_dm.class_names))}
+                    for cid, cname in model_classes.items():
+                        per_class_config[cname] = {
+                            "enabled": cid in enabled if enabled else True,
+                            "threshold": thresholds.get(cid, 0.6),
+                        }
+                    model_input_types = json.loads(tm_dm.input_types) if tm_dm.input_types else ["rgb"]
+                    model_configs.append({
+                        "model_id": tm.model_id,
+                        "model_path": tm_dm.file_path,
+                        "label_mapping": tm_mapping,
+                        "weight": tm.weight,
+                        "input_types": model_input_types,
+                        "is_rgbir": len(model_input_types) > 1 and "ir" in model_input_types,
+                        "per_class_config": per_class_config,
+                    })
+                dm = session.get(DetectionModel, task_models[0].model_id)
+                mapping = model_configs[0]["label_mapping"]
+                det_cfg = json.loads(task.detection_config) if task.detection_config else {}
+                fusion_config = det_cfg.get("fusion_config", {})
+                logger.info(f"Task {task_id}: Multi-model mode with {len(model_configs)} models")
+            else:
+                dm = session.get(DetectionModel, task.model_id)
+                if not dm:
+                    self._fail_task(session, task, "Model record not found")
+                    return
 
         try:
-            mapping = None
-            if dm and dm.label_config:
+            if mapping is None and dm and dm.label_config:
                 try:
                     mapping = json.loads(dm.label_config)
                     logger.info(f"Task {task_id}: Using custom label mapping: {mapping}")
@@ -835,9 +1157,21 @@ class TaskRunner:
                     logger.warning(f"Task {task_id}: Failed to parse detection_config: {e}")
 
             if task.task_type == "image":
-                await self._process_image(task_id, task.source_path, task.user_id, dm.file_path, mapping, detection_config, use_gpu=task.use_gpu)
+                await self._process_image(
+                    task_id, task.source_path, task.user_id,
+                    dm.file_path, mapping, detection_config,
+                    use_gpu=task.use_gpu,
+                    model_configs=model_configs,
+                    fusion_config=fusion_config,
+                )
             elif task.task_type == "video":
-                await self._process_video(task_id, task.source_path, task.user_id, dm.file_path, mapping, detection_config, use_gpu=task.use_gpu)
+                await self._process_video(
+                    task_id, task.source_path, task.user_id,
+                    dm.file_path, mapping, detection_config,
+                    use_gpu=task.use_gpu,
+                    model_configs=model_configs,
+                    fusion_config=fusion_config,
+                )
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
             with Session(engine) as session:
@@ -850,7 +1184,11 @@ class TaskRunner:
     # ── Image processing ─────────────────────────────────────────────────────
 
     async def _process_image(
-        self, task_id: str, source_path: str, user_id: str, model_path: str, label_mapping: Optional[dict] = None, detection_config: Optional[dict] = None, use_gpu: bool = False
+        self, task_id: str, source_path: str, user_id: str, model_path: str,
+        label_mapping: Optional[dict] = None, detection_config: Optional[dict] = None,
+        use_gpu: bool = False,
+        model_configs: Optional[list] = None,
+        fusion_config: Optional[dict] = None,
     ) -> None:
         from sqlmodel import Session, select
         from app.database import engine
@@ -858,14 +1196,36 @@ class TaskRunner:
         from app.models.result import TaskResult
         from app.models.model import DetectionModel
         from app.services.detector import get_detector, Detector
+        from app.services.fusion_engine import FusionEngine, ModelDetection
 
         loop = asyncio.get_event_loop()
+        is_multi_model = model_configs is not None and len(model_configs) > 1
 
         def _run() -> tuple:
-            detector = get_detector(model_path, use_gpu=use_gpu)
+            # 加载模型：多模型模式下按 model_configs 加载；单模型模式下加载单个
+            detectors: dict[str, tuple] = {}  # model_id -> (detector, config)
+            if is_multi_model:
+                for mc in model_configs:
+                    det = get_detector(mc["model_path"], use_gpu=use_gpu)
+                    detectors[mc["model_id"]] = (det, mc)
+                logger.info(f"Task {task_id}: Loaded {len(detectors)} models for multi-model image detection")
+            else:
+                det = get_detector(model_path, use_gpu=use_gpu)
+                detectors["__single__"] = (det, {
+                    "model_id": "__single__",
+                    "model_path": model_path,
+                    "label_mapping": label_mapping,
+                    "weight": 1.0,
+                    "input_types": ["rgb", "ir"] if det.is_rgbir else ["rgb"],
+                    "is_rgbir": det.is_rgbir,
+                    "per_class_config": {},
+                })
+
+            fusion_engine = FusionEngine(config=fusion_config) if is_multi_model else None
+
             rgb_dir = Path(source_path) / "rgb"
             ir_dir = Path(source_path) / "ir"
-            
+
             if not rgb_dir.exists():
                 raise FileNotFoundError(f"RGB dir not found: {rgb_dir}")
 
@@ -876,11 +1236,9 @@ class TaskRunner:
             if not image_files:
                 raise FileNotFoundError("No image files found in RGB dir")
 
-            # Check if IR input is required and available
-            is_multimodal = detector.is_rgbir and ir_dir.exists()
-            logger.info(f"Task {task_id}: Multimodal mode enabled: {is_multimodal}")
+            has_ir_dir = ir_dir.exists()
+            logger.info(f"Task {task_id}: IR dir available: {has_ir_dir}")
 
-            # FPS Throttling for Image Tasks
             fps_target = detection_config.get("fps", config.DETECTION_FPS_IMAGE)
             last_process_time = 0.0
             total_images = len(image_files)
@@ -897,7 +1255,7 @@ class TaskRunner:
                     min_interval = 1.0 / fps_target
                     if elapsed < min_interval:
                         time.sleep(min_interval - elapsed)
-                
+
                 if task_id in self._cancelled_tasks:
                     logger.info(f"Image task {task_id} cancelled during processing")
                     return first_result_path, all_detections
@@ -905,31 +1263,59 @@ class TaskRunner:
                 img_rgb = cv2.imread(str(img_path))
                 if img_rgb is None:
                     continue
-                
-                input_data = img_rgb
-                if is_multimodal:
-                    # Try to find matching IR image
+
+                # 加载 IR 图像（如有）
+                img_ir = None
+                if has_ir_dir:
                     ir_path = ir_dir / img_path.name
                     if ir_path.exists():
                         img_ir = cv2.imread(str(ir_path))
-                        if img_ir is not None:
-                            input_data = [img_rgb, img_ir]
-                        else:
-                            logger.warning(f"Failed to read IR image: {ir_path}")
-                    else:
-                        logger.warning(f"IR image not found for {img_path.name}, falling back to RGB only")
 
-                dets = detector.detect(input_data, label_mapping=label_mapping)
-                
-                filtered_dets = self._apply_detection_config(dets, detection_config)
-                
-                annotated = Detector.draw_boxes(img_rgb, filtered_dets)
+                if is_multi_model:
+                    # ── 多模型分派 + 融合 ──
+                    model_results: list[ModelDetection] = []
+                    for mid, (det, mc) in detectors.items():
+                        input_data = img_rgb
+                        if mc["is_rgbir"] and img_ir is not None:
+                            input_data = [img_rgb, img_ir]
+                        elif not mc["is_rgbir"] and "ir" in mc["input_types"] and img_ir is not None:
+                            input_data = [img_rgb, img_ir]
+
+                        dets = det.detect(input_data, label_mapping=mc.get("label_mapping"))
+                        filtered_dets = self._apply_detection_config(dets, detection_config)
+                        model_results.append(ModelDetection(
+                            model_id=mid,
+                            model_weight=mc.get("weight", 1.0),
+                            detections=filtered_dets,
+                            input_types=mc.get("input_types", ["rgb"]),
+                            is_rgbir=mc.get("is_rgbir", False),
+                            per_class_config=mc.get("per_class_config", {}),
+                        ))
+
+                    final_dets = fusion_engine.fuse(model_results, rgb_frame=img_rgb)
+                else:
+                    # ── 单模型（向后兼容）──
+                    det, mc = detectors["__single__"]
+                    is_multimodal = mc["is_rgbir"] and img_ir is not None
+                    input_data = [img_rgb, img_ir] if is_multimodal else img_rgb
+                    dets = det.detect(input_data, label_mapping=mc.get("label_mapping"))
+                    final_dets = self._apply_detection_config(dets, detection_config)
+
+                # 保存 RGB 标注图
+                annotated = Detector.draw_boxes(img_rgb, final_dets)
                 out_name = f"annotated_{img_path.name}"
                 out_path = result_dir / out_name
                 cv2.imwrite(str(out_path), annotated)
                 if idx == 0:
                     first_result_path = str(out_path)
-                all_detections[out_name] = [d.to_dict() for d in filtered_dets]
+                all_detections[out_name] = [d.to_dict() for d in final_dets]
+
+                # 保存 IR 标注图（如有 IR 输入）
+                if img_ir is not None:
+                    ir_annotated = Detector.draw_boxes(img_ir, final_dets)
+                    ir_out_name = f"ir_annotated_{img_path.name}"
+                    cv2.imwrite(str(result_dir / ir_out_name), ir_annotated)
+
                 last_process_time = time.time()
 
                 # Progress reporting (every 5 images)
@@ -967,7 +1353,11 @@ class TaskRunner:
     # ── Video processing ──────────────────────────────────────────────────────
 
     async def _process_video(
-        self, task_id: str, source_path: str, user_id: str, model_path: str, label_mapping: Optional[dict] = None, detection_config: Optional[dict] = None, use_gpu: bool = False
+        self, task_id: str, source_path: str, user_id: str, model_path: str,
+        label_mapping: Optional[dict] = None, detection_config: Optional[dict] = None,
+        use_gpu: bool = False,
+        model_configs: Optional[list] = None,
+        fusion_config: Optional[dict] = None,
     ) -> None:
         from sqlmodel import Session
         from app.database import engine
@@ -975,11 +1365,33 @@ class TaskRunner:
         from app.models.result import TaskResult
         from app.models.model import DetectionModel
         from app.services.detector import get_detector, Detector
+        from app.services.fusion_engine import FusionEngine, ModelDetection
 
         loop = asyncio.get_event_loop()
+        is_multi_model = model_configs is not None and len(model_configs) > 1
 
         def _run() -> tuple:
-            detector = get_detector(model_path, use_gpu=use_gpu)
+            # 加载模型
+            detectors: dict[str, tuple] = {}
+            if is_multi_model:
+                for mc in model_configs:
+                    det = get_detector(mc["model_path"], use_gpu=use_gpu)
+                    detectors[mc["model_id"]] = (det, mc)
+                logger.info(f"Task {task_id}: Loaded {len(detectors)} models for multi-model video detection")
+            else:
+                det = get_detector(model_path, use_gpu=use_gpu)
+                detectors["__single__"] = (det, {
+                    "model_id": "__single__",
+                    "model_path": model_path,
+                    "label_mapping": label_mapping,
+                    "weight": 1.0,
+                    "input_types": ["rgb", "ir"] if det.is_rgbir else ["rgb"],
+                    "is_rgbir": det.is_rgbir,
+                    "per_class_config": {},
+                })
+
+            fusion_engine = FusionEngine(config=fusion_config) if is_multi_model else None
+
             rgb_dir = Path(source_path) / "rgb"
             ir_dir = Path(source_path) / "ir"
 
@@ -993,9 +1405,8 @@ class TaskRunner:
 
             if not video_files:
                 raise FileNotFoundError("No video file found")
-            
-            # Check for multimodal
-            is_multimodal = detector.is_rgbir and ir_dir.exists()
+
+            has_ir_dir = ir_dir.exists()
 
             all_detections: dict = {}
             result_dir = config.RESULTS_DIR / user_id / task_id
@@ -1007,9 +1418,9 @@ class TaskRunner:
                 cap_rgb = cv2.VideoCapture(video_path_str)
                 if not cap_rgb.isOpened():
                     continue
-                
+
                 cap_ir = None
-                if is_multimodal:
+                if has_ir_dir:
                     ir_v_path = ir_dir / video_path_obj.name
                     if ir_v_path.exists():
                         cap_ir = cv2.VideoCapture(str(ir_v_path))
@@ -1029,19 +1440,25 @@ class TaskRunner:
                 fourcc = cv2.VideoWriter_fourcc(*"VP80")
                 vid_detections = []
                 frame_idx = 0
-                
+
                 # Dynamic FPS Calculation
                 fps_target = detection_config.get("fps", config.DETECTION_FPS_VIDEO)
                 if fps_target > 0:
                     frame_step = max(1, int(fps / fps_target))
                 else:
-                    frame_step = 1 # Unlimited
-                
+                    frame_step = 1
+
                 logger.info(f"Task {task_id}: Processing video with target FPS {fps_target} (Source FPS: {fps:.2f}, Step: {frame_step})")
 
-                # Optimization: Adjust output FPS to match our sampling rate to save CPU encoding time
                 output_fps = max(1, fps // frame_step)
                 writer = cv2.VideoWriter(str(out_path), fourcc, output_fps, (w, h))
+
+                # IR 标注视频 writer（多模态时生成）
+                ir_writer = None
+                if cap_ir is not None:
+                    ir_out_name = f"ir_annotated_{video_path_obj.stem}.webm"
+                    ir_out_path = result_dir / ir_out_name
+                    ir_writer = cv2.VideoWriter(str(ir_out_path), fourcc, output_fps, (w, h))
 
                 while True:
                     if frame_idx % 20 == 0 and task_id in self._cancelled_tasks:
@@ -1049,30 +1466,59 @@ class TaskRunner:
                         cap_rgb.release()
                         if cap_ir: cap_ir.release()
                         writer.release()
+                        if ir_writer: ir_writer.release()
                         return first_result_path, all_detections
 
                     ret_rgb, frame_rgb = cap_rgb.read()
                     if not ret_rgb:
                         break
-                    
+
                     frame_ir = None
                     if cap_ir:
                         ret_ir, frame_ir = cap_ir.read()
                         if not ret_ir:
                             frame_ir = None
 
-                    # Only detect and WRITE every Nth frame to drastically speed up
+                    # Only detect and WRITE every Nth frame
                     if frame_idx % frame_step == 0:
-                        input_data = frame_rgb
-                        if is_multimodal and frame_ir is not None:
-                            input_data = [frame_rgb, frame_ir]
-                        
-                        dets = detector.detect(input_data, label_mapping=label_mapping)
-                        filtered_dets = self._apply_detection_config(dets, detection_config)
-                        vid_detections.extend([d.to_dict() for d in filtered_dets])
-                        
-                        annotated = Detector.draw_boxes(frame_rgb, filtered_dets)
+                        if is_multi_model:
+                            # ── 多模型分派 + 融合 ──
+                            model_results: list[ModelDetection] = []
+                            for mid, (det, mc) in detectors.items():
+                                input_data = frame_rgb
+                                if mc["is_rgbir"] and frame_ir is not None:
+                                    input_data = [frame_rgb, frame_ir]
+                                elif not mc["is_rgbir"] and "ir" in mc["input_types"] and frame_ir is not None:
+                                    input_data = [frame_rgb, frame_ir]
+
+                                dets = det.detect(input_data, label_mapping=mc.get("label_mapping"))
+                                filtered_dets = self._apply_detection_config(dets, detection_config)
+                                model_results.append(ModelDetection(
+                                    model_id=mid,
+                                    model_weight=mc.get("weight", 1.0),
+                                    detections=filtered_dets,
+                                    input_types=mc.get("input_types", ["rgb"]),
+                                    is_rgbir=mc.get("is_rgbir", False),
+                                    per_class_config=mc.get("per_class_config", {}),
+                                ))
+
+                            final_dets = fusion_engine.fuse(model_results, rgb_frame=frame_rgb)
+                        else:
+                            # ── 单模型（向后兼容）──
+                            det, mc = detectors["__single__"]
+                            is_multimodal = mc["is_rgbir"] and frame_ir is not None
+                            input_data = [frame_rgb, frame_ir] if is_multimodal else frame_rgb
+                            dets = det.detect(input_data, label_mapping=mc.get("label_mapping"))
+                            final_dets = self._apply_detection_config(dets, detection_config)
+
+                        vid_detections.extend([d.to_dict() for d in final_dets])
+
+                        annotated = Detector.draw_boxes(frame_rgb, final_dets)
                         writer.write(annotated)
+
+                        if ir_writer is not None and frame_ir is not None:
+                            ir_annotated = Detector.draw_boxes(frame_ir, final_dets)
+                            ir_writer.write(ir_annotated)
 
                     # Progress reporting (every 100 frames)
                     if total_frames > 0 and frame_idx % 100 == 0:
@@ -1091,7 +1537,8 @@ class TaskRunner:
                 cap_rgb.release()
                 if cap_ir: cap_ir.release()
                 writer.release()
-                
+                if ir_writer: ir_writer.release()
+
                 if idx == 0:
                     first_result_path = str(out_path)
                 all_detections[out_name] = vid_detections

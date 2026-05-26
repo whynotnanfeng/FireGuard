@@ -1,3 +1,10 @@
+"""
+Global Inference Worker — multiprocessing-based ONNX inference process.
+
+Breaks GIL via separate process. Accepts (frame, model_path, conf, iou, use_gpu, ...) tuples
+on the input queue, runs ONNX inference, and puts Detection results on the output queue.
+Models are cached per-process to avoid repeated loading.
+"""
 import multiprocessing as mp
 import logging
 import cv2
@@ -20,6 +27,17 @@ class GlobalInferenceWorker(mp.Process):
 
     def run(self):
         import os as _os, sys as _sys
+
+        # ---- 子进程日志初始化（multiprocessing 不继承父进程 handlers）----
+        _log_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "logs")
+        _os.makedirs(_log_dir, exist_ok=True)
+        _log_file = _os.path.join(_log_dir, "inference_worker.log")
+        _root_logger = logging.getLogger()
+        _root_logger.setLevel(logging.INFO)
+        _fh = logging.FileHandler(_log_file, encoding="utf-8")
+        _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        _root_logger.addHandler(_fh)
+
         # 子进程需继承 CUDA/cuDNN PATH（multiprocessing 不继承环境变更）
         _cur = _os.environ.get("PATH", "")
         _path_additions = []
@@ -74,10 +92,31 @@ class GlobalInferenceWorker(mp.Process):
                     break
 
                 # 共享内存格式 (>=9 元素) 或旧 JPEG 格式 (<9 元素)
-                if len(task_data) >= 9:
+                # 多模型时末尾携带 model_id（第10/8个元素）
+                # 双帧 SharedMemory: 13 元素, shm_name="DUAL"
+                _model_id = None
+                _is_dual_shm = False
+                if len(task_data) >= 13 and task_data[5] == "DUAL":
+                    (task_id, timestamp, model_path, label_mapping,
+                     conf_floor, _dual_mark, shm_shape, shm_dtype, use_gpu,
+                     rgb_shm_name, ir_shm_name, ir_shm_shape, ir_shm_dtype,
+                     *rest) = task_data
+                    _model_id = rest[0] if rest else None
+                    _is_shm = True
+                    _is_dual_shm = True
+                elif len(task_data) >= 10:
+                    (task_id, timestamp, model_path, label_mapping,
+                     conf_floor, shm_name, shm_shape, shm_dtype, use_gpu,
+                     _model_id) = task_data
+                    _is_shm = True
+                elif len(task_data) >= 9:
                     (task_id, timestamp, model_path, label_mapping,
                      conf_floor, shm_name, shm_shape, shm_dtype, use_gpu) = task_data
                     _is_shm = True
+                elif len(task_data) >= 8:
+                    (task_id, timestamp, model_path, label_mapping,
+                     conf_floor, jpeg_data, use_gpu, _model_id) = task_data
+                    _is_shm = False
                 else:
                     (task_id, timestamp, model_path, label_mapping,
                      conf_floor, jpeg_data, use_gpu) = task_data
@@ -100,7 +139,20 @@ class GlobalInferenceWorker(mp.Process):
 
                 # 3. 图像解码：共享内存或 JPEG
                 try:
-                    if _is_shm:
+                    if _is_dual_shm:
+                        import multiprocessing.shared_memory as _shm
+                        _blk_rgb = _shm.SharedMemory(name=rgb_shm_name)
+                        _arr_rgb = np.ndarray(
+                            shm_shape, dtype=np.dtype(shm_dtype), buffer=_blk_rgb.buf
+                        ).copy()
+                        _blk_rgb.close()
+                        _blk_ir = _shm.SharedMemory(name=ir_shm_name)
+                        _arr_ir = np.ndarray(
+                            ir_shm_shape, dtype=np.dtype(ir_shm_dtype), buffer=_blk_ir.buf
+                        ).copy()
+                        _blk_ir.close()
+                        input_data = [_arr_rgb, _arr_ir]
+                    elif _is_shm:
                         import multiprocessing.shared_memory as _shm
                         _block = _shm.SharedMemory(name=shm_name)
                         input_data = np.ndarray(
@@ -132,7 +184,16 @@ class GlobalInferenceWorker(mp.Process):
                 _backend = detector.backend if hasattr(detector, 'backend') else '?'
                 _ap = getattr(detector, 'session', None)
                 _ps = _ap.get_providers()[0] if _ap and hasattr(_ap, 'get_providers') else '?'
-                self.out_q.put_nowait((task_id, timestamp, detections, 0, None, f"{_backend}|{_ps}"))
+                _result = (task_id, timestamp, detections, 0, None, f"{_backend}|{_ps}")
+                if _model_id is not None:
+                    _result = _result + (_model_id,)
+                # 诊断日志：多模型时输出 model_id 和检测数量
+                if _model_id is not None:
+                    logger.info(
+                        f"[InferenceWorker-{self.pid}] model_id={_model_id[:8]} "
+                        f"detections={len(detections)} ts={timestamp:.3f}"
+                    )
+                self.out_q.put_nowait(_result)
 
             except queue.Empty:
                 continue

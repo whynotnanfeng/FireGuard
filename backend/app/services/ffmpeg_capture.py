@@ -296,6 +296,8 @@ class FFmpegCapture:
                 "-i",
                 self.rtsp_url,
                 "-an",  # 显式禁用音频，减少开销
+                "-vf",
+                f"scale={self.width}:{self.height}",  # 强制输出分辨率匹配 _frame_size，避免多模态源分辨率不一致导致花屏
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
