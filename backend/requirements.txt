@@ -1,18 +1,38 @@
-fastapi>=0.104.1
-uvicorn[standard]>=0.24.0
-sqlmodel>=0.0.14
-pydantic>=2.5.0
-python-jose[cryptography]>=3.3.0
-passlib[bcrypt]>=1.7.4
-python-multipart>=0.0.6
-slowapi>=0.1.9
+# ============================================
+# FireGuard Backend - Python Dependencies
+# ============================================
+# CPU 版本: pip install -r requirements.txt
+# GPU 版本: pip install -r requirements-gpu.txt
 
+# --- Web 框架 ---
+fastapi>=0.104.1,<1.0.0
+uvicorn[standard]>=0.24.0,<1.0.0
+python-multipart>=0.0.6
+
+# --- 数据库与 ORM ---
+sqlmodel>=0.0.14,<1.0.0
+pydantic>=2.5.0,<3.0.0
+
+# --- 认证 ---
+python-jose[cryptography]>=3.3.0,<4.0.0
+passlib[bcrypt]>=1.7.4,<2.0.0
+
+# --- 限流 ---
+slowapi>=0.1.9,<1.0.0
+
+# --- AI 推理 (CPU) ---
 onnxruntime==1.20.0
+opencv-python>=4.8.1.78,<5.0.0
+numpy>=1.24.4,<2.0.0
+
+# --- GPU 监控 ---
 nvidia-ml-py>=12.535.133
-psutil
-opencv-python>=4.8.1.78
-aiofiles>=23.2.0
-websockets>=12.0
-numpy>=1.24.4
-python-dotenv>=1.0.0
-redis>=5.0.0
+psutil>=5.9.0
+
+# --- 异步与网络 ---
+aiofiles>=23.2.0,<24.0.0
+websockets>=12.0,<14.0.0
+redis>=5.0.0,<6.0.0
+
+# --- 环境配置 ---
+python-dotenv>=1.0.0,<2.0.0

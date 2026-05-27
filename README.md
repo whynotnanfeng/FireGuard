@@ -24,8 +24,8 @@ FireGuard 是一个基于深度学习（ONNX 核心）的智能火灾目标监�
 ## 详细文档 (Documentation)
 
 项目包含全套的技术与使用文档，建议阅读：
+- **[部署启动指南](./docs/START.md)**: 完整的环境搭建、依赖安装、服务部署指南（含 bin/ 依赖、GPU 配置、模拟器）。
 - **[项目概览](./docs/project_overview.md)**: 愿景与场景说明。
-- **[快速启动](./docs/getting_started.md)**: 核心环境搭建与可选模拟器配置指南。
 - **[架构设计](./docs/architecture.md)**: 深入了解推理引擎与任务调度。
 - **[开发者指南](./docs/DEVELOPER_GUIDE.md)**: 核心业务逻辑与二次开发说明。
 - **[API 文档](./docs/api.md)**: 后端接口规范。
@@ -47,12 +47,19 @@ FireGuard 是一个基于深度学习（ONNX 核心）的智能火灾目标监�
 
 ## 快速启动 (Detection Platform)
 
-前提环境：Node.js >= 18, Python >= 3.9
+> 完整部署指南请参考 **[部署启动指南 (docs/START.md)](./docs/START.md)**，包含 bin/ 依赖获取、环境变量配置、GPU 加速、常见问题排查等。
+
+前提环境：Node.js >= 18, Python >= 3.10
 
 ### 1. 后端服务 (Backend)
 ```bash
 cd backend
 pip install -r requirements.txt
+
+# 配置环境变量（必须设置 SECRET_KEY）
+copy .env.example .env
+# 编辑 .env 填入 SECRET_KEY
+
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
@@ -70,10 +77,13 @@ npm run dev
 
 流模拟控制台是一个功能完整的 RTSP 视频流仿真服务，支持全维度参数自定义、画质评估与一键分发。
 
+> 完整部署说明请参考 **[部署启动指南 - 模拟流服务](./docs/START.md#六模拟流服务可选)**。
+
 ### 启动方式
 ```bash
 cd simulator
-uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+pip install -r requirements.txt
+python -m uvicorn main:app --host 0.0.0.0 --port 8001
 ```
 访问 [http://localhost:8001](http://localhost:8001) 打开控制台界面。
 
@@ -90,14 +100,16 @@ uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 ### 端口配置
 | 服务 | 端口 | 说明 |
 |------|------|------|
+| Backend | 8000 | 平台后端 API 服务端口 |
+| Frontend | 5173 | 平台前端 Web 服务端口 |
+| Redis | 6379 | 统一配置中心 & 注册中心端口 |
 | MediaMTX RTSP | 8554 | RTSP 推流/拉流端口 |
 | MediaMTX HLS | 8888 | HLS 视频切片分发端口 |
 | MediaMTX WebRTC | 8889 | WebRTC 低延迟播放端口 |
 | MediaMTX API | 9997 | REST API 管理端口 |
-| Redis | 6379 | 统一配置中心 & 注册中心端口 |
 | Simulator | 8001 | 模拟器 Web 服务端口 |
-| Backend | 8000 | 平台后端 API 服务端口 |
-| Frontend | 5173 | 平台前端 Web 服务端口 |
+| Simulator MediaMTX RTSP | 8555 | 模拟器专用 RTSP 端口 |
+| Simulator MediaMTX API | 9996 | 模拟器专用 API 端口 |
 
 ### 配置选项速查
 

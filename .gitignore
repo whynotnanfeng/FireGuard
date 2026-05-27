@@ -8,6 +8,7 @@ Thumbs.db
 *.log
 *.tmp
 *.bak
+*.pid
 .directory
 
 # --- AI Agent & Developer Tools (MANDATORY IGNORE) ---
@@ -52,22 +53,23 @@ frontend/.stylelintcache
 **/*.egg-info/
 backend/.env
 
-# --- Project Data & Databases (Ignore all local state) ---
+# --- Project Data & Databases ---
 data/
 backend/data/*
 !backend/data/.gitkeep
 backend/logs/*
 !backend/logs/.gitkeep
 backend/scratch/
-backend/*.db
 *.db
 *.sqlite3
 
-# --- Simulator Binaries & Data ---
+# --- Simulator ---
 simulator/bin/
 simulator/data/*
 !simulator/data/.gitkeep
 simulator/uploads/
+
+# --- Test Data ---
 testdata/
 
 # --- IDEs ---
@@ -77,20 +79,18 @@ testdata/
 *.swo
 .history/
 
-# --- Redis & Temporary States ---
-backend/dump.rdb
+# --- Redis ---
 *.rdb
 
-# --- Root Level Binaries & Dumps ---
+# --- Binaries ---
 bin/
-testdata/
 
-# --- Temporary Test Scripts in backend ---
+# --- Temporary Test Scripts ---
 backend/final_verify.py
 backend/test_*.py
 !backend/tests/
 
-# --- Root HTML Design Proposals & Plans ---
+# --- Root HTML Design Proposals ---
 /*.html
 
 # --- Temporary Development Task Guides ---
@@ -98,7 +98,9 @@ CHANGE_GUIDE.md
 PERFORMANCE_OPTIMIZATION_GUIDE.md
 REFACTORING_GUIDE.md
 
+# --- 软著申请材料（不提交） ---
+ruanzhu/
 
-# Claude Code MCP config (contains secrets)
+# --- Claude Code MCP config (contains secrets) ---
 .claude/mcp.json
 .mcp.json
