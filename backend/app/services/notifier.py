@@ -9,7 +9,6 @@ class Notifier:
     """Global WebSocket notification manager for real-time task status updates."""
     
     def __init__(self):
-        # Set of active notification WebSockets
         self._active_connections: Set[WebSocket] = set()
         self._last_states: Dict[str, str] = {} # task_id -> "status:message"
 
@@ -45,7 +44,6 @@ class Notifier:
             "message": message
         })
         
-        # Prepare cleanup list if send fails
         to_remove = []
         for connection in list(self._active_connections):
             try:
@@ -57,5 +55,4 @@ class Notifier:
         for conn in to_remove:
             self.disconnect(conn)
 
-# Singleton instance
 notifier = Notifier()

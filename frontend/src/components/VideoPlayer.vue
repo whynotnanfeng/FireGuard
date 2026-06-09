@@ -232,8 +232,7 @@ let isSwitchingStream = false
 let pendingSeekSeconds: number | undefined = undefined
 
 let hls: Hls | null = null;
-const isVideoActuallyPlaying = ref(false); 
-// V4.6: 全模式内嵌方案 — AnnotatedHLSWriter 将检测框嵌入 HLS，前端无 Canvas。
+const isVideoActuallyPlaying = ref(false);
 
 const showRecordsPanel = computed(() => {
   if (props.showRecordsPanel !== undefined) return props.showRecordsPanel
@@ -277,7 +276,6 @@ const showVideoOverlay = computed(() => {
 });
 
 
-// 防抖工具函数
 function debounce(fn: Function, delay: number) {
   let timer: any = null;
   return function(...args: any[]) {
@@ -350,7 +348,7 @@ const CALIBRATION_OUTLIER_STD_THRESHOLD = 3  // 3 倍标准差过滤
 let ntpOffsetMs = 0
 let ntpSynced = false
 
-// 【校准参数】— V4.3 放宽范围，适应 WSL2 时钟偏差和长会话偏移
+// 校准参数：适应 WSL2 时钟偏差和长会话偏移
 const CALIBRATION_EWMA_ALPHA = 0.1
 const CALIBRATION_SYNC_WINDOW_MS = 8000     // 匹配窗口 8s（原 5s），应对大偏移
 const CALIBRATION_CLAMP_MS = 15000           // 样本 clamp ±15s（原 5s），允许收集宽范围样本
@@ -368,10 +366,7 @@ let recordsReleaseSecondStart = 0
 let lastRecordsReleaseDiag = 0
 let lastEmittedAbsoluteTime = 0
 
-/**
- * NTP 式异常值过滤
- * 过滤掉超过 3 倍标准差的样本，避免循环点突变影响校准
- */
+// 过滤超过 3 倍标准差的样本
 function isOutlier(sample: number): boolean {
   if (calibrationHistory.length < 10) {
     return false;  // 样本不足，不过滤
@@ -382,9 +377,6 @@ function isOutlier(sample: number): boolean {
   return Math.abs(sample - mean) > CALIBRATION_OUTLIER_STD_THRESHOLD * std;
 }
 
-/**
- * 添加校准样本到历史记录
- */
 function addCalibrationSample(sample: number) {
   calibrationHistory.push(sample);
   if (calibrationHistory.length > CALIBRATION_HISTORY_MAX) {
@@ -563,7 +555,7 @@ function stopLiveTimeCounter() {
 }
 
 // Dual-channel support
-const currentChannel = ref<'annotated' | 'rgb' | 'ir' | 'ir_annotated'>('annotated')  // V5.1: 服务端渲染标注流
+const currentChannel = ref<'annotated' | 'rgb' | 'ir' | 'ir_annotated'>('annotated')
 const currentTask = computed(() => taskStore.tasks.find(t => t.id === props.taskId))
 const isDualStream = computed(() => {
   return currentTask.value?.input_types?.includes('ir') || false
@@ -582,7 +574,7 @@ const detectionEvents = ref<any[]>([])
 const activeTracks = ref(0)
 let eventsPollingTimer: number | null = null
 let clockCalibrationInterval: number | null = null
-let bufferCleanupTimer: number | null = null  // 【新增】独立缓存清理定时器
+let bufferCleanupTimer: number | null = null
 
 const currentDetectionConfig = ref<any>(null)
 
@@ -899,7 +891,6 @@ onMounted(async () => {
   sendDebugLog('COMPONENT_MOUNTED')
 
   try {
-    // 1. 获取任务详情 (配置信息)
     const task = await tasksApi.get(props.taskId)
     if (task && task.detection_config) {
       currentDetectionConfig.value = typeof task.detection_config === 'string'
@@ -907,7 +898,7 @@ onMounted(async () => {
         : task.detection_config
     }
 
-    // 2. [核心新逻辑] 获取快照 (Hot Start)
+    // Hot Start: 获取快照快速初始化
     const snapshot = await tasksApi.getSnapshot(props.taskId)
     if (snapshot) {
       if (snapshot.task) {
@@ -1052,10 +1043,8 @@ onMounted(async () => {
       }
     }
 
-    // 3. 【P2-3 修复】：仅在任务运行中且非历史模式时建立 WebSocket 连接
     if (snapshot?.task?.status === 'running' && playMode.value !== 'history') {
       connect()
-      // V4.0: fallback — 确保 totalDuration 计数器在 WebSocket 连接后启动
       if (!runningSecondsTimer) {
         const taskData = snapshot.task
         const baseSeconds = taskData?.cumulative_running_seconds || 0
@@ -1069,8 +1058,7 @@ onMounted(async () => {
       }
     }
     
-    // [V3 修复]：如果有检测数据但 renderLoop 未启动，立即启动渲染循环
-    // 防止视频缓冲期间检测框不显示
+    // 确保 renderLoop 在检测数据先于视频到达时也能启动
     if (detectionBuffer.value.length > 0 && !rafId) {
       renderLoop();
     }
@@ -1084,14 +1072,11 @@ onMounted(async () => {
   }
 
   if (videoPlayerRef.value) {
-    resizeObserver = new ResizeObserver(() => {
-      // V4.6: Canvas 已移除，ResizeObserver 无需同步显示尺寸
-    })
+    resizeObserver = new ResizeObserver(() => {})
     resizeObserver.observe(videoPlayerRef.value)
   }
   
-  // 【新增】启动独立缓存清理定时器兜底
-  // 每 5 秒执行一次，确保即使 renderLoop 停止也能清理缓存
+  // 兜底缓存清理：每 5 秒执行，确保 renderLoop 停止时也能清理
   if (bufferCleanupTimer) clearInterval(bufferCleanupTimer)
   bufferCleanupTimer = window.setInterval(() => {
     pruneDetectionBuffer()
@@ -1154,13 +1139,11 @@ onUnmounted(() => {
       clockCalibrationInterval = null
     }
     
-    // 【新增】清理独立缓存清理定时器
     if (bufferCleanupTimer) {
       clearInterval(bufferCleanupTimer)
       bufferCleanupTimer = null
     }
 
-    // V3.0: 停止事件轮询
     stopEventsPolling()
 
     cancelStaleReconnect();
@@ -1298,7 +1281,6 @@ function connect() {
 
       switch (data.type) {
         case 'time_sync':
-          // 【P0-2 修复】：处理时间同步消息
           if (data.server_time_ms && data.video_pts_ms) {
             const t1 = Date.now();
             const serverTime = data.server_time_ms;
@@ -1482,8 +1464,7 @@ function connect() {
             errorMsg.value = data.message || ''
             emit('status-change', 'exception')
           } else if (data.status === 'pending') {
-            // V5.3: 任务停止/暂停时转换到 paused_end 状态
-            // 这是任务重启后 WebSocket 重连的关键触发条件
+            // 任务重启后 WebSocket 重连的关键触发条件
             streamState.value = 'paused_end'
             emit('status-change', 'pending')
           } else if (data.status === 'deleted') {
@@ -1510,7 +1491,7 @@ function connect() {
       return
     }
 
-    // [V3 修复]：检测后端重启（code 1006 = 异常关闭），延长重连间隔避免请求堆积
+    // code 1006/1011: 后端重启，延长重连间隔避免请求堆积
     const isBackendRestart = event.code === 1006 || event.code === 1011
 
     if (wsReconnectCount.value < WS_MAX_RECONNECT) {
@@ -1771,7 +1752,6 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
   }
 }
 
-// 保持对 initPlayer 的引用，防止外部调用失效（虽然通常是内部调用）
 const initPlayer = initHls;
 
 function destroyPlayer() {
@@ -1837,7 +1817,6 @@ async function refreshRecords() {
   }
 }
 
-// V3.0: 拉取事件驱动检测记录
 async function refreshDetectionEvents() {
   try {
     const [eventsRes, summaryRes] = await Promise.all([
@@ -2146,7 +2125,6 @@ function renderLoop() {
     }
   }
 
-  // 4. 【画面渲染区】：清空画布并画框。人为暂停时定格，但如果在拖拽进度条(currentTime变动)则强制重绘以保证流畅跟手。
   const lastRenderedTime = (window as any)._lastRenderedTime || 0;
   if (isPaused && !isUserSeeking.value && Math.abs(video.currentTime - lastRenderedTime) < 0.05) {
     // 暂停态且没有拖拽：直接跳过绘图更新，保留上一帧内容
@@ -2298,7 +2276,6 @@ function renderLoop() {
     }
   }
 
-  // 4. 画框！
   if (Date.now() - lastRenderDiagLog > 5000) {
     const bufferTsRange = detectionBuffer.value.length > 0
       ? `[${detectionBuffer.value[0].timestamp}..${detectionBuffer.value[detectionBuffer.value.length - 1].timestamp}]`
@@ -2334,16 +2311,13 @@ function renderLoop() {
     lastValidRecord.value = null;
   }
 
-  // 保持高达 60FPS 的丝滑渲染循环
   rafId = requestAnimationFrame(renderLoop);
 }
-
-// V4.6: clearCanvas / drawBoxesOnCanvas 已移除 — 全模式使用内嵌方案，检测框由 AnnotatedHLSWriter 直接编码进 HLS 视频流
 
 function onTimeUpdate(e: Event) {
   const video = e.target as HTMLVideoElement;
   
-  // 🚨 强制拦截：如果是历史模式，且播放时间已经达到定格的最大时间
+  // 历史模式：到达定格时长时暂停
   if (playMode.value === 'history' && frozenDuration.value > 0) {
     if (video.currentTime >= frozenDuration.value - 0.2) {
       video.pause();
@@ -2351,9 +2325,7 @@ function onTimeUpdate(e: Event) {
     }
   }
 
-  if (playMode.value === 'live') {
-    // 实时模式：totalDuration 由独立运行时长计时器驱动，不依赖 video.currentTime
-  } else {
+  if (playMode.value !== 'live') {
     // 历史模式
     if (isNaN(video.duration) || !isFinite(video.duration)) {
       const currentLevel = hls?.currentLevel ?? -1;
@@ -2380,8 +2352,6 @@ function onTimeUpdate(e: Event) {
     }
   }
 }
-
-// ── V5.1: Canvas 已移除，检测框由服务端嵌入视频帧 ──
 
 function toggleChannel() {
   if (!hls || !videoPlayerRef.value) return;
@@ -2436,7 +2406,6 @@ function handleSeekBarHover(e: MouseEvent) {
   const x = e.clientX - rect.left;
   const percent = Math.max(0, Math.min(1, x / rect.width));
   
-  // 核心修复：直接使用总时长百分比计算相对秒数
   const hoverSeconds = percent * (frozenDuration.value || totalDuration.value);
 
   hoverX.value = x;
@@ -2453,8 +2422,7 @@ watch(records, () => {
 async function fetchHistoricalRecords(startSec: number, endSec: number) {
   if (!props.taskId) return
   try {
-    // 核心修复：根据绝对起始时间，将相对秒数转换为绝对时间戳
-    const absStart = offsetToAbsTime(startSec);
+      const absStart = offsetToAbsTime(startSec);
     const absEnd = offsetToAbsTime(endSec);
 
     const res = await tasksApi.getDetectionRecords(props.taskId, {
@@ -2688,8 +2656,6 @@ function jumpToLive() {
   }
 }
 
-// Deprecated methods removed
-
 function handleVideoEnded() {
   if (videoPlayerRef.value) {
     videoPlayerRef.value.pause();
@@ -2717,9 +2683,8 @@ function forceDisconnect() {
   isActive = false
   wsReconnectCount.value = 0
   
-  // V3.0: 停止事件轮询
-  stopEventsPolling()
-  
+    stopEventsPolling()
+
   if (ws) {
     ws.onopen = null
     ws.onmessage = null

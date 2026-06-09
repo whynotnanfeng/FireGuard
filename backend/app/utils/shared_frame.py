@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 class SharedFrameRing:
-    """三重缓冲共享内存环，用于跨进程零拷贝帧传输"""
-
     def __init__(
         self,
         n_buffers: int = 3,
@@ -65,7 +63,6 @@ class SharedFrameRing:
             self._write_idx += 1
 
         block = self.buffers[idx]
-        # 直接复制到共享内存
         dst = np.ndarray(self.shape, dtype=self.dtype, buffer=block.buf)
         np.copyto(dst, frame)
         self._alloc_count += 1
@@ -83,7 +80,6 @@ class SharedFrameRing:
         return frame
 
     def cleanup(self):
-        """清理所有共享内存缓冲区"""
         for block in self.buffers:
             try:
                 block.close()

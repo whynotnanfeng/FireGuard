@@ -323,7 +323,6 @@ const pagedModels = computed(() => {
 })
 
 function onPageChange() {
-  // pagination component handles page/pageSize updates, computed recalculates
 }
 
 function onPageSizeChange() {
@@ -429,7 +428,6 @@ async function onFileChange(e: Event) {
       const selectedFile = target.files[0]
       file.value = selectedFile
 
-      // Auto analyze
       const fd = new FormData()
       fd.append('file', selectedFile)
       
@@ -475,7 +473,6 @@ async function submit() {
      await modelsApi.create(fd)
      message.success('上传成功')
      showCreate.value = false
-     // reset is now handled by watcher
      loadData()
   } catch(e) {} finally {
      submitting.value = false

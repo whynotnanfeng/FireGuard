@@ -130,13 +130,11 @@ async def create_model(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    # Validate file extension
     _, ext = os.path.splitext(file.filename or "")
     ext = ext.lower()
     if ext not in ALLOWED_FORMATS:
         raise HTTPException(status_code=400, detail=f"Only {ALLOWED_FORMATS} files allowed")
 
-    # Validate input_types JSON
     try:
         types_list = json.loads(input_types)
         if not isinstance(types_list, list) or not types_list:
@@ -147,15 +145,12 @@ async def create_model(
     except (ValueError, json.JSONDecodeError):
         raise HTTPException(status_code=400, detail='input_types must be JSON array of "rgb"/"ir"')
 
-    # Read file content
     content = await file.read()
     file_size = len(content)
 
-    # Check storage limit
     if not check_storage_limit(current_user.id, file_size):
         raise HTTPException(status_code=400, detail="Storage limit exceeded. Please delete some tasks or models.")
 
-    # Create DB record first
     dm = DetectionModel(
         user_id=current_user.id,
         name=name,
@@ -170,14 +165,12 @@ async def create_model(
     session.commit()
     session.refresh(dm)
 
-    # Save file
     model_dir = config.MODELS_DIR / current_user.id
     model_dir.mkdir(parents=True, exist_ok=True)
     file_path = model_dir / f"{dm.id}{ext}"
     with open(file_path, "wb") as f:
         f.write(content)
 
-    # Update record
     dm.file_path = str(file_path)
     dm.status = "completed"
     
@@ -264,7 +257,6 @@ def delete_model(
     if dm.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    # Check if any task references this model
     ref_tasks = session.exec(select(Task).where(Task.model_id == model_id)).all()
     if ref_tasks:
         ids = [t.id for t in ref_tasks]
@@ -273,7 +265,6 @@ def delete_model(
             detail=f"Cannot delete model: currently used by tasks {ids}",
         )
 
-    # Delete file
     if dm.file_path and os.path.exists(dm.file_path):
         os.remove(dm.file_path)
 

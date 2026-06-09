@@ -38,7 +38,6 @@ export const useAuthStore = defineStore('auth', () => {
     router.push('/login')
   }
 
-  // Initialize user info on store creation if token exists
   if (token.value) {
     fetchMe()
   }

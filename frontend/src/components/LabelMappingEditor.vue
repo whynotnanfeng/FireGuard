@@ -83,7 +83,6 @@ watch(() => props.modelValue, (newVal) => {
   }
 }, { immediate: true, deep: true })
 
-// Sync back to parent
 watch(mappingList, () => {
   const obj = getMappingObject()
   if (Object.keys(obj).length > 0 || mappingList.value.length === 0) {

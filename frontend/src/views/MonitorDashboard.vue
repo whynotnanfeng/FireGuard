@@ -99,7 +99,6 @@ function updateObservers() {
       const target = entry.target as HTMLElement
       const taskId = target.getAttribute('data-task-id')
       if (taskId) {
-        // 计算实际容器宽度与基准宽度的比例，进行 transform 缩放
         const { width } = entry.contentRect
         const scale = width / NATIVE_WIDTH
         scaleMap.value[taskId] = `scale(${scale})`

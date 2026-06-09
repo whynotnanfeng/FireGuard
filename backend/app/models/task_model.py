@@ -30,7 +30,7 @@ class TaskModel(SQLModel, table=True):
     weight: float = Field(default=1.0)  # 融合权重
     per_class_thresholds: str = Field(default="{}")  # JSON: {class_name: threshold}
     enabled_classes: str = Field(default="[]")  # JSON: [class_name, ...]
-    order_index: int = Field(default=0)  # 模型排序
+    order_index: int = Field(default=0)
     created_at: datetime = Field(default_factory=now_beijing)
 
     task: Optional["Task"] = Relationship(back_populates="task_models")

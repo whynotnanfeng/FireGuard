@@ -8,7 +8,6 @@ from app.models.result import TaskResult
 from app.models.detection_record import DetectionRecord
 from app.models.detection_event import DetectionEvent
 
-# Ensure data directory exists
 config.DATA_DIR.mkdir(exist_ok=True)
 config.UPLOADS_DIR.mkdir(exist_ok=True)
 config.MODELS_DIR.mkdir(exist_ok=True)
@@ -43,7 +42,6 @@ def create_db_and_tables() -> None:
 
 
 def _create_indexes() -> None:
-    """Create composite indexes for query performance."""
     import sqlite3
     conn = sqlite3.connect(str(config.DB_PATH))
     cursor = conn.cursor()

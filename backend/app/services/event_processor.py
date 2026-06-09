@@ -40,7 +40,6 @@ class EventProcessor:
         self._enter_records: Dict[int, str] = {}
     
     def process_event(self, event: TrackEvent):
-        """处理单个追踪事件"""
         if event.state == TrackState.ENTER:
             self._handle_enter(event)
         elif event.state == TrackState.UPDATE:
@@ -151,7 +150,7 @@ class EventProcessor:
         )
     
     def _save_to_db(self, record: DetectionEvent):
-        """异步写入数据库"""
+        """写入数据库"""
         from app.database import engine
         from sqlmodel import Session
 

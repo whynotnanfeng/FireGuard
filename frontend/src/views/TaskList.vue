@@ -391,7 +391,7 @@ onUnmounted(() => {
 
 function startNotifications() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host // 自动包含端口
+    const host = window.location.host
     const token = authStore.token
     if (!token) return
     const url = `${protocol}//${host}/ws/notifications?token=${token}`

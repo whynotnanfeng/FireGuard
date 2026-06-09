@@ -458,7 +458,6 @@ function handleModelChange(modelId: string) {
 }
 
 function handleTypeChange() {
-    // 移除原有的手动触发逻辑，改为由模型驱动
 }
 
 // ── 多模型函数 ──
@@ -597,7 +596,6 @@ async function submit() {
     fd.append('use_gpu', String(form.use_gpu))
 
     if (validModels.length > 1) {
-        // 多模型模式：发送 model_ids + fusion_config
         const modelIdsPayload = validModels.map(sm => {
             const enabledClasses = sm.categories.filter(c => c.selected).map(c => c.id)
             const perClassThresholds: Record<string, number> = {}

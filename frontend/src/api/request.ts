@@ -25,7 +25,6 @@ request.interceptors.request.use((config) => {
     }
   }
 
-  // 2. Auth Header
   const token = localStorage.getItem('token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
@@ -33,14 +32,13 @@ request.interceptors.request.use((config) => {
   return config
 })
 
-// ── Response interceptor: handle errors ──────────────────────────────────────
 request.interceptors.response.use(
   (res) => res.data,
   (err) => {
     const status = err.response?.status
     const detail = err.response?.data?.detail
 
-    // V1.2.37: If the error is 401, only redirect if we are not ALREADY on the login page/endpoint
+    // 避免在登录页时重复跳转导致循环
     if (status === 401) {
       localStorage.removeItem('token')
       const isLoginRequest = err.config?.url?.includes('/auth/login')
@@ -57,9 +55,7 @@ request.interceptors.response.use(
         ? detail.map((e: any) => e.msg).join('; ')
         : err.message || '请求失败'
 
-    // V50: Suppress global error messages for 409 Conflict status codes.
-    // This allows components (like ModelList) to handle these business logic errors with specialized UI.
-    // V1.2.67: Silence "canceled" noise. Do not show global error for aborted requests.
+    // 409 和 canceled 错误由调用方自行处理
     if (status !== 409 && !axios.isCancel(err) && err.message !== 'canceled') {
       message.error(errorMsg)
     }

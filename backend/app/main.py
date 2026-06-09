@@ -99,10 +99,8 @@ async def lifespan(app: FastAPI):
     current_pid = os.getpid()
     try:
         parent = psutil.Process(current_pid)
-        # 寻找所有名为 python 的子进程并清理
         for child in parent.children(recursive=True):
             try:
-                # 仅清理非当前进程的 python 进程
                 if 'python' in child.name().lower() and child.pid != current_pid:
                     logger.info(f"[Lifespan] Cleaning orphan child process: {child.pid}")
                     child.terminate()
@@ -111,7 +109,6 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    # 自动启动内置基础设施 (Redis)
     await redis_server.start()
     
     # 初始化总线连接 (Redis 模式下会建立连接池)
@@ -133,7 +130,6 @@ async def lifespan(app: FastAPI):
 
     create_db_and_tables()
     
-    # 启动内置 MediaMTX 网关
     await media_server.start()
     
     # 启动时钟偏移监控（纯Python SNTP，不修改系统时钟）
@@ -147,13 +143,11 @@ async def lifespan(app: FastAPI):
     # 启动全局推理进程池 (初始 1 个进程，后续按任务量扩容)
     stream_manager.start_inference_pool(worker_count=1)
     
-    # 启动后台任务和监控器
     asyncio.create_task(task_runner.start())
     stream_manager.start_monitor()
     
     logger.info("Fire Detection API started")
     
-    # 心跳监控：每 60s 输出一次活跃指标
     async def heartbeat():
         from app.services.task_runner import stream_manager
         while True:
@@ -174,29 +168,23 @@ async def lifespan(app: FastAPI):
     # 1. 先停止所有活跃流（需要 MediaMTX 仍在运行才能正常注销路径）
     stream_manager.stop_all_streams()
 
-    # 2. 停止推理池和监控
     stream_manager.stop_inference_pool()
     stream_manager.stop_monitor()
 
-    # 3. 清理网关路径和资源
     media_gateway.clear_all_proxies()
     media_gateway.close()
 
     # 4. 停止内置 MediaMTX（此时所有流已清理完毕）
     media_server.stop()
-    
-    # 停止时钟偏移监控
+
     clock_monitor.stop()
-    
-    # 断开消息总线连接
+
     await broker.disconnect()
-    
-    # 注销服务并关闭配置中心
+
     from app.services.registry import registry
     registry.unregister_service()
     registry.close()
-    
-    # 停止内置 Redis
+
     redis_server.stop()
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -300,7 +288,7 @@ async def live_m3u8(
             current_seg.append(line)
             segments.append(current_seg)
             current_seg = []
-        # else: skip empty lines etc.
+        pass
 
     if len(segments) <= limit:
         result = content
@@ -325,7 +313,6 @@ async def live_m3u8(
             result_lines.extend(seg)
         result = "\n".join(result_lines)
 
-    # 写入缓存，超过上限时清理最旧条目
     if len(_m3u8_cache) >= _M3U8_CACHE_MAX:
         oldest_key = min(_m3u8_cache, key=lambda k: _m3u8_cache[k][1])
         del _m3u8_cache[oldest_key]
@@ -344,7 +331,6 @@ app.mount("/storage", NoCacheStaticFiles(directory=str(config.VIDEO_STORAGE_DIR)
 
 @app.websocket("/ws/notifications")
 async def websocket_notifications(websocket: WebSocket, token: str = Query(...)):
-    # Validate token before accepting connection
     try:
         from app.dependencies import decode_token
         decode_token(token)
@@ -401,7 +387,6 @@ async def websocket_stream(
         await websocket.close()
         return
 
-    # Subscribe to the broker for this task's detections
     channel = f"detections:{task_id}"
     logger.info(f"[WS] Client connected to stream {task_id}, subscribing to {channel}")
     

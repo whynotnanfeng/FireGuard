@@ -57,10 +57,7 @@ def query_ntp_offset(server: str = DEFAULT_NTP_SERVER, timeout: float = 3.0) -> 
 def query_ntp_offset_with_fallback(timeout: float = 3.0) -> float | None:
     """
     【三层混合校准 - 第一层】：带备用的 NTP 查询
-    
-    依次尝试多个 NTP 服务器，直到成功获取偏移量。
-    这确保在不同网络环境下都能获得可靠的时钟同步。
-    
+
     Returns:
         offset_seconds: 本地时间 - NTP 时间的偏移（秒），None 表示所有服务器都失败
     """
@@ -112,8 +109,6 @@ class ClockMonitor:
 
     def get_offset_stats(self) -> dict:
         """
-        【P0-3 改进】：获取 NTP 偏移分布统计
-        
         Returns:
             dict: 包含 mean, rms, min, max, count 等统计信息
         """
@@ -157,7 +152,6 @@ class ClockMonitor:
             if len(self._offset_history) > self._max_history:
                 self._offset_history.pop(0)
             
-            # 【P0-3 改进】：更新时间审计统计
             self._offset_stats["count"] += 1
             self._offset_stats["sum"] += offset_ms
             self._offset_stats["sum_sq"] += offset_ms ** 2
@@ -192,7 +186,6 @@ class ClockMonitor:
             else:
                 logger.debug(f"[ClockMonitor] Clock offset: {offset_ms:.1f}ms (OK)")
             
-            # 【P0-3 改进】：定期输出时间审计摘要
             if self._offset_stats["count"] % 10 == 0:
                 stats = self.get_offset_stats()
                 logger.info(

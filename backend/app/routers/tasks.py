@@ -247,7 +247,6 @@ async def create_task(
     if task_type not in ("image", "video", "stream"):
         raise HTTPException(status_code=400, detail="task_type must be image/video/stream")
 
-    # Validate input_types
     try:
         types_list = json.loads(input_types)
         assert isinstance(types_list, list) and types_list
@@ -300,7 +299,6 @@ async def create_task(
                     detail=f"Selected model does not support input type '{t}'",
                 )
 
-    # Process detection config from multiple Form fields
     detection_config = {}
     if threshold is not None:
         detection_config["global_threshold"] = threshold # Internal format unified to 0-1
@@ -331,7 +329,6 @@ async def create_task(
             if categories_list:
                 detection_config["categories"] = categories_list
 
-    # Create task record
     # 多模型时 model_id 使用第一个模型（向后兼容），fusion_config 存入 detection_config
     effective_model_id = model_id if not parsed_model_ids else parsed_model_ids[0]["model_id"]
     if fusion_config and parsed_model_ids:
@@ -369,7 +366,6 @@ async def create_task(
         session.commit()
         logger.info(f"[Tasks] Created {len(parsed_model_ids)} TaskModel records for task {task.id}")
 
-    # Handle source
     try:
         if source_type == "upload":
             task_dir = config.UPLOADS_DIR / current_user.id / task.id
@@ -377,7 +373,6 @@ async def create_task(
             ir_dir = task_dir / "ir"
             rgb_dir.mkdir(parents=True, exist_ok=True)
 
-            # Check total size
             total_size = sum([f.size or 0 for f in rgb_files + ir_files])
             if not check_storage_limit(current_user.id, total_size):
                 raise ValueError("Storage limit exceeded.")
@@ -573,7 +568,6 @@ async def delete_task(
 
     session.delete(task)
 
-    # Delete result record
     result = session.exec(select(TaskResult).where(TaskResult.task_id == task_id)).first()
     if result:
         if result.result_path and os.path.exists(result.result_path):
@@ -583,11 +577,9 @@ async def delete_task(
                 os.remove(result.result_path)
         session.delete(result)
 
-    # Delete upload files
     if task.source_type == "upload" and task.source_path and os.path.exists(task.source_path):
         shutil.rmtree(task.source_path, ignore_errors=True)
 
-    # Delete result files
     result_dir = config.RESULTS_DIR / current_user.id / task_id
     if result_dir.exists():
         shutil.rmtree(result_dir, ignore_errors=True)
@@ -599,12 +591,10 @@ async def delete_task(
     session.exec(sa_delete(DetectionRecord).where(DetectionRecord.task_id == task_id))
     session.exec(sa_delete(DetectionEvent).where(DetectionEvent.task_id == task_id))
 
-    # ── V1.2.15: Physical Cleanup of Recorded Videos ──────────────────
-    # Re-verify and delete the storage segments
+    # V1.2.15: 清理录制视频分段
     history_dir = config.VIDEO_STORAGE_DIR / task_id
     if history_dir.exists():
         shutil.rmtree(history_dir, ignore_errors=True)
-    # ──────────────────────────────────────────────────────────────────
 
     session.commit()
     return {"message": "Task deleted"}
@@ -618,9 +608,7 @@ def _rebuild_m3u8_from_segments(m3u8_path: Path, ts_files: list[Path], task_id: 
 
     segment_entries = []
     for ts_file in ts_files:
-        # 尝试从 FFmpeg 日志或文件名推断时长，默认每段 1 秒
         duration = 1.0
-        # 从文件名提取编号用于排序
         match = re.search(r"stream_annotated(\d+)\.ts", ts_file.name)
         seg_num = int(match.group(1)) if match else 0
         segment_entries.append((seg_num, duration, ts_file.name))
@@ -684,7 +672,6 @@ async def execute_task(
         mapping = None
 
         if task_models:
-            # 多模型模式
             model_configs = []
             for tm in sorted(task_models, key=lambda t: t.order_index):
                 tm_dm = session.get(DetectionModel, tm.model_id)
@@ -696,7 +683,6 @@ async def execute_task(
                         tm_mapping = json.loads(tm_dm.label_config)
                     except Exception:
                         pass
-                # 解析 per_class_config
                 per_class_config = {}
                 thresholds = json.loads(tm.per_class_thresholds) if tm.per_class_thresholds else {}
                 enabled = json.loads(tm.enabled_classes) if tm.enabled_classes else []
@@ -723,7 +709,6 @@ async def execute_task(
             # 第一个模型作为主模型（兼容）
             dm = session.get(DetectionModel, task_models[0].model_id)
             mapping = model_configs[0]["label_mapping"]
-            # 从 detection_config 中提取 fusion_config
             det_cfg = json.loads(task.detection_config) if task.detection_config else {}
             fusion_config = det_cfg.get("fusion_config", {})
         else:
@@ -771,11 +756,9 @@ async def execute_task(
                                 f"rebuilt from {len(old_segments)} segments"
                             )
                     except Exception:
-                        # 读取失败：重建 m3u8
                         _rebuild_m3u8_from_segments(old_m3u8, old_segments, task.id)
                         is_resume = True
                 else:
-                    # m3u8 不存在但 .ts 文件在：重建 m3u8
                     _rebuild_m3u8_from_segments(old_m3u8, old_segments, task.id)
                     is_resume = True
                     logger.info(
@@ -804,7 +787,6 @@ async def execute_task(
             session.commit()
             logger.info(f"[Tasks] Closed {len(orphaned)} orphaned ENTER events for task {task.id}")
 
-        # DB 立即置为 running，前端响应"正在连接"
         task.status = "initializing"
         task.error_msg = ""
         task.updated_at = now_beijing()
@@ -835,7 +817,6 @@ async def execute_task(
         
         return {"message": "Stream execution started", "position": 0}
     else:
-        # Check if already queued
         if task.status == "queued":
             return {"message": "Task already queued", "position": -1}
             
@@ -987,7 +968,6 @@ def get_historical_detections(
         
         records = session.exec(stmt).all()
         
-        # 2. 内存聚合：将同一毫秒内的框组合在一起
         # 【双时间戳架构】：使用 detected_at 的 Unix 时间戳作为 key（毫秒级对齐）
         grouped_data = defaultdict(list)
         for r in records:
@@ -1004,7 +984,6 @@ def get_historical_detections(
                 "label": r.class_name
             })
             
-        # 3. 转换为前端缓冲池期望的格式
         result = [
             {"timestamp": ts, "timestamp_ms": ts, "boxes": boxes}
             for ts, boxes in sorted(grouped_data.items())
@@ -1420,7 +1399,6 @@ async def gpu_status(
     checks: dict = {}
     reason_parts: list[str] = []
     
-    # 1. onnxruntime-gpu 安装检查
     try:
         import onnxruntime as ort
         providers = ort.get_available_providers()
@@ -1458,7 +1436,6 @@ async def gpu_status(
     if not checks["vram_sufficient"]:
         reason_parts.append(f"显存不足 (当前: {checks.get('vram_mb', 0)}MB, 需要: 512MB)")
     
-    # 综合判定
     available = all([
         checks.get("onnx_gpu", False),
         checks.get("cuda_available", False),

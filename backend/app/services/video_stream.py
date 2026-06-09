@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # 最低检测置信度阈值：低于此值的检测结果直接丢弃，防止误报
 DETECTION_CONF_FLOOR = 0.35
 
-# Global executor for async DB operations to prevent blocking the main loop
+# 异步 DB 操作全局线程池，避免阻塞主循环
 db_executor = ThreadPoolExecutor(max_workers=4)
 
 

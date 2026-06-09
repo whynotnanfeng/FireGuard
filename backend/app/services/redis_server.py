@@ -113,5 +113,4 @@ class RedisServerManager:
                     pass
         logger.info("[RedisServer] Redis manager stopped.")
 
-# 全局单例
 redis_server = RedisServerManager()

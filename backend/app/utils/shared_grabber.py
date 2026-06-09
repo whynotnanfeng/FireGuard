@@ -25,8 +25,6 @@ logger = logging.getLogger(__name__)
 
 
 class SharedGrabber:
-    """单个 RTSP URL 的共享解码器 — 采集一次，分发多次"""
-
     def __init__(self, url: str, hw_accel: str = "auto",
                  width: int = 1920, height: int = 1080, fps: float = 15.0):
         self.url = url
@@ -132,7 +130,7 @@ class SharedGrabber:
 
     def _loop(self):
         consecutive_fail = 0
-        max_fail = 60  # ~4min 容错窗口 (60 × 2s timeout ≈ 120s)
+        max_fail = 60  # ~3s 容错窗口 (60 × 50ms sleep ≈ 3s)
         consecutive_restarts = 0
         last_diag = time.time()
         last_restart_time = 0.0
@@ -175,7 +173,6 @@ class SharedGrabber:
                 time.sleep(0.05)
                 continue
 
-            # 成功读取帧后重置
             if consecutive_restarts > 0 and time.time() - last_restart_time > 30:
                 consecutive_restarts = 0  # 稳定运行 30s 后重置退避计数器
 
@@ -203,8 +200,6 @@ class SharedGrabber:
 
 
 class SharedGrabberRegistry:
-    """全局单例 — URL → SharedGrabber 注册表"""
-
     def __init__(self):
         self._grabbers: Dict[str, SharedGrabber] = {}
         self._lock = threading.Lock()
@@ -216,7 +211,6 @@ class SharedGrabberRegistry:
         fps: float = 15.0,
         stream_ref=None,
     ) -> tuple:
-        """获取或创建共享 grabber，返回 (SharedGrabber, is_new)"""
         with self._lock:
             normalized = url.strip().rstrip("/")
             if normalized not in self._grabbers:
@@ -267,5 +261,4 @@ class SharedGrabberRegistry:
         }
 
 
-# 全局单例
 grabber_registry = SharedGrabberRegistry()

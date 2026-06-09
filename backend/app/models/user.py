@@ -21,6 +21,5 @@ class User(SQLModel, table=True):
     password_hash: str = Field(max_length=255)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
-    # Relationships
     tasks: List["Task"] = Relationship(back_populates="user")
     detection_models: List["DetectionModel"] = Relationship(back_populates="user")

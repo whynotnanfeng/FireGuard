@@ -7,7 +7,6 @@ _cached_encoders: dict | None = None
 
 
 def detect_hw_encoders(ffmpeg_path: str) -> dict:
-    """检测FFmpeg支持的所有硬件编码器，结果缓存"""
     global _cached_encoders
     if _cached_encoders is not None:
         return _cached_encoders

@@ -60,13 +60,9 @@ class Config:
     DETECTION_BATCH_WINDOW_MS: int = int(os.getenv("DETECTION_BATCH_WINDOW_MS", "100"))
 
     # --- [SECTION 4: HARDWARE & PARALLELISM] ---
-    # Global worker pool settings
-    # MAX_TOTAL_WORKERS: Total number of processes for AI inference
-    # WORKERS_PER_TASK_LIMIT: Max workers that can be assigned to a single stream
     MAX_TOTAL_WORKERS: int = int(os.getenv("MAX_TOTAL_WORKERS", str(max(2, (os.cpu_count() or 4) - 1))))
     WORKERS_PER_TASK_LIMIT: int = int(os.getenv("WORKERS_PER_TASK_LIMIT", "2"))
     
-    # Elastic Scaling Thresholds
     CPU_THRESHOLD_BALANCED: float = float(os.getenv("CPU_THRESHOLD_BALANCED", "80.0"))
     CPU_THRESHOLD_SURVIVAL: float = float(os.getenv("CPU_THRESHOLD_SURVIVAL", "95.0"))
     

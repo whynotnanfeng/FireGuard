@@ -7,7 +7,6 @@ import json
 
 
 class JSONFormatter(logging.Formatter):
-    """关键事件结构化日志格式化器"""
     def format(self, record):
         log_record = {
             "timestamp": self.formatTime(record, self.datefmt),
@@ -173,7 +172,6 @@ def setup_logging():
 
 
 def get_multiprocess_log_queue():
-    """获取用于多进程日志通信的队列"""
     from multiprocessing import Queue
     return Queue(-1)
 
@@ -195,7 +193,6 @@ def setup_child_process_logging():
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # 【P2-2 修复】：按 PID 隔离日志文件，避免多进程竞争同一文件
     pid = os.getpid()
     log_file = log_dir / f"detector_pid{pid}.log"
     

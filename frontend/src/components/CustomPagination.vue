@@ -67,7 +67,6 @@ const emit = defineEmits(['update:current', 'change'])
 const totalPages = computed(() => Math.ceil(props.total / props.pageSize) || 1)
 const jumpInput = ref('')
 
-// 确保输入框显示当前页码（可选，或者保持为空）
 watch(() => props.current, () => {
   jumpInput.value = ''
 })
@@ -85,7 +84,6 @@ const paginationWindow = computed(() => {
   let start = current - 1
   let end = current + 2
   
-  // 边界修正
   if (start < 1) {
     start = 1
     end = 4
@@ -98,7 +96,6 @@ const paginationWindow = computed(() => {
   return { start, end }
 })
 
-// 最终渲染的数字页码数组
 const visiblePages = computed(() => {
   const { start, end } = paginationWindow.value
   const pages = []

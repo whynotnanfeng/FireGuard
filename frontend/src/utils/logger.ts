@@ -105,27 +105,22 @@ class Logger {
     this.enqueue('error', category, message, details)
   }
 
-  // 流操作专用日志
   stream(action: string, taskId: string, details?: Record<string, unknown>) {
     this.info('stream', `Task ${taskId}: ${action}`, details)
   }
 
-  // 播放专用日志
   playback(action: string, taskId: string, details?: Record<string, unknown>) {
     this.info('playback', `Task ${taskId}: ${action}`, details)
   }
 
-  // WebSocket 专用日志
   websocket(action: string, taskId: string, details?: Record<string, unknown>) {
     this.info('websocket', `Task ${taskId}: ${action}`, details)
   }
 
-  // HLS 专用日志
   hls(action: string, taskId: string, details?: Record<string, unknown>) {
     this.info('hls', `Task ${taskId}: ${action}`, details)
   }
 
-  // 任务操作日志
   task(action: string, taskId: string, details?: Record<string, unknown>) {
     this.info('task', `Task ${taskId}: ${action}`, details)
   }

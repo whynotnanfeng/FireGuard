@@ -184,23 +184,6 @@ class FFmpegCapture:
 
     通过 FFmpeg 子进程读取 RTSP 流，输出原始 BGR 帧到管道。
     相比 OpenCV VideoCapture，具有更好的异常恢复能力。
-
-    Attributes:
-        rtsp_url: RTSP 流地址
-        width: 视频宽度
-        height: 视频高度
-        fps: 目标帧率
-        transport: 传输协议（tcp/udp）
-        reconnect_delay: 重连延迟（秒）
-        process: FFmpeg 子进程
-        _frame_size: 单帧字节数
-        _frame_count: 累计帧计数
-        _reconnect_count: 重连次数
-        _last_frame_time: 最后帧时间戳
-        _read_queue: Windows 下的读取队列
-        _read_thread: Windows 下的读取线程
-        _lock: 线程锁
-        _stop_event: 停止事件
     """
 
     def __init__(
