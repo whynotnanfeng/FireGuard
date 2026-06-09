@@ -42,7 +42,6 @@ def get_metadata():
         return {}
 
 
-# 【性能优化】：元数据缓存，TTL 5 秒，减少频繁刷新页面时的磁盘 I/O
 _metadata_cache: dict = {"data": None, "time": 0.0}
 _METADATA_CACHE_TTL = 5.0
 
@@ -84,7 +83,6 @@ sh.setFormatter(formatter)
 logger.addHandler(sh)
 
 
-# Helper to find binaries
 def find_executable(name: str):
     direct = BIN_DIR / f"{name}.exe"
     if direct.exists():
@@ -371,7 +369,6 @@ paths:
     
     stream_manager = StreamManager(ffmpeg_path=ffmpeg_path, rtsp_server_url=f"rtsp://127.0.0.1:{rtsp_port}")
 
-    # P0 修复：启动流健康监控
     stream_manager.start_health_monitor()
 
     try:
@@ -411,14 +408,12 @@ async def shutdown():
     if mediamtx_process:
         mediamtx_process.terminate()
     
-    # 从配置中心注销
     try:
         import redis as _redis
         import json as _json
         r = _redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
         r.hdel("fireguard:registry", "simulator")
-        
-        # 如果是 MediaMTX 所有者，也一并注销
+
         owner_data = r.get("fireguard:mediamtx:owner")
         if owner_data:
             owner = _json.loads(owner_data)

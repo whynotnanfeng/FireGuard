@@ -64,7 +64,6 @@ class StreamManager:
         self._health_check_task: Optional[asyncio.Task] = None
         self._stop_health_check = threading.Event()
         
-        # P0 修复：流健康监控增强
         self.stream_start_times: Dict[str, float] = {}  # 记录流启动时间
         self.stream_health_history: Dict[str, List[bool]] = {}  # 健康历史记录
 
@@ -320,13 +319,11 @@ class StreamManager:
                     f"最后错误: {last_error[:500] if last_error else 'unknown'}"
                 )
 
-            # V4.10: CPU affinity 移除 — 交由 OS 自由调度
-
             start_time = time.time()
 
             self.streams[stream_id] = process
             self.log_handles[stream_id] = log_file
-            self.stream_start_times[stream_id] = time.time()  # P0 修复：记录流启动时间
+            self.stream_start_times[stream_id] = time.time()
 
             self.stream_info[stream_id] = {
                 "id": stream_id,
@@ -346,10 +343,9 @@ class StreamManager:
                 "hw_accel": hw_accel,
                 "hw_accel_used": hw_accel_used,
                 "final_vcodec": final_vcodec,
-                "start_time": time.time(),  # 【P0-5 诊断日志】：记录启动时间
+                "start_time": time.time(),
             }
-            
-            # 【P0-5 诊断日志】：FFmpeg 启动成功，输出详细诊断信息
+
             logger.info(
                 f"[DIAG-SIM] FFmpeg started: {stream_id} ({final_vcodec}/{transport}, hw={hw_accel_used}) -> {rtsp_url} "
                 f"(Ready after {time.time() - start_time:.1f}s, PID={process.pid})"
@@ -447,7 +443,6 @@ class StreamManager:
         return list(self.stream_info.values())
 
     def stop_all(self):
-        # 【P0 修复】：停止健康监控线程
         self.stop_health_monitor()
         
         ids = list(self.streams.keys())
