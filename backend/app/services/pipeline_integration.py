@@ -1,17 +1,17 @@
 """
-推理管线集成模块 - 将 OverlayInjector 和 ObjectTracker 集成到推理流程
+Inference pipeline integration module - wires OverlayInjector and ObjectTracker into the inference flow
 
-职责：
-1. 接收原始帧和推理结果
-2. 注入检测框到帧（用于 HLS 流）
-3. 追踪目标状态并生成事件（用于数据库记录）
-4. 返回带标注的帧和事件列表
+Responsibilities:
+1. Receive raw frames and inference results
+2. Inject detection bounding boxes into frames (for the HLS stream)
+3. Track object state and generate events (for database records)
+4. Return the annotated frame and the list of events
 
-这是新架构的核心胶水代码，连接：
-- InferenceWorker（推理）
-- OverlayInjector（帧内绘制）
-- ObjectTracker（目标追踪）
-- EventProcessor（事件驱动记录）
+This is the core glue code of the new architecture, connecting:
+- InferenceWorker (inference)
+- OverlayInjector (in-frame drawing)
+- ObjectTracker (object tracking)
+- EventProcessor (event-driven recording)
 """
 
 from __future__ import annotations
@@ -32,19 +32,19 @@ logger = logging.getLogger(__name__)
 
 class InferencePipelineIntegration:
     """
-    推理管线集成器
-    
-    使用示例:
+    Inference pipeline integrator
+
+    Usage example:
         pipeline = InferencePipelineIntegration(task_id="task_123")
-        
-        # 每帧调用
+
+        # Call for every frame
         annotated_frame, events = pipeline.process_frame(
             frame=raw_frame,
             detections=detections,
             timestamp_ms=timestamp_ms
         )
-        
-        # events 包含 Enter/Leave 事件，可推送给前端或写入数据库
+
+        # events contains Enter/Leave events, which can be pushed to the frontend or written to the database
     """
     
     def __init__(
@@ -77,17 +77,17 @@ class InferencePipelineIntegration:
         timestamp_ms: int,
     ) -> Tuple[np.ndarray, List[TrackEvent]]:
         """
-        处理单帧：注入检测框 + 追踪目标 + 生成事件
-        
+        Process a single frame: inject detection boxes + track objects + generate events
+
         Args:
-            frame: 原始 BGR 帧
-            detections: 推理结果
-            timestamp_ms: 时间戳（毫秒）
-            
+            frame: Raw BGR frame
+            detections: Inference results
+            timestamp_ms: Timestamp (milliseconds)
+
         Returns:
             (annotated_frame, events)
-            - annotated_frame: 带检测框的帧
-            - events: 追踪事件列表（Enter/Update/Leave）
+            - annotated_frame: Frame with detection boxes drawn
+            - events: List of tracking events (Enter/Update/Leave)
         """
         self._frame_count += 1
         
@@ -117,7 +117,7 @@ class InferencePipelineIntegration:
         }
     
     def reset(self):
-        """重置所有状态（用于流切换或任务重启）"""
+        """Reset all state (used on stream switch or task restart)"""
         self.tracker.reset()
         self.event_processor.reset()
         self._frame_count = 0

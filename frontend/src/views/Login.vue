@@ -5,15 +5,15 @@
         <div class="logo-icon">
           <FireOutlined />
         </div>
-        <h1 class="brand-title">火灾监测系统</h1>
-        <p class="brand-subtitle">FIRE DETECTION SYSTEM</p>
+        <h1 class="brand-title">FireGuard</h1>
+        <p class="brand-subtitle">Intelligent Fire Monitoring System</p>
       </div>
 
       <a-form :model="form" @keyup.enter="handleSubmit" class="login-form">
         <a-form-item>
           <a-input 
             v-model:value="form.username" 
-            placeholder="用户名" 
+            placeholder="Username" 
             class="login-input"
             size="large"
           >
@@ -23,7 +23,7 @@
         <a-form-item>
           <a-input-password 
             v-model:value="form.password" 
-            placeholder="密码" 
+            placeholder="Password" 
             class="login-input"
             size="large"
           >
@@ -33,7 +33,7 @@
         
         <div class="form-actions">
            <span class="toggle-mode" @click="isRegister = !isRegister">
-            {{ isRegister ? '去登录' : '没有账号？注册' }}
+            {{ isRegister ? 'Sign In' : 'No account? Sign Up' }}
            </span>
         </div>
 
@@ -43,7 +43,7 @@
           :loading="loading" 
           @click="handleSubmit"
         >
-          {{ isRegister ? '注册并登录' : '登 录' }}
+          {{ isRegister ? 'Sign Up & Login' : 'Log In' }}
         </a-button>
         
       </a-form>
@@ -74,33 +74,33 @@ const form = reactive({
 async function handleSubmit() {
   console.log('[Login] handleSubmit triggered', form.username)
   if (!form.username || !form.password) {
-    message.warning('请输入用户名和密码')
+    message.warning('Please enter your username and password')
     return
   }
   loading.value = true
   try {
     if (isRegister.value) {
       await authStore.register(form.username, form.password)
-      message.success('注册成功')
+      message.success('Registration successful')
     } else {
       await authStore.login(form.username, form.password)
-      message.success('欢迎回来')
+      message.success('Welcome back')
     }
   } catch (e: any) {
     console.error('Login error details:', e)
     
-    let errorMsg = '登录失败，请检查网络连接'
+    let errorMsg = 'Login failed. Please check your network connection'
     
     if (e.response) {
       const status = e.response.status
       const detail = e.response.data?.detail
       
       if (status === 401) {
-        errorMsg = '用户名或密码错误'
+        errorMsg = 'Incorrect username or password'
       } else if (status === 400) {
-        errorMsg = typeof detail === 'string' ? detail : '请求参数错误'
+        errorMsg = typeof detail === 'string' ? detail : 'Invalid request parameters'
       } else if (status === 500) {
-        errorMsg = '服务器内部错误，请联系管理员'
+        errorMsg = 'Internal server error. Please contact the administrator'
       } else if (detail) {
         errorMsg = typeof detail === 'string' ? detail : JSON.stringify(detail)
       }

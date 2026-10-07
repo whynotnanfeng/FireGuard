@@ -38,7 +38,7 @@ request.interceptors.response.use(
     const status = err.response?.status
     const detail = err.response?.data?.detail
 
-    // 避免在登录页时重复跳转导致循环
+    // Avoid redirect loops when already on the login page
     if (status === 401) {
       localStorage.removeItem('token')
       const isLoginRequest = err.config?.url?.includes('/auth/login')
@@ -53,9 +53,9 @@ request.interceptors.response.use(
         ? detail
         : Array.isArray(detail)
         ? detail.map((e: any) => e.msg).join('; ')
-        : err.message || '请求失败'
+        : err.message || 'Request failed'
 
-    // 409 和 canceled 错误由调用方自行处理
+    // 409 and canceled errors are handled by the caller
     if (status !== 409 && !axios.isCancel(err) && err.message !== 'canceled') {
       message.error(errorMsg)
     }

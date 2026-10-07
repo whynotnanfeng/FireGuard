@@ -12,43 +12,43 @@ from app.config import config
 logger = logging.getLogger(__name__)
 
 class BaseBroker:
-    """消息总线接口：支持同步发布、异步订阅、状态快照和缓存管理。"""
+    """Message bus interface: supports synchronous publish, async subscribe, status snapshots and cache management."""
 
     def publish_sync(self, channel: str, message: dict):
-        """同步发布消息到指定频道（线程安全）。"""
+        """Publish a message to the given channel synchronously (thread-safe)."""
         raise NotImplementedError
 
     async def subscribe(self, channel: str) -> Any:
-        """异步订阅频道，返回 asyncio.Queue。"""
+        """Subscribe to a channel asynchronously, returning an asyncio.Queue."""
         raise NotImplementedError
 
     async def unsubscribe(self, channel: str, subscriber: Any):
-        """取消订阅，释放资源。"""
+        """Unsubscribe and release resources."""
         raise NotImplementedError
 
     async def get_recent_cache(self, channel: str, limit: int = 150) -> List[dict]:
-        """获取频道最近 N 条缓存消息。"""
+        """Get the N most recent cached messages of a channel."""
         raise NotImplementedError
 
     def set_status(self, task_id: str, status_payload: dict):
-        """设置任务状态快照（供 WebSocket 轮询）。"""
+        """Set the task status snapshot (for WebSocket polling)."""
         raise NotImplementedError
 
     def get_status(self, task_id: str) -> Optional[dict]:
-        """获取任务最新状态快照。"""
+        """Get the latest status snapshot of a task."""
         raise NotImplementedError
 
     def clear_status(self, task_id: str):
-        """清除任务状态快照。"""
+        """Clear the task status snapshot."""
 
     def clear_cache(self, channel: str):
-        """清除频道消息缓存。"""
+        """Clear the channel message cache."""
 
     async def connect(self):
-        """建立连接（Redis 模式下创建连接池）。"""
+        """Establish the connection (creates a connection pool in Redis mode)."""
 
     async def disconnect(self):
-        """断开连接并释放资源。"""
+        """Disconnect and release resources."""
 
 class InMemoryBroker(BaseBroker):
     def __init__(self):
@@ -123,13 +123,16 @@ class InMemoryBroker(BaseBroker):
 
 class HybridBroker(BaseBroker):
     """
-    混合消息总线：优先使用 Redis，Redis 不可用时自动降级为内存分发。
-    
-    核心设计：
-    - publish_sync: 始终先写内存缓存+分发给本地订阅者，再尝试写 Redis
-    - 如果 Redis 不可用，本地分发仍然正常工作
-    - _listen_loop: 仅在 Redis 可用时运行，负责跨进程/跨机器的消息分发
-    - 对于单机部署（我们的场景），_listen_loop 不是必需的
+    Hybrid message bus: prefers Redis and automatically degrades to in-memory dispatch
+    when Redis is unavailable.
+
+    Core design:
+    - publish_sync: always writes to the in-memory cache and dispatches to local subscribers
+      first, then attempts to write to Redis
+    - Local dispatch keeps working even if Redis is unavailable
+    - _listen_loop: runs only when Redis is available; responsible for cross-process /
+      cross-machine message dispatch
+    - For single-machine deployments (our scenario), _listen_loop is not required
     """
 
     def __init__(self, redis_url: str):
@@ -208,7 +211,7 @@ class HybridBroker(BaseBroker):
         self._sync_redis = None
 
     async def _health_monitor(self):
-        """Redis 健康监控：定期 ping 检测连接状态，自动标记可用性"""
+        """Redis health monitoring: periodic ping checks the connection state and automatically flags availability"""
         while not self._shutting_down:
             try:
                 await asyncio.sleep(5.0)
@@ -251,8 +254,8 @@ class HybridBroker(BaseBroker):
 
     def publish_sync(self, channel: str, message: dict):
         """
-        核心方法：始终先做本地内存分发，再尝试 Redis 持久化。
-        即使 Redis 完全不可用，本地 WebSocket 客户端仍能收到消息。
+        Core method: always performs local in-memory dispatch first, then tries Redis persistence.
+        Even if Redis is completely unavailable, local WebSocket clients still receive messages.
         """
         with self._lock:
             self._cache[channel].append(message)

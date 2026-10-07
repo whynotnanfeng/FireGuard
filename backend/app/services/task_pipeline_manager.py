@@ -1,8 +1,8 @@
 """
-服务端帧嵌入渲染 — 帧精确检测框对齐
+Server-side frame embedding renderer - frame-accurate detection box alignment
 
-AnnotatedHLSWriter + OverlayInjector 恢复，与 tracker/event_processor 共存。
-720p 输出 + 10fps 降低 CPU 负载，避免之前的卡顿问题。
+Restores AnnotatedHLSWriter + OverlayInjector, coexisting with tracker/event_processor.
+720p output at 10fps reduces CPU load and avoids the earlier stuttering problem.
 """
 
 from __future__ import annotations
@@ -158,7 +158,7 @@ class TaskPipelineManager:
         logger.info(f"[TaskPipeline-{self.task_id}] Stopped")
 
     def _flush_active_tracks(self):
-        """停止时为所有活跃轨迹生成 LEAVE 事件，确保 ENTER 记录不会成为孤立记录"""
+        """On stop, generate LEAVE events for all active tracks so no ENTER record is left orphaned"""
         import time as _time
 
         active_ids = list(self.tracker.tracks.keys())

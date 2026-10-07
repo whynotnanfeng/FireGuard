@@ -33,7 +33,7 @@ class Notifier:
             return
         
         self._last_states[task_id] = state_key
-        # 改造：仅在非 running 状态或强制更新时打印日志，避免秒级刷屏
+        # Refinement: log only for non-running states or forced updates, to avoid per-second log flooding
         if status != "running" or force:
             logger.info(f"[Notifier] Broadcasting update for {task_id}: {status} ({message})")
 

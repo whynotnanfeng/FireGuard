@@ -118,7 +118,7 @@ async def test_video_stream_exception_bypass_grace_period(mock_detector):
 @pytest.mark.asyncio
 async def test_video_stream_active_broadcast_grace(mock_detector):
     """
-    Verify that _active_broadcast forces 'running/正在连接' during grace period.
+    Verify that _active_broadcast forces 'running/connecting' during the grace period.
     """
     task_id = "test-task"
     source = "rtsp://localhost/test"

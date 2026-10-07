@@ -10,14 +10,14 @@ import { computed } from 'vue'
 const props = defineProps<{ status: string }>()
 
 const statusMap: Record<string, { type: string; text: string }> = {
-  creating:     { type: 'default', text: '创建中' },
-  pending:      { type: 'default', text: '待执行' },
-  queued:       { type: 'warning', text: '排队中' },
-  initializing: { type: 'processing', text: '初始化中' },
-  running:      { type: 'processing', text: '执行中' },
-  completed:    { type: 'success', text: '已完成' },
-  failed:       { type: 'error', text: '失败' },
-  exception:    { type: 'error', text: '出现异常' },
+  creating:     { type: 'default', text: 'Creating' },
+  pending:      { type: 'default', text: 'Pending' },
+  queued:       { type: 'warning', text: 'Queued' },
+  initializing: { type: 'processing', text: 'Initializing' },
+  running:      { type: 'processing', text: 'Running' },
+  completed:    { type: 'success', text: 'Completed' },
+  failed:       { type: 'error', text: 'Failed' },
+  exception:    { type: 'error', text: 'Exception' },
 }
 
 const statusType = computed(() => statusMap[props.status]?.type || 'default')

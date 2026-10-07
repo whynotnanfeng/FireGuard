@@ -1,45 +1,45 @@
-"""数据库迁移脚本：添加新表和新字段"""
+"""Database migration script: add new tables and new fields"""
 import sqlite3
 import os
 from pathlib import Path
 
-# 数据库路径
+# Database path
 DB_PATH = Path(__file__).parent / "data" / "fire_detection.db"
 
 def migrate():
     if not DB_PATH.exists():
-        print(f"数据库文件不存在: {DB_PATH}")
+        print(f"Database file does not exist: {DB_PATH}")
         return
     
     conn = sqlite3.connect(str(DB_PATH))
     cursor = conn.cursor()
     
-    # 1. 添加 detection_models 表的新字段
-    print("检查 detection_models 表字段...")
+    # 1. Add new fields to the detection_models table
+    print("Checking detection_models table fields...")
     
-    # 检查 default_threshold 字段
+    # Check the default_threshold field
     cursor.execute("PRAGMA table_info(detection_models)")
     columns = [col[1] for col in cursor.fetchall()]
     
     if "default_threshold" not in columns:
-        print("添加 default_threshold 字段...")
+        print("Adding default_threshold field...")
         cursor.execute("ALTER TABLE detection_models ADD COLUMN default_threshold FLOAT DEFAULT 0.25")
     
     if "class_names" not in columns:
-        print("添加 class_names 字段...")
+        print("Adding class_names field...")
         cursor.execute("ALTER TABLE detection_models ADD COLUMN class_names TEXT DEFAULT '[]'")
     
-    # 2. 添加 tasks 表的新字段
-    print("检查 tasks 表字段...")
+    # 2. Add new fields to the tasks table
+    print("Checking tasks table fields...")
     cursor.execute("PRAGMA table_info(tasks)")
     columns = [col[1] for col in cursor.fetchall()]
     
     if "detection_config" not in columns:
-        print("添加 detection_config 字段...")
+        print("Adding detection_config field...")
         cursor.execute("ALTER TABLE tasks ADD COLUMN detection_config TEXT DEFAULT '{}'")
     
-    # 3. 创建 detection_records 表
-    print("创建 detection_records 表...")
+    # 3. Create the detection_records table
+    print("Creating detection_records table...")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS detection_records (
             id TEXT PRIMARY KEY,
@@ -52,12 +52,12 @@ def migrate():
         )
     """)
     
-    # 创建索引
+    # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_detection_records_task_id ON detection_records(task_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_detection_records_detected_at ON detection_records(detected_at)")
     
-    # 4. 创建 detection_events 表（事件驱动检测记录）
-    print("创建 detection_events 表...")
+    # 4. Create the detection_events table (event-driven detection records)
+    print("Creating detection_events table...")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS detection_events (
             id TEXT PRIMARY KEY,
@@ -77,7 +77,7 @@ def migrate():
         )
     """)
     
-    # 创建索引
+    # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_detection_events_task_id ON detection_events(task_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_detection_events_track_id ON detection_events(track_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_detection_events_event_type ON detection_events(event_type)")
@@ -87,7 +87,7 @@ def migrate():
     
     conn.commit()
     conn.close()
-    print("数据库迁移完成！")
+    print("Database migration complete!")
 
 if __name__ == "__main__":
     migrate()

@@ -26,7 +26,7 @@ logger = logging.getLogger("simulator")
 
 
 def detect_hw_encoders(ffmpeg_path: str) -> dict:
-    """检测所有可用的硬件编码器，返回检测结果"""
+    """Detect all available hardware encoders and return the detection results"""
     result = {"nvenc": False, "qsv": False, "amf": False}
     try:
         cmd = [ffmpeg_path, "-hide_banner", "-encoders"]
@@ -56,16 +56,16 @@ class StreamManager:
         if not hasattr(self, "log_handles"):
             self.log_handles: Dict[str, object] = {}
         
-        # 【P0 修复】：流健康监控配置
-        self.health_check_interval = 10  # 每 10 秒检查一次
-        self.max_stream_duration = 86400  # 单流最大运行 24 小时，-stream_loop -1 保证无缝循环
-        self.consecutive_fail_threshold = 3  # 连续失败 3 次则重启
+        # [P0 fix]: stream health monitoring configuration
+        self.health_check_interval = 10  # check once every 10 seconds
+        self.max_stream_duration = 86400  # max 24h per stream; -stream_loop -1 guarantees seamless looping
+        self.consecutive_fail_threshold = 3  # restart after 3 consecutive failures
         self._health_check_thread: Optional[threading.Thread] = None
         self._health_check_task: Optional[asyncio.Task] = None
         self._stop_health_check = threading.Event()
         
-        self.stream_start_times: Dict[str, float] = {}  # 记录流启动时间
-        self.stream_health_history: Dict[str, List[bool]] = {}  # 健康历史记录
+        self.stream_start_times: Dict[str, float] = {}  # records when each stream started
+        self.stream_health_history: Dict[str, List[bool]] = {}  # health history records
 
     @property
     def hw_encoders(self) -> dict:
@@ -75,9 +75,9 @@ class StreamManager:
 
     def _ensure_mediamtx_stream(self, stream_path: str) -> bool:
         """
-        MediaMTX 使用 publisher 模式，FFmpeg 直接推流到 RTSP 服务器，
-        不需要预先注册流路径。
-        此方法保留用于兼容性，实际不需要任何操作。
+        MediaMTX runs in publisher mode: FFmpeg pushes directly to the RTSP server,
+        so stream paths do not need to be registered in advance.
+        This method is kept for compatibility and requires no actual work.
         """
         return True
 
@@ -109,7 +109,7 @@ class StreamManager:
                 f"Available: {[k for k, v in self.hw_encoders.items() if v]}"
             )
 
-        # hw_accel == "auto" → auto-select GPU (不降级到 CPU)
+        # hw_accel == "auto" → auto-select GPU (no CPU fallback)
         if self.hw_encoders.get("nvenc"):
             logger.info("[Simulator] Auto-selected NVENC hardware encoder")
             return "h264_nvenc", True
@@ -160,7 +160,7 @@ class StreamManager:
         crf: Optional[int] = None,
         preset: Optional[str] = None,
         transport: str = "tcp",
-        device_name: str = "未知设备",
+        device_name: str = "Unknown Device",
         hw_accel: str = "auto",
     ):
         """
@@ -168,8 +168,8 @@ class StreamManager:
         Supports granular transcoding parameters and hardware encoding.
 
         Args:
-            hw_accel: "auto" (自动选择最优硬件编码), "nvenc" (强制 NVIDIA),
-                      "amf" (强制 AMD), "qsv" (强制 Intel), "cpu" (强制 libx264)
+            hw_accel: "auto" (auto-select the best hardware encoder), "nvenc" (force NVIDIA),
+                      "amf" (force AMD), "qsv" (force Intel), "cpu" (force libx264)
         """
         if stream_id in self.streams:
             self.stop_stream(stream_id)
@@ -178,8 +178,8 @@ class StreamManager:
 
         abs_video_path = os.path.abspath(video_path).replace("\\", "/")
 
-        # V4.11: CPU 解码 → 释放 GPU 给 ONNX 推理
-        # GTX 1060 + CUDA 13 + ONNX 1.26 环境兼容性复杂，优先保证推理可用
+        # V4.11: CPU decode → free the GPU for ONNX inference
+        # The GTX 1060 + CUDA 13 + ONNX 1.26 environment is complex; prioritise keeping inference available
         decode_opts = []
 
         cmd = [
@@ -248,10 +248,10 @@ class StreamManager:
             rtsp_url,
         ]
 
-        # 1. MediaMTX 使用 publisher 模式，不需要预先注册流路径
+        # 1. MediaMTX runs in publisher mode, so stream paths do not need to be registered in advance
         self._registered_paths[stream_id] = stream_path
 
-        # 2. 净化子进程环境变量，防止全局 OpenCV 捕获参数干扰纯 FFmpeg 命令行推流
+        # 2. Sanitise the child process environment so global OpenCV capture options cannot interfere with the pure FFmpeg CLI push
         clean_env = os.environ.copy()
         clean_env.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
 
@@ -300,7 +300,7 @@ class StreamManager:
                 except Exception:
                     last_error = f"exit code {process.returncode}"
 
-                # 提取真正的错误信息（过滤 FFmpeg 编译选项等无关信息）
+                # Extract the real error message (filtering out irrelevant FFmpeg build options etc.)
                 error_lines = last_error.split('\n')
                 meaningful_errors = [
                     line for line in error_lines
@@ -315,8 +315,8 @@ class StreamManager:
 
             if process is None or process.poll() is not None:
                 raise Exception(
-                    f"FFmpeg 启动失败，已重试 {max_startup_retries} 次。"
-                    f"最后错误: {last_error[:500] if last_error else 'unknown'}"
+                    f"FFmpeg failed to start after {max_startup_retries} retries. "
+                    f"Last error: {last_error[:500] if last_error else 'unknown'}"
                 )
 
             start_time = time.time()
@@ -380,8 +380,8 @@ class StreamManager:
 
     def check_stream_health(self, stream_id: str) -> dict:
         """
-        【P0-5 诊断日志】：检查单个流的健康状态
-        返回：{ is_alive, elapsed_seconds, exit_code, ... }
+        [P0-5 diagnostic log]: check the health of a single stream
+        Returns: { is_alive, elapsed_seconds, exit_code, ... }
         """
         if stream_id not in self.streams:
             return {"is_alive": False, "reason": "stream_not_found"}
@@ -402,14 +402,14 @@ class StreamManager:
             "hw_accel_used": info.get("hw_accel_used"),
         }
         
-        # 【P0-5 诊断日志】：如果流已死亡，输出警告
+        # [P0-5 diagnostic log]: log a warning if the stream has died
         if not is_alive:
             logger.warning(
                 f"[DIAG-SIM] Stream {stream_id} died after {elapsed:.1f}s! "
                 f"exit_code={process.returncode}, pid={process.pid}"
             )
         
-        # 【P0-5 诊断日志】：接近 50 秒时输出信息
+        # [P0-5 diagnostic log]: log info as it approaches the 50 second mark
         if 49.0 <= elapsed <= 51.0:
             logger.info(
                 f"[DIAG-SIM] Stream {stream_id} approaching 50s mark: "
@@ -450,8 +450,8 @@ class StreamManager:
             self.stop_stream(sid)
     
     def start_health_monitor(self):
-        """启动流健康监控（优先使用 asyncio Task，回退到线程）。"""
-        # 尝试使用 asyncio Task
+        """Start the stream health monitor (prefer an asyncio Task, fall back to a thread)."""
+        # Try an asyncio Task first
         try:
             loop = asyncio.get_running_loop()
             if self._health_check_task and not self._health_check_task.done():
@@ -460,9 +460,9 @@ class StreamManager:
             logger.info("[Simulator] Health monitor started (asyncio)")
             return
         except RuntimeError:
-            pass  # 没有运行中的事件循环，回退到线程
+            pass  # no running event loop, fall back to a thread
 
-        # 回退到线程
+        # Fall back to a thread
         if self._health_check_thread and self._health_check_thread.is_alive():
             return
         self._stop_health_check.clear()
@@ -473,7 +473,7 @@ class StreamManager:
         logger.info("[Simulator] Health monitor started (thread)")
     
     async def stop_health_monitor_async(self):
-        """停止 asyncio 版本的健康监控。"""
+        """Stop the asyncio version of the stream health monitor."""
         if self._health_check_task and not self._health_check_task.done():
             self._health_check_task.cancel()
             try:
@@ -484,15 +484,15 @@ class StreamManager:
         logger.info("[Simulator] Health monitor stopped (asyncio)")
 
     def stop_health_monitor(self):
-        """停止流健康监控后台线程。"""
-        # 先尝试取消 asyncio task
+        """Stop the stream health monitor background thread."""
+        # Try to cancel the asyncio task first
         if self._health_check_task and not self._health_check_task.done():
             self._health_check_task.cancel()
             self._health_check_task = None
             logger.info("[Simulator] Health monitor stopped (asyncio)")
             return
 
-        # 回退到线程
+        # Fall back to the thread
         self._stop_health_check.set()
         if self._health_check_thread:
             self._health_check_thread.join(timeout=5)
@@ -500,7 +500,7 @@ class StreamManager:
         logger.info("[Simulator] Health monitor stopped")
     
     def _health_check_loop(self):
-        """后台健康检查循环（线程版本，用于回退）。"""
+        """Background health check loop (thread version, used as a fallback)."""
         fail_counts: Dict[str, int] = {}
         
         while not self._stop_health_check.wait(self.health_check_interval):
@@ -529,7 +529,7 @@ class StreamManager:
                         self._auto_restart_stream(stream_id)
 
     async def _health_check_loop_async(self):
-        """后台健康检查循环（asyncio 版本）。"""
+        """Background health check loop (asyncio version)."""
         fail_counts: Dict[str, int] = {}
         
         while True:
@@ -559,7 +559,7 @@ class StreamManager:
                         self._auto_restart_stream(stream_id)
     
     def _auto_restart_stream(self, stream_id: str):
-        """自动重启单个 FFmpeg 推流进程"""
+        """Automatically restart a single FFmpeg streaming process"""
         if stream_id not in self.stream_info:
             return
         
@@ -582,7 +582,7 @@ class StreamManager:
                 crf=info.get("crf"),
                 preset=info.get("preset"),
                 transport=info.get("transport", "tcp"),
-                device_name=info.get("device_name", "未知设备"),
+                device_name=info.get("device_name", "Unknown Device"),
                 hw_accel=info.get("hw_accel", "auto"),
             )
             logger.info(f"[Simulator] Stream {stream_id} restarted successfully")

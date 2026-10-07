@@ -1,15 +1,15 @@
 # ============================================
 # FireGuard Backend - GPU Dependencies (CUDA 12.1 / cuDNN 9.1)
 # ============================================
-# 用法: pip install -r requirements-gpu.txt
-# 前提: 已安装 NVIDIA 驱动 (>= 525.60) 和 CUDA Toolkit 12.1
+# Usage:  pip install -r requirements-gpu.txt
+# Requires: NVIDIA driver (>= 525.60) and CUDA Toolkit 12.1
 
 -r requirements.txt
 
-# GPU 推理 (替代 CPU 版 onnxruntime)
+# GPU inference (replaces the CPU build of onnxruntime)
 onnxruntime-gpu==1.20.0
 
-# CUDA 运行时库
+# CUDA runtime libraries
 nvidia-cuda-runtime-cu12==12.1.105
 nvidia-cudnn-cu12==9.1.0.70
 nvidia-cublas-cu12==12.1.3.1

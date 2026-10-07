@@ -1,7 +1,7 @@
 """
-媒体网关管理器
+Media gateway manager
 
-使用流媒体服务抽象层，支持 MediaMTX 流媒体服务。
+Uses the streaming service abstraction layer, supporting the MediaMTX streaming service.
 """
 import logging
 import asyncio
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class MediaGatewayManager:
-    """管理流媒体动态代理通道 (带命名空间隔离)"""
+    """Manages dynamic proxy channels for the streaming service (with namespace isolation)"""
 
     def __init__(self, service_type: Optional[str] = None):
         self.service_type = service_type or "mediamtx"
@@ -23,22 +23,22 @@ class MediaGatewayManager:
 
     @property
     def service(self) -> StreamService:
-        """懒加载流媒体服务实例"""
+        """Lazily instantiate the streaming service"""
         if self._service is None:
             self._service = create_stream_service(self.service_type)
             logger.info(f"[Gateway] Stream service initialized: {self.service_type}")
         return self._service
 
     def register_proxy(self, task_id: str, raw_url: str, channel_idx: int = 0) -> str:
-        """注册代理流
+        """Register a proxy stream
 
         Args:
-            task_id: 任务 ID
-            raw_url: 原始流 URL
-            channel_idx: 通道索引 (0=RGB, 1=IR)
+            task_id: Task ID
+            raw_url: Raw stream URL
+            channel_idx: Channel index (0=RGB, 1=IR)
 
         Returns:
-            str: 代理后的流 URL
+            str: The proxied stream URL
         """
         if not raw_url.startswith(("rtsp://", "http://", "https://", "rtmp://")):
             return raw_url
@@ -53,7 +53,8 @@ class MediaGatewayManager:
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # 在线程中调用且 Loop 已在运行时，必须阻塞等待结果，否则 FFmpeg 会比注册更早启动
+                # Called from a thread while the loop is already running, so we must
+                # block for the result; otherwise FFmpeg starts before registration finishes
                 from concurrent.futures import TimeoutError
                 future = asyncio.run_coroutine_threadsafe(
                     self.service.register_stream(stream_path, raw_url), loop
@@ -68,7 +69,7 @@ class MediaGatewayManager:
                     self.service.register_stream(stream_path, raw_url)
                 )
         except RuntimeError:
-            # 这种情况下通常是没有 loop，尝试直接 run
+            # Usually no loop exists in this case, so try running it directly
             success = asyncio.run(
                 self.service.register_stream(stream_path, raw_url)
             )
@@ -84,11 +85,11 @@ class MediaGatewayManager:
         return raw_url
 
     def unregister_proxy(self, task_id: str, channel_count: int = 1):
-        """注销代理流
+        """Unregister proxy streams
 
         Args:
-            task_id: 任务 ID
-            channel_count: 通道数量
+            task_id: Task ID
+            channel_count: Number of channels
         """
         import asyncio
 
@@ -112,25 +113,25 @@ class MediaGatewayManager:
             logger.info(f"[Gateway] Unregistered path: {stream_path}")
 
     def clear_all_proxies(self):
-        """清理所有代理流"""
+        """Clean up all proxy streams"""
         logger.warning(
             "[Gateway] clear_all_proxies() is deprecated. "
             "Use stream service's individual unregister methods."
         )
 
     def close(self):
-        """关闭网关管理器"""
+        """Close the gateway manager"""
         self._service = None
         logger.info("[Gateway] MediaGatewayManager closed gracefully.")
 
     def _is_local_stream(self, url: str) -> bool:
-        """检测是否为本地流
+        """Check whether the stream is local
 
         Args:
-            url: 流 URL
+            url: Stream URL
 
         Returns:
-            bool: 是否为本地流
+            bool: True if the stream is local
         """
         return "127.0.0.1" in url or "localhost" in url
 

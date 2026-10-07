@@ -1,14 +1,14 @@
 """
-共享帧采集注册表 (V4.11)
+Shared frame grabber registry (V4.11)
 
-业内标准方案：同 RTSP URL 只解码一次，帧分发给多个消费者。
-参考 Nginx RTMP、MediaMTX、GStreamer tee 插件的设计模式。
+Industry-standard approach: decode the same RTSP URL only once and distribute frames to multiple consumers.
+Modeled after the design patterns of Nginx RTMP, MediaMTX, and the GStreamer tee plugin.
 
-架构:
-  rtsp://x/cam_a → SharedGrabber → NVDEC×1 → 任务A, 任务B, 任务C
-  rtsp://y/cam_b → SharedGrabber → NVDEC×1 → 任务D, 任务E, 任务F
+Architecture:
+  rtsp://x/cam_a → SharedGrabber → NVDEC×1 → Task A, Task B, Task C
+  rtsp://y/cam_b → SharedGrabber → NVDEC×1 → Task D, Task E, Task F
 
-使用方式:
+Usage:
   grabber = grabber_registry.get_or_create(url, hw_accel, width, height, fps)
   grabber.subscribe(task_id, frame_callback)
   ...
@@ -60,7 +60,7 @@ class SharedGrabber:
             return self._latest_pts_ms
 
     def latest_frame_and_pts(self, timeout: float = 0.05) -> tuple[Optional[np.ndarray], float]:
-        """原子读取帧和 PTS，使用条件变量等待新帧，避免轮询延迟"""
+        """Atomically read the frame and PTS, using a condition variable to wait for new frames and avoid polling latency"""
         with self._frame_ready:
             self._frame_ready.wait(timeout=timeout)
             frame = self._latest_frame.copy() if self._latest_frame is not None else None
@@ -130,7 +130,7 @@ class SharedGrabber:
 
     def _loop(self):
         consecutive_fail = 0
-        max_fail = 60  # ~3s 容错窗口 (60 × 50ms sleep ≈ 3s)
+        max_fail = 60  # ~3s fault tolerance window (60 × 50ms sleep ≈ 3s)
         consecutive_restarts = 0
         last_diag = time.time()
         last_restart_time = 0.0
@@ -141,7 +141,7 @@ class SharedGrabber:
 
             if self._capture and self._capture.process and \
                self._capture.process.poll() is not None:
-                # 指数退避重连: 1s, 2s, 4s, 8s, 16s...
+                # Exponential backoff reconnect: 1s, 2s, 4s, 8s, 16s...
                 backoff = min(2 ** consecutive_restarts, 30)
                 logger.warning(
                     f"[SharedGrabber] FFmpeg exited, restarting {self.url} "
@@ -174,7 +174,7 @@ class SharedGrabber:
                 continue
 
             if consecutive_restarts > 0 and time.time() - last_restart_time > 30:
-                consecutive_restarts = 0  # 稳定运行 30s 后重置退避计数器
+                consecutive_restarts = 0  # Reset the backoff counter after 30s of stable operation
 
             consecutive_fail = 0
             self._frame_count += 1

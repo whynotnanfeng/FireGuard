@@ -1,14 +1,14 @@
 """
-事件驱动检测记录模型
+Event-driven detection record model
 
-与旧版 DetectionRecord 的区别：
-- 旧版：每帧一条记录（高 FPS 下数据爆炸）
-- 新版：每个目标生命周期一条记录（Enter → Update × N → Leave）
+Differences from the legacy DetectionRecord:
+- Legacy: one record per frame (data explodes at high FPS)
+- New: one record per object lifecycle (Enter → Update × N → Leave)
 
-数据量对比（15 FPS，1 分钟，5 个目标）：
-- 旧版：15 × 60 = 900 条/目标 × 5 = 4500 条
-- 新版：2 条/目标（Enter + Leave）× 5 = 10 条
-- 减少：99.8%
+Data volume comparison (15 FPS, 1 minute, 5 objects):
+- Legacy: 15 × 60 = 900 records/object × 5 = 4500 records
+- New: 2 records/object (Enter + Leave) × 5 = 10 records
+- Reduction: 99.8%
 """
 
 import uuid

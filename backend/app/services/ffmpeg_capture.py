@@ -1,12 +1,13 @@
 """
-FFmpeg 子进程视频采集模块
+FFmpeg subprocess video capture module
 
-替代 OpenCV VideoCapture，提供更可靠的 RTSP 流读取能力。
-参考 MediaMTX 的 FFmpeg 调用模式。
+Replaces OpenCV VideoCapture, providing more reliable RTSP stream reading.
+Modelled on MediaMTX's FFmpeg invocation pattern.
 
-核心改进：使用 FFmpeg 输出的 PTS 时间戳，确保视频循环时时间戳正确重置。
+Core improvement: uses the PTS timestamps output by FFmpeg, ensuring timestamps
+reset correctly when the video loops.
 
-使用方式：
+Usage:
     capture = FFmpegCapture(rtsp_url="rtsp://127.0.0.1:8554/live/cam1")
     capture.start()
     success, frame, pts_ms = capture.read_frame()
@@ -28,20 +29,20 @@ from app.config import config
 
 logger = logging.getLogger(__name__)
 
-# 硬件解码器检测结果缓存（进程级别）
+# Hardware decoder detection result cache (process-level)
 _hw_decoder_cache: dict = {}
 
 
 def detect_hw_decoders(ffmpeg_path: str) -> dict:
-    """检测所有可用的硬件解码器，返回检测结果（带缓存）
+    """Detect all available hardware decoders and return the detection results (cached)
 
     Args:
-        ffmpeg_path: FFmpeg 可执行文件路径
+        ffmpeg_path: Path to the FFmpeg executable
 
     Returns:
-        dict: 包含 nvdec、qsv、amf 解码器可用性
+        dict: Availability of the nvdec, qsv and amf decoders
     """
-    # 使用 ffmpeg_path 作为缓存 key
+    # Use ffmpeg_path as the cache key
     cache_key = ffmpeg_path
     if cache_key in _hw_decoder_cache:
         return _hw_decoder_cache[cache_key]
@@ -63,14 +64,14 @@ def detect_hw_decoders(ffmpeg_path: str) -> dict:
 
 
 def resolve_hw_accel(hw_accel_config: str, hw_decoders: dict) -> tuple[str, bool]:
-    """根据用户配置和硬件可用性选择最优硬件加速策略
+    """Select the optimal hardware acceleration strategy based on user configuration and hardware availability
 
     Args:
-        hw_accel_config: 用户配置 (auto/nvenc/qsv/amf/cpu)
-        hw_decoders: 硬件解码器检测结果
+        hw_accel_config: User configuration (auto/nvenc/qsv/amf/cpu)
+        hw_decoders: Hardware decoder detection results
 
     Returns:
-        tuple: (hwaccel_param, hwaccel_device_param) 或 ("", "") 表示不使用硬件加速
+        tuple: (hwaccel_param, hwaccel_device_param), or ("", "") meaning no hardware acceleration
     """
     if hw_accel_config == "cpu":
         return "", False
@@ -102,7 +103,7 @@ def resolve_hw_accel(hw_accel_config: str, hw_decoders: dict) -> tuple[str, bool
             )
             return "", False
 
-    # auto 策略：按优先级自动选择
+    # auto strategy: select automatically by priority
     if hw_decoders["nvdec"]:
         logger.info("[FFmpegCapture] Auto-selected CUDA hardware decoder")
         return "cuda", True
@@ -118,17 +119,17 @@ def resolve_hw_accel(hw_accel_config: str, hw_decoders: dict) -> tuple[str, bool
 
 
 def check_rtsp_reachable(rtsp_url: str, timeout: float = 3.0) -> bool:
-    """快速检测 RTSP 源是否可达（TCP socket + ffprobe 两阶段验证）
+    """Quickly check whether an RTSP source is reachable (two-stage validation: TCP socket + ffprobe)
 
-    阶段 1：TCP connect（1.5s 超时）排除 host/port 不可达
-    阶段 2：ffprobe 验证 RTSP 握手（3s 超时），排除端口开放但服务异常
+    Stage 1: TCP connect (1.5s timeout) rules out unreachable host/port
+    Stage 2: ffprobe validates the RTSP handshake (3s timeout), ruling out an open port with a broken service
 
     Args:
-        rtsp_url: RTSP 地址
-        timeout: ffprobe 超时（秒）
+        rtsp_url: RTSP address
+        timeout: ffprobe timeout in seconds
 
     Returns:
-        bool: RTSP 源是否可达
+        bool: True if the RTSP source is reachable
     """
     import socket as _socket
     from urllib.parse import urlparse
@@ -137,16 +138,16 @@ def check_rtsp_reachable(rtsp_url: str, timeout: float = 3.0) -> bool:
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 554
 
-    # 阶段 1：TCP socket 快速检测
+    # Stage 1: fast TCP socket check
     try:
         sock = _socket.create_connection((host, port), timeout=1.5)
         sock.close()
     except Exception:
         return False
 
-    # 阶段 2：ffprobe 轻量验证（仅探测流是否存在，不分析完整时长）
-    # 注意：RTSP 直播流没有固定时长，ffprobe 可能返回非 0 但实际已连接成功
-    # 因此用 -show_entries stream=codec_type 做最小化探测，接受任何有输出的结果
+    # Stage 2: lightweight ffprobe validation (only probes whether the stream exists, without analysing the full duration)
+    # Note: an RTSP live stream has no fixed duration, so ffprobe may return non-zero while having actually connected successfully
+    # Therefore -show_entries stream=codec_type is used for minimal probing, accepting any result with output
     project_root = config.BASE_DIR.parent
     if os.name == "nt":
         ffprobe_bin = os.path.join(project_root, "bin", "ffprobe.exe")
@@ -154,7 +155,7 @@ def check_rtsp_reachable(rtsp_url: str, timeout: float = 3.0) -> bool:
         ffprobe_bin = "ffprobe"
 
     if not os.path.exists(ffprobe_bin):
-        return True  # TCP 通了，没有 ffprobe 时假定可达
+        return True  # TCP connected; assume reachable when ffprobe is unavailable
 
     cmd = [
         ffprobe_bin,
@@ -172,18 +173,18 @@ def check_rtsp_reachable(rtsp_url: str, timeout: float = 3.0) -> bool:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout + 2
         )
-        # 有 stdout 输出（如 "video" 或 "N/A"）即认为 RTSP 可达
-        # returncode 可能非 0 但对直播流属于正常行为
+        # Any stdout output (such as "video" or "N/A") means the RTSP source is reachable
+        # returncode may be non-zero, which is normal behaviour for live streams
         return bool(result.stdout.strip() or result.returncode == 0)
     except (subprocess.TimeoutExpired, Exception):
         return False
 
 
 class FFmpegCapture:
-    """FFmpeg 子进程视频采集器
+    """FFmpeg subprocess video capture
 
-    通过 FFmpeg 子进程读取 RTSP 流，输出原始 BGR 帧到管道。
-    相比 OpenCV VideoCapture，具有更好的异常恢复能力。
+    Reads an RTSP stream through an FFmpeg subprocess and outputs raw BGR frames to a pipe.
+    Offers better exception recovery than OpenCV VideoCapture.
     """
 
     def __init__(
@@ -227,16 +228,16 @@ class FFmpegCapture:
         self._hw_decoders = {}
         self._hwaccel_param = ""
         self._use_hw_accel = False
-        self._pts_offset = 0.0  # PTS 偏移量，用于跨重启保持 PTS 连续性
+        self._pts_offset = 0.0  # PTS offset, keeps PTS continuous across restarts
 
     def start(self) -> bool:
-        """启动 FFmpeg 子进程
+        """Start the FFmpeg subprocess
 
         Returns:
-            bool: 是否启动成功
+            bool: True if startup succeeded
         """
-        # 使用项目自带的 FFmpeg 可执行文件（bin 目录）
-        # config.BASE_DIR 是 backend/，需要向上一级到项目根目录
+        # Use the FFmpeg executable bundled with the project (bin directory)
+        # config.BASE_DIR is backend/, so go one level up to the project root
         project_root = config.BASE_DIR.parent
         if os.name == "nt":
             ffmpeg_bin = os.path.join(project_root, "bin", "ffmpeg.exe")
@@ -247,7 +248,7 @@ class FFmpegCapture:
             logger.error(f"[FFmpegCapture] FFmpeg binary not found at: {ffmpeg_bin}")
             return False
 
-        # 检测硬件解码器并选择最优策略
+        # Detect hardware decoders and select the optimal strategy
         self._hw_decoders = detect_hw_decoders(ffmpeg_bin)
         self._hwaccel_param, self._use_hw_accel = resolve_hw_accel(
             self.hw_accel_config, self._hw_decoders
@@ -257,7 +258,7 @@ class FFmpegCapture:
             ffmpeg_bin,
         ]
 
-        # 添加硬件加速参数
+        # Add hardware acceleration parameters
         if self._use_hw_accel:
             if self._hwaccel_param == "cuda":
                 cmd.extend(["-hwaccel", "cuda", "-c:v", "h264_cuvid"])
@@ -278,15 +279,15 @@ class FFmpegCapture:
                 "ignore_err",
                 "-i",
                 self.rtsp_url,
-                "-an",  # 显式禁用音频，减少开销
+                "-an",  # Explicitly disable audio to reduce overhead
                 "-vf",
-                f"scale={self.width}:{self.height}",  # 强制输出分辨率匹配 _frame_size，避免多模态源分辨率不一致导致花屏
+                f"scale={self.width}:{self.height}",  # Force the output resolution to match _frame_size, avoiding corrupted frames from mismatched multimodal source resolutions
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
                 "bgr24",
                 "-fps_mode",
-                "passthrough",  # 更新自 -vsync 0
+                "passthrough",  # Updated from -vsync 0
                 "pipe:1",
             ]
         )
@@ -326,13 +327,13 @@ class FFmpegCapture:
                     return False
 
             if sys.platform == "win32":
-                self._read_queue = queue.Queue(maxsize=30)  # 增加队列长度，缓冲抖动
+                self._read_queue = queue.Queue(maxsize=30)  # Longer queue to buffer jitter
                 self._read_thread = threading.Thread(
                     target=self._read_worker, daemon=True
                 )
                 self._read_thread.start()
 
-            # 异步探测视频时长（不阻塞启动）
+            # Probe the video duration asynchronously (does not block startup)
             threading.Thread(target=self._probe_duration_async, daemon=True).start()
 
             logger.info(
@@ -345,7 +346,7 @@ class FFmpegCapture:
             return False
 
     def _probe_duration_async(self):
-        """异步探测视频时长"""
+        """Probe the video duration asynchronously"""
         duration = self._probe_video_duration()
         if duration > 0:
             self._video_duration_ms = duration * 1000
@@ -355,7 +356,7 @@ class FFmpegCapture:
             )
 
     def _read_worker(self):
-        """Windows 下的读取工作线程"""
+        """Reader worker thread on Windows"""
         while not self._stop_event.is_set():
             try:
                 if self.process and self.process.stdout:
@@ -374,10 +375,10 @@ class FFmpegCapture:
                 time.sleep(0.1)
 
     def _probe_video_duration(self) -> float:
-        """使用 ffprobe 获取视频时长（秒）
+        """Get the video duration in seconds using ffprobe
 
         Returns:
-            float: 视频时长（秒），失败返回 0
+            float: Video duration in seconds, 0 on failure
         """
         project_root = config.BASE_DIR.parent
         if os.name == "nt":
@@ -406,7 +407,7 @@ class FFmpegCapture:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0 and result.stdout.strip():
                 duration_str = result.stdout.strip()
-                # RTSP 实时流返回 N/A，这是正常行为
+                # RTSP live streams return N/A, which is normal behaviour
                 if duration_str.upper() == "N/A":
                     logger.debug(
                         f"[FFmpegCapture] RTSP live stream has no fixed duration (expected)"
@@ -423,7 +424,7 @@ class FFmpegCapture:
         return 0.0
 
     def read_frame(self) -> tuple[bool, Optional[np.ndarray], float]:
-        """读取一帧
+        """Read one frame
 
         Returns:
             tuple: (success, frame, pts_ms)
@@ -461,8 +462,8 @@ class FFmpegCapture:
                 current_wall_clock = time.time()
                 self._last_wall_clock = current_wall_clock
 
-                # 使用实际经过时间计算 PTS，避免帧率漂移导致时间戳不同步
-                # 当实际 FPS 低于目标 FPS 时，帧计数 PTS 会超前于真实时间
+                # Compute PTS from actual elapsed time to avoid timestamp desync caused by frame rate drift
+                # When the actual FPS is below the target FPS, a frame-count-based PTS runs ahead of real time
                 elapsed_s = current_wall_clock - self._session_start_time
                 pts_ms = elapsed_s * 1000.0 + self._pts_offset
                 pts_ms += self._cumulative_offset * 1000
@@ -477,7 +478,7 @@ class FFmpegCapture:
                         f"pts_offset={self._pts_offset:.0f}ms"
                     )
 
-                # 每 10 秒输出采集诊断
+                # Output capture diagnostics every 10 seconds
                 if not hasattr(self, "_last_capture_diag"):
                     self._last_capture_diag = 0.0
                 if current_wall_clock - self._last_capture_diag >= 10.0:
@@ -497,7 +498,7 @@ class FFmpegCapture:
                         f"pts_ms={pts_ms:.0f}"
                     )
 
-                # 帧间隙诊断 — 超过 3x 帧间隔时记录（辅助定位模拟器循环边界卡顿）
+                # Frame gap diagnostics — logged when the gap exceeds 3x the frame interval (helps locate stuttering at the simulator loop boundary)
                 if self._last_wall_clock and self._frame_count > 1:
                     gap_ms = (current_wall_clock - self._last_wall_clock) * 1000
                     expected_gap_ms = 1000.0 / self._frame_rate
@@ -520,18 +521,18 @@ class FFmpegCapture:
             return False, None, 0.0
 
     def restart(self) -> bool:
-        """重启 FFmpeg 子进程
+        """Restart the FFmpeg subprocess
 
-        注意：重启时保留 _cumulative_offset 和 PTS 连续性。
+        Note: _cumulative_offset and PTS continuity are preserved across the restart.
 
         Returns:
-            bool: 是否重启成功
+            bool: True if the restart succeeded
         """
         logger.info(
             f"[FFmpegCapture] Restarting (reconnect_count={self._reconnect_count})..."
         )
 
-        # 计算 PTS 偏移量，确保重启后 PTS 单调递增不断裂
+        # Compute the PTS offset so PTS keeps increasing monotonically without a break after the restart
         expected_interval_ms = 1000.0 / self._frame_rate
         self._pts_offset = self._frame_count * expected_interval_ms
 
@@ -542,13 +543,13 @@ class FFmpegCapture:
         self._session_start_time = time.time()
         self._frame_count = 0
         self._last_wall_clock = 0.0
-        # 注意：_cumulative_offset 保持不变，确保时间戳连续
-        # 注意：_pts_offset 已在上方设置，确保 PTS 连续
+        # Note: _cumulative_offset is left unchanged to keep timestamps continuous
+        # Note: _pts_offset has been set above to keep PTS continuous
 
         return self.start()
 
     def stop(self):
-        """停止 FFmpeg 子进程"""
+        """Stop the FFmpeg subprocess"""
         self._stop_event.set()
 
         if self.process:
@@ -566,10 +567,10 @@ class FFmpegCapture:
             logger.info(f"[FFmpegCapture] Stopped (frames={self._frame_count})")
 
     def get_stats(self) -> dict:
-        """获取统计信息
+        """Get statistics
 
         Returns:
-            dict: 包含帧计数、重连次数、运行状态、硬件加速信息
+            dict: Frame count, reconnect count, running state and hardware acceleration info
         """
         return {
             "frame_count": self._frame_count,

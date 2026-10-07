@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -13,7 +13,7 @@
     
     <style>
         :root {
-            /* Light Theme Tokens */
+            /* Light theme tokens */
             --primary-hue: 220;
             --primary: oklch(60% 0.18 var(--primary-hue));
             --primary-muted: oklch(60% 0.18 var(--primary-hue) / 0.1);
@@ -160,7 +160,7 @@
             position: relative;
         }
 
-        /* 仅针对普通输入框内的图标 */
+        /* Icons inside plain input fields only */
         .input-wrapper > i:not(.custom-file-upload i) {
             position: absolute;
             left: 14px;
@@ -283,7 +283,7 @@
             font-size: 20px;
             color: var(--primary);
             opacity: 0.8;
-            /* 强制重置可能受影响的绝对定位 */
+            /* Force-reset absolute positioning that may have been inherited */
             position: static !important;
             transform: none !important;
         }
@@ -369,7 +369,7 @@
             background: oklch(99% 0 0);
         }
 
-        /* --- Stream Specific --- */
+        /* --- Stream specific --- */
         .stream-card { position: relative; border-left: 4px solid var(--success); padding: 20px; }
         .stream-header { display: flex; justify-content: space-between; margin-bottom: 12px; }
         .rtsp-box {
@@ -426,7 +426,7 @@
 <body>
     <div class="overlay" id="loadingOverlay">
         <div class="spinner"></div>
-        <div id="loadingText" style="font-weight: 600; color: var(--text-secondary);">处理中...</div>
+        <div id="loadingText" style="font-weight: 600; color: var(--text-secondary);">Processing...</div>
     </div>
 
     <div class="container">
@@ -435,55 +435,55 @@
                 <div class="logo-box"><i class="bi bi-broadcast"></i></div>
                 <div>
                     <h1>FireGuard Stream Simulator</h1>
-                    <p style="font-size: 11px; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">高性能流媒体仿真控制台</p>
+                    <p style="font-size: 11px; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">High-performance streaming simulation console</p>
                 </div>
             </div>
             <div class="system-status">
                 <div class="status-dot"></div>
-                系统就绪 · <span id="clock">00:00:00</span>
+                System Ready · <span id="clock">00:00:00</span>
             </div>
         </header>
 
         <!-- Upload -->
         <div class="card upload-card">
             <div class="form-group">
-                <label>设备标识</label>
+                <label>Device ID</label>
                 <div class="input-wrapper">
                     <i class="bi bi-display"></i>
-                    <input type="text" id="deviceName" placeholder="例如：1号仓库主摄">
+                    <input type="text" id="deviceName" placeholder="e.g. Warehouse 1 main camera">
                 </div>
             </div>
             <div class="form-group" style="flex: 1;">
-                <label>视频源文件</label>
+                <label>Video Source File</label>
                 <div class="upload-area-wrapper">
                     <label for="fileInput" class="custom-file-upload">
                         <i class="bi bi-cloud-arrow-up-fill"></i>
-                        <span id="fileNameDisplay">点击选择或拖拽视频文件...</span>
+                        <span id="fileNameDisplay">Click to select or drag a video file...</span>
                     </label>
                     <input type="file" id="fileInput" accept="video/*" style="display:none;" onchange="updateFileName(this)">
                 </div>
             </div>
             <button class="btn btn-primary" onclick="upload()">
-                <i class="bi bi-plus-lg"></i> 上传源文件
+                <i class="bi bi-plus-lg"></i> Upload Source
             </button>
         </div>
 
 
         <!-- Active Streams (Priority Status) -->
         <div class="section-header">
-            <h2><i class="bi bi-activity"></i> 活动推流状态 <span class="badge" id="activeCount">0</span></h2>
+            <h2><i class="bi bi-activity"></i> Active Streams <span class="badge" id="activeCount">0</span></h2>
         </div>
         <div class="streams-grid" id="activeStreams"></div>
 
         <!-- Video Library -->
         <div class="section-header">
-            <h2><i class="bi bi-collection-play"></i> 视频资源库</h2>
+            <h2><i class="bi bi-collection-play"></i> Video Library</h2>
         </div>
         <div class="library-grid" id="videoLibrary"></div>
     </div>
 
     <script>
-        function showLoading(text = '处理中...') {
+        function showLoading(text = 'Processing...') {
             document.getElementById('loadingText').innerText = text;
             document.getElementById('loadingOverlay').style.display = 'flex';
         }
@@ -521,11 +521,11 @@
                         <div class="stream-card">
                             <div class="stream-header">
                                 <div>
-                                    <h3 style="font-size: 16px; font-weight: 700;">${s.device_name || '未知设备'}</h3>
+                                    <h3 style="font-size: 16px; font-weight: 700;">${s.device_name || 'Unknown Device'}</h3>
                                     <p style="font-size: 12px; color: var(--text-secondary);">${s.video_path.split(/[\\/]/).pop()}</p>
                                 </div>
                                 <button class="btn" style="background: oklch(90% 0.1 25 / 0.2); color: var(--error); padding: 4px 12px; font-size: 12px;" onclick="stopStream('${s.id}', this)">
-                                    <i class="bi bi-stop-fill"></i> 停止
+                                    <i class="bi bi-stop-fill"></i> Stop
                                 </button>
                             </div>
                             <div class="rtsp-box">
@@ -536,7 +536,7 @@
                                 <div class="tag-item"><i class="bi bi-camera-reels"></i> ${s.final_vcodec || s.vcodec}</div>
                                 <div class="tag-item"><i class="bi bi-soundwave"></i> ${s.acodec}</div>
                                 <div class="tag-item"><i class="bi bi-aspect-ratio"></i> ${s.resolution}</div>
-                                <div class="tag-item"><i class="bi bi-speedometer2"></i> ${s.fps > 0 ? s.fps + 'fps' : '原帧率'}</div>
+                                <div class="tag-item"><i class="bi bi-speedometer2"></i> ${s.fps > 0 ? s.fps + 'fps' : 'Source FPS'}</div>
                                 <div class="tag-item"><i class="bi bi-lightning"></i> ${s.bitrate}</div>
                                 <div class="tag-item"><i class="bi bi-cpu"></i> ${s.preset}</div>
                                 <div class="tag-item" style="color: var(--primary); font-weight: 700;">${s.transport.toUpperCase()}</div>
@@ -544,7 +544,7 @@
                             </div>
                         </div>
                     `).join('');
-                    document.getElementById('activeStreams').innerHTML = streamsHtml || '<div class="empty-zone" style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-tertiary);">暂无活动推流</div>';
+                    document.getElementById('activeStreams').innerHTML = streamsHtml || '<div class="empty-zone" style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-tertiary);">No active streams</div>';
                     lastStreamData = streamDataStr;
                 }
 
@@ -556,33 +556,33 @@
                                     <h3 style="font-size: 15px; font-weight: 700;">${v.device_name}</h3>
                                     <p style="font-size: 11px; color: var(--text-tertiary);">${v.filename}</p>
                                 </div>
-                                <span class="grade-tag ${v.grade?.color || 'processing'}">${v.grade?.label || '解析中'}</span>
+                                <span class="grade-tag ${v.grade?.color || 'processing'}">${v.grade?.label || 'Parsing'}</span>
                             </div>
                             <div class="card-body-v">
                                 <div class="meta-grid-v">
-                                    <div class="meta-item-v"><div class="meta-label">分辨率</div><div class="meta-val">${v.width}x${v.height}</div></div>
-                                    <div class="meta-item-v"><div class="meta-label">编码</div><div class="meta-val">${v.codec}</div></div>
-                                    <div class="meta-item-v"><div class="meta-label">帧率</div><div class="meta-val">${v.fps || '-'}</div></div>
-                                    <div class="meta-item-v"><div class="meta-label">码率</div><div class="meta-val">${formatBitrate(v.bit_rate)}</div></div>
+                                    <div class="meta-item-v"><div class="meta-label">Resolution</div><div class="meta-val">${v.width}x${v.height}</div></div>
+                                    <div class="meta-item-v"><div class="meta-label">Codec</div><div class="meta-val">${v.codec}</div></div>
+                                    <div class="meta-item-v"><div class="meta-label">Frame Rate</div><div class="meta-val">${v.fps || '-'}</div></div>
+                                    <div class="meta-item-v"><div class="meta-label">Bitrate</div><div class="meta-val">${formatBitrate(v.bit_rate)}</div></div>
                                 </div>
                                 
                                 <div class="config-panel-v">
                                     <div class="field-v">
-                                        <label>自定义推流路径 <span class="hint">rtsp://ip/</span></label>
+                                        <label>Custom Stream Path <span class="hint">rtsp://ip/</span></label>
                                         <input type="text" id="path_${v.file_id}" value="cam_${v.file_id.slice(0,4)}">
                                     </div>
                                     <div class="config-row-v">
                                         <div class="field-v">
-                                            <label>传输协议</label>
+                                            <label>Transport</label>
                                             <select id="transport_${v.file_id}">
                                                 <option value="tcp" selected>TCP</option>
                                                 <option value="udp">UDP</option>
                                             </select>
                                         </div>
                                         <div class="field-v">
-                                            <label>硬件编码器 <span class="hint" id="hw_hint_${v.file_id}">自动检测</span></label>
+                                            <label>Hardware Encoder <span class="hint" id="hw_hint_${v.file_id}">Auto-detect</span></label>
                                             <select id="hw_accel_${v.file_id}">
-                                                <option value="auto" selected>自动选择 (推荐)</option>
+                                                <option value="auto" selected>Auto (recommended)</option>
                                                 <option value="nvenc">NVIDIA NVENC</option>
                                                 <option value="qsv">Intel QuickSync</option>
                                                 <option value="amf">AMD AMF</option>
@@ -592,7 +592,7 @@
                                     </div>
                                     <div class="config-row-v">
                                         <div class="field-v">
-                                            <label>视频编码 <span class="hint">原:${v.codec}</span></label>
+                                            <label>Video Codec <span class="hint">Source: ${v.codec}</span></label>
                                             <select id="vcodec_${v.file_id}">
                                                 <option value="libx264">H.264</option>
                                                 <option value="libx265">H.265 (HEVC)</option>
@@ -602,15 +602,15 @@
                                     </div>
                                     <div class="config-row-v">
                                         <div class="field-v">
-                                            <label>音频编码</label>
+                                            <label>Audio Codec</label>
                                             <select id="acodec_${v.file_id}">
                                                 <option value="copy" selected>Original (Copy)</option>
                                                 <option value="aac">AAC</option>
-                                                <option value="none">无音频 (None)</option>
+                                                <option value="none">No audio (None)</option>
                                             </select>
                                         </div>
                                         <div class="field-v">
-                                            <label>分辨率 <span class="hint">原:${v.width}x${v.height}</span></label>
+                                            <label>Resolution <span class="hint">Source: ${v.width}x${v.height}</span></label>
                                             <select id="res_${v.file_id}">
                                                 <option value="original" selected>Original</option>
                                                 <option value="3840x2160">3840x2160 (4K)</option>
@@ -625,7 +625,7 @@
                                     </div>
                                     <div class="config-row-v">
                                         <div class="field-v">
-                                            <label>帧率 (FPS) <span class="hint">原:${v.fps || '-'}</span></label>
+                                            <label>Frame Rate (FPS) <span class="hint">Source: ${v.fps || '-'}</span></label>
                                             <select id="fps_${v.file_id}">
                                                 <option value="0" selected>Original</option>
                                                 <option value="60">60 FPS</option>
@@ -637,7 +637,7 @@
                                             </select>
                                         </div>
                                         <div class="field-v">
-                                            <label>视频码率 <span class="hint">原:${formatBitrate(v.bit_rate)}</span></label>
+                                            <label>Video Bitrate <span class="hint">Source: ${formatBitrate(v.bit_rate)}</span></label>
                                             <select id="bitrate_${v.file_id}">
                                                 <option value="original" selected>Original</option>
                                                 <option value="8000k">8 Mbps</option>
@@ -650,12 +650,12 @@
                                         </div>
                                     </div>
                                     <div class="field-v">
-                                        <label>编码预设 <span class="hint">速度 vs 质量</span></label>
+                                        <label>Encoding Preset <span class="hint">Speed vs quality</span></label>
                                         <select id="preset_${v.file_id}">
-                                            <option value="ultrafast">极速 (Ultrafast)</option>
-                                            <option value="faster">较快 (Faster)</option>
-                                            <option value="medium" selected>均衡 (Medium)</option>
-                                            <option value="slow">质量 (Slow)</option>
+                                            <option value="ultrafast">Ultrafast</option>
+                                            <option value="faster">Faster</option>
+                                            <option value="medium" selected>Medium (balanced)</option>
+                                            <option value="slow">Slow (quality)</option>
                                         </select>
                                     </div>
                                     <input type="hidden" id="crf_${v.file_id}" value="23">
@@ -663,7 +663,7 @@
                             </div>
                             <div class="card-actions-v">
                                 <button class="btn btn-primary" style="flex:1" onclick="startStream(this, '${v.file_id}')">
-                                    <i class="bi bi-play-fill"></i> 启动模拟
+                                    <i class="bi bi-play-fill"></i> Start Simulation
                                 </button>
                                 <button class="btn" style="border: 1px solid var(--border); color: var(--text-secondary);" onclick="deleteVideo('${v.file_id}')">
                                     <i class="bi bi-trash"></i>
@@ -671,7 +671,7 @@
                             </div>
                         </div>
                     `).join('');
-                    document.getElementById('videoLibrary').innerHTML = libraryHtml || '<div class="empty-zone" style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-tertiary);">视频库为空</div>';
+                    document.getElementById('videoLibrary').innerHTML = libraryHtml || '<div class="empty-zone" style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-tertiary);">Video library is empty</div>';
                     lastVideoData = videoDataStr;
                 }
             } catch(e) { console.error(e); }
@@ -683,7 +683,7 @@
                 display.innerText = input.files[0].name;
                 display.style.color = 'var(--text)';
             } else {
-                display.innerText = '选择或拖拽视频文件...';
+                display.innerText = 'Select or drag a video file...';
                 display.style.color = 'var(--text-tertiary)';
             }
         }
@@ -693,10 +693,10 @@
             const deviceInput = document.getElementById('deviceName');
             const file = fileInput.files[0];
             if(!file) return;
-            showLoading('正在上传并解析视频...');
+            showLoading('Uploading and parsing video...');
             const fd = new FormData();
             fd.append('file', file);
-            fd.append('device_name', deviceInput.value || '未命名设备');
+            fd.append('device_name', deviceInput.value || 'Unnamed Device');
             try {
                 const res = await fetch('/videos/upload', { method: 'POST', body: fd });
                 if (res.ok) {
@@ -704,13 +704,13 @@
                     deviceInput.value = '';
                     updateFileName(fileInput);
                 }
-            } catch (e) { alert('上传失败: ' + e.message); } finally { hideLoading(); refresh(); }
+            } catch (e) { alert('Upload failed: ' + e.message); } finally { hideLoading(); refresh(); }
         }
 
         async function startStream(btn, fileId) {
             const originalHtml = btn.innerHTML;
             btn.disabled = true;
-            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>初始化...';
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Starting...';
             let params = {
                 file_id: fileId,
                 stream_path: document.getElementById('path_' + fileId).value,
@@ -726,8 +726,8 @@
             };
             try {
                 const res = await fetch('/streams/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(params) });
-                if (!res.ok) { const err = await res.json(); alert('启动失败: ' + (err.detail || '未知错误')); }
-            } catch (e) { alert('网络错误'); } finally { btn.disabled = false; btn.innerHTML = originalHtml; refresh(); }
+                if (!res.ok) { const err = await res.json(); alert('Failed to start: ' + (err.detail || 'Unknown error')); }
+            } catch (e) { alert('Network error'); } finally { btn.disabled = false; btn.innerHTML = originalHtml; refresh(); }
         }
 
         async function stopStream(id, btn) {
@@ -737,8 +737,8 @@
         }
 
         async function deleteVideo(id) { 
-            if(confirm('确定永久删除该视频源？')) { 
-                showLoading('移除中...');
+            if(confirm('Permanently delete this video source?')) {
+                showLoading('Removing...');
                 await fetch('/videos/' + id, { method: 'DELETE' }); 
                 hideLoading();
                 refresh(); 
@@ -754,7 +754,7 @@
         }
 
         function updateClock() {
-            document.getElementById('clock').innerText = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            document.getElementById('clock').innerText = new Date().toLocaleTimeString('en-GB', { hour12: false });
         }
 
         async function init() {

@@ -177,9 +177,9 @@ def get_multiprocess_log_queue():
 
 
 def setup_child_process_logging():
-    """子进程调用：重新初始化日志，确保文件写入可用
-    
-    【P2-2 修复】：子进程日志文件按 PID 隔离，避免多进程同时写入同一文件导致 PermissionError
+    """Called in child processes: reinitialize logging to ensure file writing works
+
+    [P2-2 fix]: isolate child process log files by PID to avoid PermissionError from multiple processes writing to the same file
     """
     import logging
     log_dir = config.LOGS_DIR
@@ -205,7 +205,7 @@ def setup_child_process_logging():
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
 
-    # 控制台处理器
+    # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
     console_handler.setLevel(logging.INFO)

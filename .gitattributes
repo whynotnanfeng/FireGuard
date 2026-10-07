@@ -1,7 +1,15 @@
 # Normalize all text files to LF in the repository
 * text=auto eol=lf
 
-# Explicitly mark binary files
+# Windows scripts must keep CRLF line endings
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# HLS playlists are text, not binary
+*.m3u8 text eol=lf
+*.hls text eol=lf
+
+# Mark common binary types
 *.png binary
 *.jpg binary
 *.jpeg binary
@@ -15,5 +23,3 @@
 *.mp4 binary
 *.avi binary
 *.mkv binary
-*.hls binary
-*.m3u8 binary

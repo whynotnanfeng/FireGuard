@@ -7,11 +7,12 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 class RGBTAlignmentBuffer:
-    """RGBT 多模态帧时间对齐缓冲区
+    """Temporal alignment buffer for RGBT multimodal frames.
 
-    使用帧采集墙钟时间（time.time()）做对齐，而非流 PTS。
-    两路独立 RTSP 流的 PTS 基准不同，无法直接比较。
-    同时保留 RGB 帧的 PTS 用于下游一致性。
+    Alignment uses frame capture wall-clock time (time.time()) rather than stream
+    PTS, because two independent RTSP streams have different PTS bases and their
+    timestamps cannot be compared directly. The RGB frame PTS is still retained
+    for downstream time consistency.
     """
 
     def __init__(self, max_tolerance_sec: float = 0.05, maxlen: int = 30):
@@ -21,19 +22,20 @@ class RGBTAlignmentBuffer:
         self.lock = threading.Lock()
 
     def add_rgb(self, wall_clock: float, frame: np.ndarray, pts: float = 0.0):
-        """添加 RGB 帧。wall_clock=帧采集墙钟, pts=流PTS(下游一致性用)"""
+        """Add an RGB frame. wall_clock=frame capture wall-clock, pts=stream PTS (for downstream consistency)"""
         with self.lock:
             self.rgb_q.append((wall_clock, frame, pts))
 
     def add_ir(self, wall_clock: float, frame: np.ndarray, pts: float = 0.0):
-        """添加 IR 帧。wall_clock=帧采集墙钟, pts=流PTS"""
+        """Add an IR frame. wall_clock=frame capture wall-clock, pts=stream PTS"""
         with self.lock:
             self.ir_q.append((wall_clock, frame, pts))
 
     def get_aligned_pair(self) -> Optional[Tuple[float, float, np.ndarray, np.ndarray]]:
-        """获取对齐好的帧对。
-        返回: (rgb_pts, wall_clock, RGB帧, IR帧)
-            rgb_pts: RGB流PTS(下游时间一致性), wall_clock: 对齐墙钟时间
+        """Retrieve an aligned frame pair.
+        Returns: (rgb_pts, wall_clock, RGB frame, IR frame)
+            rgb_pts: RGB stream PTS (downstream time consistency),
+            wall_clock: aligned wall-clock time
         """
         with self.lock:
             while self.rgb_q and self.ir_q:
@@ -42,17 +44,17 @@ class RGBTAlignmentBuffer:
 
                 diff = abs(t_rgb - t_ir)
 
-                # 1. 完美匹配 (墙钟误差在容忍范围内)
+                # 1. Perfect match (wall-clock difference within tolerance)
                 if diff <= self.max_tolerance_sec:
                     self.rgb_q.popleft()
                     self.ir_q.popleft()
                     return pts_rgb, max(t_rgb, t_ir), f_rgb, f_ir
 
-                # 2. RGB 帧太老了，丢弃 RGB
+                # 2. RGB frame is too old, drop it
                 if t_rgb < t_ir:
                     logger.debug(f"Dropping old RGB frame (diff: {diff:.3f}s)")
                     self.rgb_q.popleft()
-                # 3. IR 帧太老了，丢弃 IR
+                # 3. IR frame is too old, drop it
                 else:
                     logger.debug(f"Dropping old IR frame (diff: {diff:.3f}s)")
                     self.ir_q.popleft()

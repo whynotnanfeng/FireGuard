@@ -8,7 +8,8 @@ import router from './router'
 import './style.css'
 import { diagLogger } from './utils/diagLogger'
 
-// 拦截浏览器 console 打印并重定向至后端日志路径下的 diag.log，浏览器控制台保持纯净不输出
+// Intercept browser console output and redirect it to the backend diag.log,
+// keeping the browser console completely clean.
 if (typeof window !== 'undefined') {
   console.log = (message?: any, ...optionalParams: any[]) => {
     diagLogger.log('Console', message, ...optionalParams)

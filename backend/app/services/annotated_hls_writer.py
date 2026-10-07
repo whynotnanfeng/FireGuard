@@ -1,17 +1,17 @@
 """
-带标注帧的 HLS 编码器（守护进程版）
+HLS encoder for annotated frames (daemon version)
 
-架构参考 DirectHLSWriter，将帧写入线程改为守护进程模式：
-- 独立写入线程持续从队列取帧
-- 帧率由写入线程控制（稳定输出）
-- 推理帧率与视频帧率解耦
-- FFmpeg 崩溃自动重启
-- 队列满时丢弃旧帧保留最新帧
+Architecture inspired by DirectHLSWriter, with the frame writer changed to daemon mode:
+- A dedicated writer thread continuously pulls frames from the queue
+- The frame rate is controlled by the writer thread (stable output)
+- The inference frame rate is decoupled from the video frame rate
+- FFmpeg is restarted automatically after a crash
+- When the queue is full, old frames are dropped to keep the newest ones
 
-关键改进：
-- 写入线程不使用 time.sleep 控制帧率（导致帧率不准）
-- 改用 wall-clock 精确帧率控制
-- 添加 DirectHLSWriter 的关键稳定参数
+Key improvements:
+- The writer thread does not use time.sleep to control the frame rate (which caused inaccurate frame rates)
+- Switched to precise wall-clock frame rate control
+- Added the key stability parameters from DirectHLSWriter
 """
 
 from __future__ import annotations
@@ -35,16 +35,17 @@ logger = logging.getLogger(__name__)
 
 class AnnotatedHLSWriter:
     """
-    带标注帧的 HLS 编码器（守护进程版）
-    
-    架构：
-        推理线程 → put_frame() → 有界队列 → 守护写入线程 → FFmpeg pipe → HLS 输出
-    
-    关键设计：
-    - 推理帧率与视频帧率解耦：推理可能 5-10fps，视频稳定输出 15fps
-    - 守护写入线程：持续运行，队列空时重复最后一帧
-    - 帧率由 wall-clock 控制：精确到毫秒级
-    - 队列满时丢弃旧帧：保留最新帧
+    HLS encoder for annotated frames (daemon version)
+
+    Architecture:
+        inference thread → put_frame() → bounded queue → daemon writer thread → FFmpeg pipe → HLS output
+
+    Key design:
+    - The inference frame rate is decoupled from the video frame rate: inference may run at 5-10fps
+      while video is output steadily at 15fps
+    - Daemon writer thread: runs continuously, repeating the last frame when the queue is empty
+    - The frame rate is wall-clock controlled: accurate to the millisecond
+    - When the queue is full, old frames are dropped: the newest frames are kept
     """
     
     def __init__(
@@ -68,7 +69,7 @@ class AnnotatedHLSWriter:
         self.m3u8_path = self.output_dir / f"stream_{channel}.m3u8"
         self._resume = resume
 
-        # 续存模式：备份旧 m3u8 内容，stop 时合并新旧分段
+        # Resume mode: back up the old m3u8 content, merge old and new segments on stop
         self._old_m3u8_content: Optional[str] = None
         if resume and self.m3u8_path.exists():
             try:
@@ -132,12 +133,13 @@ class AnnotatedHLSWriter:
             "-i", "pipe:0",
         ]
         
-        # 根据 fps 和 hls_time 动态计算 GOP
-        # 行业标准: GOP = fps × hls_time，确保每个 HLS 分段以关键帧起始
+        # Compute GOP dynamically from fps and hls_time
+        # Industry standard: GOP = fps × hls_time, ensuring each HLS segment starts with a keyframe
         hls_time = 1
         gop = int(self.fps * hls_time)
 
-        # 720p 标注流 — 降低 BGR→NV12 转换 + 编码负载，固定分辨率避免花屏
+        # 720p annotated stream — lower the BGR→NV12 conversion and encoding load, and fix the
+        # resolution to avoid corrupted frames
         annot_w = 1280
         annot_h = 720
         vf_scale = f"scale={annot_w}:{annot_h}"
@@ -149,12 +151,12 @@ class AnnotatedHLSWriter:
                 "-preset", "p1",
                 "-tune", "ll",
                 "-rc", "cbr",
-                "-b:v", "3M",           # 5.5: 从2M提升到3M，复杂场景无blocking artifacts
+                "-b:v", "3M",           # 5.5: raised from 2M to 3M, no blocking artifacts in complex scenes
                 "-maxrate", "3M",
-                "-bufsize", "6M",        # 5.5: 2秒缓冲，应对场景突变
+                "-bufsize", "6M",        # 5.5: 2-second buffer, handles sudden scene changes
                 "-g", str(gop),
-                "-force_key_frames", "expr:gte(t,n_forced*1)",  # 5.4: 每秒强制关键帧，HLS分段对齐
-                "-sc_threshold", "0",    # 5.4: 禁用场景切换检测，避免随机关键帧
+                "-force_key_frames", "expr:gte(t,n_forced*1)",  # 5.4: force a keyframe every second to align HLS segments
+                "-sc_threshold", "0",    # 5.4: disable scene-cut detection to avoid random keyframes
                 "-pix_fmt", "nv12",
                 "-bf", "0",
                 "-gpu", "0",
@@ -177,7 +179,7 @@ class AnnotatedHLSWriter:
                 "Hardware encoding (NVENC/QSV) is required."
             )
         
-        # 续存模式：追加到旧 m3u8，正确设置 start_number
+        # Resume mode: append to the old m3u8 and set start_number correctly
         has_old_segments = self.m3u8_path.exists() and self._resume
         if has_old_segments:
             start_num = self._get_last_segment_number(self.m3u8_path)
@@ -189,7 +191,7 @@ class AnnotatedHLSWriter:
         base_cmd += [
             "-fflags", "+genpts",
             "-avoid_negative_ts", "make_zero",
-            "-max_muxing_queue_size", "4096",  # 5.6: 避免muxing队列溢出导致花屏
+            "-max_muxing_queue_size", "4096",  # 5.6: avoid muxer queue overflow causing corrupted frames
             "-f", "hls",
             "-hls_time", str(hls_time),
             "-hls_list_size", "0",
@@ -212,7 +214,7 @@ class AnnotatedHLSWriter:
         logger.info(f"[AnnotatedHLSWriter] FFmpeg cmd: {' '.join(ffmpeg_cmd)}")
         
         try:
-            # 关闭旧的 log_file（防止 FD 泄漏）
+            # Close the old log_file (prevents FD leak)
             if self._log_file:
                 try:
                     self._log_file.close()
@@ -228,7 +230,7 @@ class AnnotatedHLSWriter:
                 stderr=subprocess.STDOUT,
             )
             
-            # 启动后检查 FFmpeg 是否立即退出
+            # Check whether FFmpeg exits immediately after startup
             time.sleep(0.2)
             poll_result = self.process.poll()
             if poll_result is not None:
@@ -241,7 +243,7 @@ class AnnotatedHLSWriter:
             logger.info(f"[AnnotatedHLSWriter] FFmpeg started for {self.task_id} (PID={self.process.pid})")
             return True
         except Exception as e:
-            self.error_msg = f"FFmpeg 启动失败: {e}"
+            self.error_msg = f"FFmpeg failed to start: {e}"
             logger.error(f"[AnnotatedHLSWriter] {self.error_msg}")
             return False
     
@@ -271,11 +273,12 @@ class AnnotatedHLSWriter:
             self._log_file = None
 
     def _write_frame_safe(self, frame_bytes: bytes, timeout: float = 0.08) -> bool:
-        """带超时的帧写入。FFmpeg阻塞时丢帧保持实时性。
+        """Frame write with a timeout. Drops frames when FFmpeg blocks to preserve real-time performance.
 
-        使用线程+超时检测管道可写性，超时则丢弃当前帧。
-        这是从架构层面解决卡顿/撕裂的关键：避免 write() 永久阻塞。
-        注意：不使用 select()，因为 Windows 不支持对管道使用 select()。
+        Uses a thread plus a writability timeout check on the pipe, dropping the current frame on
+        timeout. This is the key to solving stuttering/tearing at the architectural level: it
+        avoids write() blocking forever.
+        Note: select() is not used, because Windows does not support select() on pipes.
         """
         if self.process is None or self.process.stdin is None:
             return False
@@ -296,10 +299,10 @@ class AnnotatedHLSWriter:
 
     def _write_loop(self):
         """
-        逐帧写入 FFmpeg stdin。上游保证恒定帧率输入。
+        Write frames to FFmpeg stdin one by one. The upstream guarantees a constant frame rate input.
         """
         _last_diag_time = time.monotonic()
-        _write_times: list[float] = []  # 最近 50 次写入耗时
+        _write_times: list[float] = []  # Write durations of the most recent 50 writes
 
         while not self._stop_event.is_set():
             try:
@@ -362,7 +365,7 @@ class AnnotatedHLSWriter:
         self._crash_timestamps.append(now)
         
         if len(self._crash_timestamps) >= self._max_retries:
-            self.error_msg = f"FFmpeg 在 {self._retry_window}s 内崩溃了 {self._max_retries} 次"
+            self.error_msg = f"FFmpeg crashed {self._max_retries} times within {self._retry_window}s"
             logger.critical(f"[AnnotatedHLSWriter] {self.error_msg}")
             self._started = False
             return
@@ -385,14 +388,14 @@ class AnnotatedHLSWriter:
         has_old_segments = len(existing_ts) > 0
 
         if self._resume and has_old_segments:
-            # 续存模式：保留旧分片，仅清除 ENDLIST
+            # Resume mode: keep old segments, only strip the ENDLIST
             self._strip_endlist()
             logger.info(
                 f"[AnnotatedHLSWriter] Resume mode for {self.task_id}: "
                 f"keeping {len(existing_ts)} old segments"
             )
         else:
-            # 全新启动：清理旧文件
+            # Brand-new start: clean up old files
             self._cleanup_old_segments()
 
         self._stop_event.clear()
@@ -409,7 +412,7 @@ class AnnotatedHLSWriter:
         logger.info(f"[AnnotatedHLSWriter] Daemon started for {self.task_id}")
 
     def _cleanup_old_segments(self):
-        """删除旧的分片和 playlist，避免残留 ENDLIST 影响 hls.js"""
+        """Delete old segments and playlists to avoid a leftover ENDLIST breaking hls.js"""
         try:
             for pattern in [f"stream_{self.channel}*.ts", f"stream_{self.channel}*.m3u8*"]:
                 for f in self.output_dir.glob(pattern):
@@ -422,7 +425,7 @@ class AnnotatedHLSWriter:
             logger.warning(f"[AnnotatedHLSWriter] Cleanup warning: {e}")
 
     def _strip_endlist(self):
-        """续存模式：从 m3u8 中移除 ENDLIST 标记，让 FFmpeg 可以继续追加分段"""
+        """Resume mode: remove the ENDLIST marker from the m3u8 so FFmpeg can keep appending segments"""
         if not self.m3u8_path.exists():
             return
         try:
@@ -435,7 +438,7 @@ class AnnotatedHLSWriter:
             logger.warning(f"[AnnotatedHLSWriter] ENDLIST strip failed: {e}")
 
     def _merge_m3u8(self):
-        """续存模式：将旧 m3u8 的分段条目合并到新 m3u8 中，保证历史时长正确"""
+        """Resume mode: merge the old m3u8 segment entries into the new m3u8 so the historical duration stays correct"""
         import re
         try:
             new_content = self.m3u8_path.read_text(encoding="utf-8")
@@ -493,7 +496,7 @@ class AnnotatedHLSWriter:
 
     @staticmethod
     def _get_last_segment_number(m3u8_path: Path) -> int:
-        """从 m3u8 中提取最后一个分段编号，用于续存模式的 start_number"""
+        """Extract the last segment number from the m3u8, used as start_number in resume mode"""
         if not m3u8_path.exists():
             return 0
         try:
@@ -511,9 +514,9 @@ class AnnotatedHLSWriter:
 
     def put_frame(self, frame: np.ndarray) -> bool:
         """
-        将帧放入异步队列（不阻塞）
+        Put a frame into the async queue (non-blocking)
 
-        队列满时丢弃旧帧保留最新帧
+        When the queue is full, old frames are dropped to keep the newest ones
         """
         if not self._started or self._stop_event.is_set():
             return False
@@ -531,7 +534,7 @@ class AnnotatedHLSWriter:
                 return False
     
     def write_frame(self, frame: np.ndarray) -> bool:
-        """兼容旧接口"""
+        """Backward-compatible interface"""
         return self.put_frame(frame)
     
     def stop(self):
@@ -551,7 +554,7 @@ class AnnotatedHLSWriter:
         
         self._stop_ffmpeg()
 
-        # 续存模式：合并旧 m3u8 与新 m3u8，确保历史分段不丢失
+        # Resume mode: merge the old m3u8 with the new m3u8 so historical segments are not lost
         if self._old_m3u8_content and self.m3u8_path.exists():
             self._merge_m3u8()
 

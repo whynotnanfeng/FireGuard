@@ -1,10 +1,10 @@
 """
-媒体服务器管理器
+Media server manager
 
-使用 MediaMTX 作为流媒体服务器。
-根据配置自动启动相应的服务器实例。
+Uses MediaMTX as the streaming server.
+Starts the appropriate server instance automatically based on the configuration.
 
-启动方式：后端/模拟器启动时自动拉起，无需手动操作。
+Startup: automatically launched when the backend/simulator starts, no manual action needed.
 """
 import subprocess
 import os
@@ -23,12 +23,12 @@ logger = logging.getLogger(__name__)
 
 class MediaServerManager:
     """
-    流媒体网关管理器（MediaMTX）：
+    Streaming media gateway manager (MediaMTX):
 
-    运行模式：
-    - production:   后端自启独立 MediaMTX
-    - development:  优先等待/借用模拟器 MediaMTX，超时则自启
-    - simulator:    后端不启动 MediaMTX，完全由模拟器管理
+    Run modes:
+    - production:   the backend starts a standalone MediaMTX
+    - development:  prefer waiting for / borrowing the simulator's MediaMTX, start its own on timeout
+    - simulator:    the backend does not start MediaMTX; it is fully managed by the simulator
     """
 
     def __init__(self):
@@ -44,7 +44,7 @@ class MediaServerManager:
         self.config_path = root_bin / "mediamtx.yaml"
 
     def _kill_orphaned_mediamtx(self):
-        """清理僵尸 MediaMTX 进程（上次任务未正常回收的残留进程）"""
+        """Clean up orphaned MediaMTX processes (leftovers from a task that did not shut down normally)"""
         import subprocess as _sp
         try:
             if os.name == "nt":
@@ -57,13 +57,13 @@ class MediaServerManager:
                     ["pkill", "-9", "-f", "mediamtx"],
                     capture_output=True, timeout=5,
                 )
-            time.sleep(1.0)  # 等待 OS 释放端口
+            time.sleep(1.0)  # Wait for the OS to release the port
         except Exception:
             pass
 
     def _is_port_in_use(self, port: int) -> bool:
-        """检查端口是否被占用，同时支持 IPv4 和 IPv6"""
-        # 先尝试 IPv4
+        """Check whether a port is occupied, supporting both IPv4 and IPv6"""
+        # Try IPv4 first
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(1)
@@ -72,7 +72,7 @@ class MediaServerManager:
         except Exception:
             pass
 
-        # 再尝试 IPv6（MediaMTX 默认绑定 [::]）
+        # Then try IPv6 (MediaMTX binds [::] by default)
         try:
             with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
                 s.settimeout(1)
@@ -97,10 +97,10 @@ paths:
         self.config_path.write_text(config_content, encoding="utf-8")
 
     async def start(self, service_type: Optional[str] = None):
-        """启动 MediaMTX 媒体服务器
+        """Start the MediaMTX media server
 
         Args:
-            service_type: 保留参数，用于向后兼容
+            service_type: Reserved parameter, kept for backward compatibility
         """
         logger.info(f"[MediaServer] Running in '{self._mode}' mode with mediamtx")
 
@@ -111,11 +111,12 @@ paths:
         return await self._start_mediamtx()
 
     async def _start_mediamtx(self):
-        """启动 MediaMTX 服务器"""
+        """Start the MediaMTX server"""
         target_api_port = config.MEDIAMTX_API_PORT
         target_rtsp_port = config.MEDIAMTX_RTSP_PORT
 
-        # 【动态端口发现】：development 模式下优先从配置中心读取模拟器端口
+        # [Dynamic port discovery]: in development mode, prefer reading the simulator's
+        # ports from the configuration center
         if self._mode == "development":
             try:
                 from app.services.registry import registry
@@ -137,7 +138,7 @@ paths:
         self.target_api_port = target_api_port
         self.target_rtsp_port = target_rtsp_port
 
-        # 【P0 修复】：检查 MediaMTX 是否已被其他进程拥有
+        # [P0 fix]: check whether MediaMTX is already owned by another process
         try:
             from app.services.registry import registry
             owner = registry.get_mediamtx_owner()
@@ -151,7 +152,7 @@ paths:
         except Exception as e:
             logger.debug(f"[MediaServer] Registry check failed: {e}")
 
-        # 检查端口是否已被占用
+        # Check port occupancy status
         if self._is_port_in_use(target_api_port) and self._is_port_in_use(target_rtsp_port):
             logger.info(
                 f"[MediaServer] MediaMTX already running on :{target_rtsp_port}/:{target_api_port}. Lease Mode."
@@ -160,7 +161,7 @@ paths:
             self._start_health_check()
             return True
 
-        # development 模式下等待模拟器
+        # Wait for the simulator's MediaMTX in development mode
         if self._mode == "development":
             max_wait = 5.0
             logger.info(
@@ -171,7 +172,7 @@ paths:
                 api_ok = self._is_port_in_use(target_api_port)
                 rtsp_ok = self._is_port_in_use(target_rtsp_port)
                 
-                # 额外检查注册表，防止端口检测延迟或 bind 地址问题
+                # Also check the registry to guard against port detection delays or bind address issues
                 owner = None
                 try:
                     owner = registry.get_mediamtx_owner()
@@ -240,8 +241,8 @@ paths:
         target_api_port = getattr(self, "target_api_port", config.MEDIAMTX_API_PORT)
         target_rtsp_port = getattr(self, "target_rtsp_port", config.MEDIAMTX_RTSP_PORT)
         check_interval = 5
-        fail_threshold = 6   # 需要连续失败 ~30s 才触发
-        max_takeover_lifetime = 3  # 进程生命周期内最多尝试 3 次接管
+        fail_threshold = 6   # Requires ~30s of consecutive failures before triggering
+        max_takeover_lifetime = 3  # At most 3 takeover attempts within the process lifetime
         fail_count = 0
         takeover_lifetime_count = 0
 
@@ -274,7 +275,8 @@ paths:
                     time.sleep(120)
                     continue
 
-                # 【P0 修复】：接管前确认 MediaMTX 确实已宕机，且当前进程是所有者或无主
+                # [P0 fix]: before taking over, confirm MediaMTX is really down and that this process
+                # is the owner or that it is unowned
                 owner = None
                 try:
                     from app.services.registry import registry
@@ -309,7 +311,7 @@ paths:
                     logger.error("[MediaServer] Cannot takeover: mediamtx.exe not found.")
 
     def _run_mediamtx_daemon(self, bin_path: Path, config_path: Path, rtsp_port: int, api_port: int):
-        """运行 MediaMTX 守护进程"""
+        """Run MediaMTX as a daemon process"""
         log_path = config.LOGS_DIR / "mediamtx_internal.log"
         max_conflict_retries = 3
         conflict_retry_count = 0
@@ -325,7 +327,7 @@ paths:
                     f"[MediaServer] Starting MediaMTX on RTSP:{rtsp_port} API:{api_port}"
                 )
 
-                # 端口冲突前先清理僵尸 MediaMTX 进程
+                # Clean up orphaned MediaMTX processes before resolving a port conflict
                 if self._is_port_in_use(rtsp_port):
                     self._kill_orphaned_mediamtx()
 
@@ -360,7 +362,7 @@ paths:
                         startupinfo=startupinfo,
                     )
                     
-                    # 【P0 修复】：注册 MediaMTX 所有者信息
+                    # [P0 fix]: register MediaMTX owner information
                     try:
                         from app.services.registry import registry
                         registry.register_mediamtx_owner(rtsp_port, api_port, self.process.pid)
@@ -381,7 +383,7 @@ paths:
 
     def stop(self):
         self._stop_event.set()
-        # 等待健康检查线程退出
+        # Wait for the health check thread to exit
         if self._health_check_thread and self._health_check_thread.is_alive():
             self._health_check_thread.join(timeout=3)
         if self.process:

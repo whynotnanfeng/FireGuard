@@ -36,7 +36,7 @@ class Task(SQLModel, table=True):
     error_msg: str = Field(default="", max_length=1000)
     detection_config: str = Field(default="{}", max_length=10000)
     use_gpu: bool = Field(default=False)
-    # V12: 是否曾经成功捕获过画面（区分"初始"和"曾暂停"）
+    # V12: whether frames have ever been captured successfully (distinguishes "initial" from "previously paused")
     has_history: bool = Field(default=False)
     cumulative_running_seconds: float = Field(default=0.0)
     session_start_time: Optional[datetime] = Field(default=None)

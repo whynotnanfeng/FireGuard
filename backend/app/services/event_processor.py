@@ -1,12 +1,12 @@
 """
-事件驱动检测记录处理器
+Event-driven detection record processor
 
-核心策略：
-- Enter 事件：立即写入数据库（记录目标出现）
-- Update 事件：仅更新内存统计，不写库（减少 I/O）
-- Leave 事件：更新记录（填充消失时间、持续时长、统计信息）
+Core strategy:
+- Enter event: write to the database immediately (records the object appearing)
+- Update event: update in-memory statistics only, no DB write (reduces I/O)
+- Leave event: update the record (fills in disappearance time, duration, statistics)
 
-相比旧版每帧写入，数据库写入量减少 90%+
+Compared with the legacy per-frame writes, database write volume drops by 90%+.
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ logger = logging.getLogger(__name__)
 
 class EventProcessor:
     """
-    处理追踪事件，决定何时写入数据库
-    
-    使用示例:
+    Processes tracking events and decides when to write to the database
+
+    Usage example:
         processor = EventProcessor(task_id="task_123")
         for event in tracker.update(detections, timestamp_ms):
             processor.process_event(event)
@@ -47,7 +47,7 @@ class EventProcessor:
         elif event.state == TrackState.LEAVE:
             self._handle_leave(event)
     def reset(self):
-        """重置处理器状态"""
+        """Reset processor state"""
         pending_count = len(self._pending_stats)
         enter_count = len(self._enter_records)
         self._pending_stats.clear()
@@ -58,7 +58,7 @@ class EventProcessor:
         )
     
     def _handle_enter(self, event: TrackEvent):
-        """Enter 事件：立即写入数据库"""
+        """Enter event: write to the database immediately"""
         record_id = str(uuid.uuid4())
         self._enter_records[event.track_id] = record_id
         
@@ -95,7 +95,7 @@ class EventProcessor:
         )
     
     def _handle_update(self, event: TrackEvent):
-        """Update 事件：仅更新内存统计"""
+        """Update event: update in-memory statistics only"""
         if event.track_id not in self._pending_stats:
             self._pending_stats[event.track_id] = {
                 "max_conf": event.confidence,
@@ -110,7 +110,7 @@ class EventProcessor:
         stats["count"] += 1
     
     def _handle_leave(self, event: TrackEvent):
-        """Leave 事件：写入完整记录"""
+        """Leave event: write the complete record"""
         stats = self._pending_stats.pop(event.track_id, None)
         self._enter_records.pop(event.track_id, None)
         
@@ -150,7 +150,7 @@ class EventProcessor:
         )
     
     def _save_to_db(self, record: DetectionEvent):
-        """写入数据库"""
+        """Write to the database"""
         from app.database import engine
         from sqlmodel import Session
 

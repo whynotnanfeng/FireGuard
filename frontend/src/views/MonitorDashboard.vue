@@ -2,21 +2,21 @@
   <div class="dashboard-container">
     <div class="monitor-header">
       <div>
-        <span class="monitor-title">监控看板</span>
-        <span class="monitor-count">{{ runningTasks.length }} 个执行中任务</span>
+        <span class="monitor-title">Dashboard</span>
+        <span class="monitor-count">{{ runningTasks.length }} running task(s)</span>
       </div>
       <button class="fullscreen-btn" id="fullscreenBtn" @click="toggleFullscreen">
         <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
         </svg>
-        全屏
+        Fullscreen
       </button>
     </div>
 
     <div class="video-grid" :class="{ fullscreen: isFullscreen }" id="videoGrid">
       <div class="video-cell" v-for="task in runningTasks" :key="task.id">
         <div class="video-cell-media" ref="mediaContainers" :data-task-id="task.id">
-          <!-- 核心缩放适配层：使用等比例 transform scale 完美还原大型播放器的内部比例 -->
+          <!-- Core scaling layer: uniform transform scale reproduces the large player's internal proportions -->
           <div class="video-scale-wrapper">
             <div class="video-scale-inner" :style="getScaleStyle(task.id)">
               <VideoPlayer 
@@ -46,7 +46,7 @@
                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
               </svg>
             </div>
-            <div class="text">暂无执行中的监控任务</div>
+            <div class="text">No running monitoring tasks</div>
           </div>
         </div>
       </div>
@@ -73,7 +73,7 @@ const wsStreamUrl = computed(() => {
   return `${protocol}//${host}/ws/stream`
 })
 
-// 基准尺寸：我们采用 1024x640 (16:10) 的比例，这样 16:9 的视频在垂直居中时，底部会自然留出黑边，用来放置文字 overlay，避免遮挡画面。
+// Baseline size: we use a 1024x640 (16:10) ratio so that 16:9 video is vertically centered with black bars at the bottom for the text overlay, avoiding occlusion of the picture.
 const NATIVE_WIDTH = 1024
 const NATIVE_HEIGHT = 640
 
@@ -267,7 +267,7 @@ onUnmounted(() => {
     overflow: hidden;
 }
 
-/* 核心缩放容器 */
+/* Core scaling container */
 .video-scale-wrapper {
     position: absolute;
     top: 0;
@@ -285,10 +285,10 @@ onUnmounted(() => {
 .dashboard-video-player {
     width: 100%;
     height: 100%;
-    pointer-events: none; /* 在缩小面板中禁用误触原生控制栏 */
+    pointer-events: none; /* disable accidental native control bar clicks in the shrunken panel */
 }
 
-/* 移除原生播放器的多余内外边距和底色，保证纯净贴合 */
+/* Strip the native player's extra margins and background so it blends in cleanly */
 :deep(.dashboard-video-player .video-player-container) {
     height: 100% !important;
     min-height: 0 !important;
@@ -301,7 +301,7 @@ onUnmounted(() => {
     background: transparent !important;
 }
 
-/* 强制隐藏原生的控制按钮，因为看板统一由外部叠加 UI 管理 */
+/* Forcefully hide the native controls since the dashboard manages the UI with its own overlay */
 :deep(.dashboard-video-player .controls),
 :deep(.dashboard-video-player .history-seekbar-container),
 :deep(.dashboard-video-player .detection-records-panel) {

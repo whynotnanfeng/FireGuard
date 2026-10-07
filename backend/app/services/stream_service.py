@@ -1,9 +1,10 @@
 """
-流媒体服务抽象层
+Streaming service abstraction layer
 
-提供统一的流媒体服务接口，支持 MediaMTX 和备用流媒体服务的无缝切换。
+Provides a unified streaming service interface, supporting seamless switching between
+MediaMTX and the alternative streaming service.
 
-使用方式：
+Usage:
     service = create_stream_service("mediamtx")
     await service.register_stream("fg_task1_rgb", "rtsp://127.0.0.1:8554/cam1")
     hls_url = await service.get_hls_url("fg_task1_rgb")
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class StreamService(ABC):
-    """流媒体服务抽象基类"""
+    """Abstract base class for streaming services"""
 
     @abstractmethod
     async def register_stream(self, stream_path: str, source_url: str) -> bool:
@@ -44,7 +45,7 @@ class StreamService(ABC):
 
 
 class MediaMTXService(StreamService):
-    """MediaMTX 流媒体服务实现"""
+    """MediaMTX streaming service implementation"""
 
     def __init__(
         self,
@@ -57,19 +58,19 @@ class MediaMTXService(StreamService):
         self.rtsp_base = rtsp_base or config.MEDIAMTX_RTSP_BASE
 
     async def register_stream(self, stream_path: str, source_url: str) -> bool:
-        """注册拉流路径到 MediaMTX
+        """Register a pull path with MediaMTX
 
         Args:
-            stream_path: 流路径名称 (如 fg_task1_rgb)
-            source_url: 原始 RTSP 流地址
+            stream_path: Stream path name (e.g. fg_task1_rgb)
+            source_url: Original RTSP stream address
 
         Returns:
-            bool: 是否注册成功
+            bool: True if registration succeeded
         """
         try:
             import httpx
 
-            # 先尝试删除旧路径配置(如果存在)
+            # Try to delete the old path configuration first (if it exists)
             try:
                 async with httpx.AsyncClient(timeout=2.0) as client:
                     await client.delete(
@@ -78,7 +79,7 @@ class MediaMTXService(StreamService):
             except Exception:
                 pass
 
-            # 注册新路径,配置为从 source_url 拉流
+            # Register the new path, configured to pull from source_url
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.post(
                     f"{self.api_base}/v3/config/paths/add/{stream_path}",
@@ -105,18 +106,18 @@ class MediaMTXService(StreamService):
             return False
 
     async def unregister_stream(self, stream_path: str) -> bool:
-        """注销 MediaMTX 拉流路径
+        """Unregister a MediaMTX pull path
 
         Args:
-            stream_path: 流路径名称 (如 fg_task1_rgb)
+            stream_path: Stream path name (e.g. fg_task1_rgb)
 
         Returns:
-            bool: 是否注销成功
+            bool: True if unregistration succeeded
         """
         try:
             import httpx
 
-            # 先踢出所有活跃连接
+            # Kick all active connections first
             try:
                 async with httpx.AsyncClient(timeout=2.0) as client:
                     await client.post(
@@ -125,7 +126,7 @@ class MediaMTXService(StreamService):
             except Exception:
                 pass
 
-            # 删除路径配置
+            # Delete the path configuration
             async with httpx.AsyncClient(timeout=3.0) as client:
                 resp = await client.delete(
                     f"{self.api_base}/v3/config/paths/delete/{stream_path}",
@@ -155,12 +156,12 @@ class MediaMTXService(StreamService):
 
 
 def create_stream_service(service_type: str = "mediamtx") -> StreamService:
-    """创建流媒体服务实例
+    """Create a streaming service instance
 
     Args:
-        service_type: 服务类型（"mediamtx" 或其他）
+        service_type: Service type ("mediamtx" or another)
 
     Returns:
-        StreamService: 流媒体服务实例
+        StreamService: The streaming service instance
     """
     return MediaMTXService()

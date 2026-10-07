@@ -1,21 +1,21 @@
 """
-共享内存帧传输 (V4.10)
+Shared-memory frame transport (V4.10)
 
-替代 JPEG 编解码方案，消除 dispatch → worker 的 CPU 编解码开销。
+Replaces the JPEG codec approach, eliminating the CPU encode/decode overhead from dispatch → worker.
 
-方案：三重缓冲 SharedMemory 环形队列
-- dispatch 写入 SharedMemory → 队列仅传名称/形状元数据 (~100B)
-- worker 通过名称打开 SharedMemory → 零拷贝读取帧数据
-- 避免 JPEG encode (5-15ms) + decode (3-8ms) 每帧 ~15ms CPU 开销
+Approach: triple-buffered SharedMemory ring queue
+- dispatch writes into SharedMemory → the queue only carries name/shape metadata (~100B)
+- worker opens SharedMemory by name → zero-copy read of the frame data
+- Avoids the ~15ms CPU overhead of JPEG encode (5-15ms) + decode (3-8ms) per frame
 
-使用方式：
+Usage:
     buf = SharedFrameRing(n_buffers=3, shape=(1080, 1920, 3), name_prefix="task_xxx")
 
-    # dispatch 端
+    # dispatch side
     name, shape, dtype, idx = buf.put(frame)
     queue.put((name, shape, dtype, idx))
 
-    # worker 端
+    # worker side
     name, shape, dtype, idx = queue.get()
     frame = buf.get(name, shape, dtype)
 """
@@ -53,10 +53,10 @@ class SharedFrameRing:
         self._alloc_count = 0
 
     def put(self, frame: np.ndarray) -> tuple:
-        """写入一帧到下一个空闲缓冲区。
+        """Write one frame into the next free buffer.
 
         Returns:
-            (name, shape, dtype_str, idx) 元组，通过队列传给 worker
+            (name, shape, dtype_str, idx) tuple, passed to the worker through the queue
         """
         with self._lock:
             idx = self._write_idx % self.n
@@ -69,9 +69,9 @@ class SharedFrameRing:
         return block.name, self.shape, np.dtype(self.dtype).name, idx
 
     def get(self, name: str, shape: tuple, dtype_str: str) -> np.ndarray:
-        """从共享内存读取帧（worker 端调用）。
+        """Read a frame from shared memory (called on the worker side).
 
-        返回 frame 的副本（释放共享内存引用后仍可用）。
+        Returns a copy of the frame (still usable after the shared memory reference is released).
         """
         dtype = np.dtype(dtype_str)
         block = shm.SharedMemory(name=name)
@@ -90,14 +90,14 @@ class SharedFrameRing:
 
     @staticmethod
     def _force_cleanup_name(buf_name: str):
-        """强制清理指定名称的残留共享内存（Windows 兼容）"""
+        """Forcefully clean up leftover shared memory with the given name (Windows compatible)"""
         import time
         for attempt in range(5):
             try:
                 old = shm.SharedMemory(name=buf_name)
                 old.close()
                 old.unlink()
-                # Windows 内核对象释放需要等待
+                # Releasing a Windows kernel object requires waiting
                 time.sleep(0.15)
                 return
             except FileNotFoundError:
@@ -107,5 +107,5 @@ class SharedFrameRing:
 
     @property
     def payload_size_bytes(self) -> int:
-        """队列元数据大小（用于对比 JPEG）"""
+        """Queue metadata size (for comparison against JPEG)"""
         return len(self.buffers[0].name) + 8 + 8 + 4  # name + shape tuple ref + idx

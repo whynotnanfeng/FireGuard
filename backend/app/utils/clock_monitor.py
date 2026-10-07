@@ -32,10 +32,10 @@ def _parse_ntp_response(data: bytes) -> float:
 
 def query_ntp_offset(server: str = DEFAULT_NTP_SERVER, timeout: float = 3.0) -> float | None:
     """
-    查询NTP服务器获取本地时钟与NTP时间的偏移量（秒）。
+    Query an NTP server for the offset between the local clock and NTP time (in seconds).
 
     Returns:
-        offset_seconds: 本地时间 - NTP时间的偏移（秒），None表示查询失败
+        offset_seconds: offset between local time and NTP time (seconds), None if the query failed
     """
     try:
         start = time.time()
@@ -56,10 +56,10 @@ def query_ntp_offset(server: str = DEFAULT_NTP_SERVER, timeout: float = 3.0) -> 
 
 def query_ntp_offset_with_fallback(timeout: float = 3.0) -> float | None:
     """
-    【三层混合校准 - 第一层】：带备用的 NTP 查询
+    [Three-tier hybrid calibration - tier 1]: NTP query with fallback servers
 
     Returns:
-        offset_seconds: 本地时间 - NTP 时间的偏移（秒），None 表示所有服务器都失败
+        offset_seconds: offset between local time and NTP time (seconds), None if all servers failed
     """
     for server in FALLBACK_NTP_SERVERS:
         offset = query_ntp_offset(server, timeout)
@@ -73,10 +73,10 @@ def query_ntp_offset_with_fallback(timeout: float = 3.0) -> float | None:
 
 class ClockMonitor:
     """
-    纯Python SNTP时钟偏移监控器。
+    Pure-Python SNTP clock offset monitor.
 
-    不修改系统时钟，仅定期检测偏移并告警。
-    用于确保 wall clock 时间戳的准确性。
+    Does not modify the system clock; it only detects the offset periodically and raises alerts.
+    Used to ensure the accuracy of wall clock timestamps.
     """
 
     def __init__(self, ntp_server: str = DEFAULT_NTP_SERVER, check_interval: int = CHECK_INTERVAL):
@@ -87,14 +87,14 @@ class ClockMonitor:
         self._last_offset_ms: float = 0.0
         self._offset_history: list[float] = []
         self._max_history = 20
-        # 【P0-3 改进】：时间审计日志 - 记录 NTP 偏移分布统计
+        # [P0-3 improvement]: time audit log - record NTP offset distribution statistics
         self._offset_stats = {
             "count": 0,
             "sum": 0.0,
             "sum_sq": 0.0,
             "min": float("inf"),
             "max": float("-inf"),
-            "last_5_values": [],  # 最近 5 次偏移值
+            "last_5_values": [],  # The 5 most recent offset values
         }
 
     @property
@@ -110,7 +110,7 @@ class ClockMonitor:
     def get_offset_stats(self) -> dict:
         """
         Returns:
-            dict: 包含 mean, rms, min, max, count 等统计信息
+            dict: statistics including mean, rms, min, max, count, etc.
         """
         stats = self._offset_stats
         if stats["count"] == 0:

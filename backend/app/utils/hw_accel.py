@@ -30,10 +30,10 @@ def detect_hw_encoders(ffmpeg_path: str) -> dict:
 
 def resolve_hls_encoder(ffmpeg_path: str, priority: list[str] | None = None) -> tuple[str, bool]:
     """
-    为HLS录制选择最优编码器。
+    Select the optimal encoder for HLS recording.
 
     Returns:
-        (encoder_name, is_hw): 编码器名称和是否为硬件编码
+        (encoder_name, is_hw): encoder name and whether it is hardware-accelerated
     """
     encoders = detect_hw_encoders(ffmpeg_path)
     if priority is None:
@@ -62,10 +62,10 @@ def resolve_hls_encoder(ffmpeg_path: str, priority: list[str] | None = None) -> 
 
 def build_hls_encode_args(encoder: str, is_hw: bool, fps: float = 15.0, hls_time: int = 1) -> list[str]:
     """
-    根据编码器类型构建FFmpeg编码参数。
+    Build FFmpeg encoding arguments based on the encoder type.
 
-    注意：copy模式不需要这些参数，此函数仅在copy失败时使用。
-    GOP = fps × hls_time，确保每个 HLS 分段以关键帧起始。
+    Note: copy mode does not need these arguments; this function is only used when copy fails.
+    GOP = fps × hls_time, ensuring that every HLS segment starts with a keyframe.
     """
     args = ["-c:v", encoder]
     gop = int(fps * hls_time)
@@ -84,9 +84,9 @@ def build_hls_encode_args(encoder: str, is_hw: bool, fps: float = 15.0, hls_time
                 "-preset", "p1",
                 "-tune", "ll",
                 "-rc", "cbr",
-                "-b:v", "3M",       # 从2M提升到3M，复杂场景无blocking artifacts
+                "-b:v", "3M",       # Raised from 2M to 3M, no blocking artifacts in complex scenes
                 "-maxrate", "3M",
-                "-bufsize", "6M",    # 2秒缓冲，应对场景突变
+                "-bufsize", "6M",    # 2-second buffer to absorb sudden scene changes
                 "-gpu", "0",
             ]
         elif "qsv" in encoder:

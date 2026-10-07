@@ -1,12 +1,12 @@
 """
-ONVIF 标准设备接入模块
+ONVIF standard device access module
 
-参考 ONVIF Profile S（视频流）和 Profile G（录像）规范。
-兼容海康、大华、宇视等主流 IP 摄像头。
+Follows the ONVIF Profile S (video streaming) and Profile G (recording) specifications.
+Compatible with mainstream IP cameras from Hikvision, Dahua, Uniview, etc.
 
-使用方式：
+Usage:
     devices = await ONVIFDevice.discover_devices()
-    device = ONVIFDevice(host="192.168.1.100", user="admin", password="12345")
+    device = ONVIFDevice(host="<camera_ip>", user="<username>", password="<password>")
     rtsp_url = await device.get_stream_uri()
     info = await device.get_device_info()
 """
@@ -20,14 +20,14 @@ logger = logging.getLogger(__name__)
 
 
 class ONVIFDevice:
-    """ONVIF 设备客户端
+    """ONVIF device client
 
     Attributes:
-        host: 设备 IP 地址
-        port: ONVIF 服务端口（默认 80）
-        user: 用户名
-        password: 密码
-        auth_type: 认证类型（"digest" 或 "basic"）
+        host: Device IP address
+        port: ONVIF service port (default 80)
+        user: Username
+        password: Password
+        auth_type: Authentication type ("digest" or "basic")
     """
 
     def __init__(
@@ -50,13 +50,13 @@ class ONVIFDevice:
         self._executor = ThreadPoolExecutor(max_workers=2)
 
     def _create_service(self, service_type: str):
-        """创建 ONVIF 服务客户端
+        """Create an ONVIF service client
 
         Args:
-            service_type: 服务类型（"device", "media", "ptz"）
+            service_type: Service type ("device", "media", "ptz")
 
         Returns:
-            ONVIFCamera: ONVIF 服务客户端
+            ONVIFCamera: The ONVIF service client
         """
         try:
             from onvif import ONVIFCamera
@@ -85,13 +85,13 @@ class ONVIFDevice:
             raise
 
     async def get_stream_uri(self, profile_token: Optional[str] = None) -> str:
-        """获取 RTSP 流地址（ONVIF Media Service）
+        """Get the RTSP stream address (ONVIF Media Service)
 
         Args:
-            profile_token: 配置文件令牌，None 则使用第一个
+            profile_token: Profile token; None means use the first one
 
         Returns:
-            str: RTSP 流地址
+            str: RTSP stream address
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -101,7 +101,7 @@ class ONVIFDevice:
         )
 
     def _sync_get_stream_uri(self, profile_token: Optional[str] = None) -> str:
-        """同步 ONVIF 调用"""
+        """Synchronous ONVIF call"""
         if not self._media_service:
             self._media_service = self._create_service("media")
 
@@ -125,10 +125,10 @@ class ONVIFDevice:
         return response.Uri
 
     async def get_device_info(self) -> dict:
-        """获取设备信息（ONVIF Device Service）
+        """Get device information (ONVIF Device Service)
 
         Returns:
-            dict: 设备信息
+            dict: Device information
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -137,7 +137,7 @@ class ONVIFDevice:
         )
 
     def _sync_get_device_info(self) -> dict:
-        """同步获取设备信息"""
+        """Synchronously fetch device information"""
         if not self._device_service:
             self._device_service = self._create_service("device")
 
@@ -152,10 +152,10 @@ class ONVIFDevice:
         }
 
     async def get_profiles(self) -> list:
-        """获取设备配置文件列表
+        """Get the list of device profiles
 
         Returns:
-            list: 配置文件列表
+            list: List of profiles
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -164,7 +164,7 @@ class ONVIFDevice:
         )
 
     def _sync_get_profiles(self) -> list:
-        """同步获取配置文件"""
+        """Synchronously fetch profiles"""
         if not self._media_service:
             self._media_service = self._create_service("media")
 
@@ -181,13 +181,13 @@ class ONVIFDevice:
 
     @staticmethod
     async def discover_devices(timeout: float = 5.0) -> list:
-        """发现局域网内的 ONVIF 设备（WS-Discovery）
+        """Discover ONVIF devices on the LAN (WS-Discovery)
 
         Args:
-            timeout: 发现超时时间（秒）
+            timeout: Discovery timeout in seconds
 
         Returns:
-            list: 设备列表，每个元素包含 {"host": str, "port": int, "uuid": str}
+            list: List of devices, each element containing {"host": str, "port": int, "uuid": str}
         """
         try:
             from wsdiscovery.discovery import ThreadedWSDiscovery

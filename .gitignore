@@ -1,6 +1,6 @@
-# ──────────────────────────────────────────────────────────────────────────────
-# FireGuard Project Git Ignore Configuration
-# ──────────────────────────────────────────────────────────────────────────────
+# ============================================================
+# FireGuard - Git Ignore Configuration
+# ============================================================
 
 # --- System & OS ---
 .DS_Store
@@ -11,7 +11,19 @@ Thumbs.db
 *.pid
 .directory
 
-# --- AI Agent & Developer Tools (MANDATORY IGNORE) ---
+# --- Secrets & local configuration ---
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+credentials.json
+
+# --- AI Agent & Developer Tools ---
 .agents/
 .gemini/
 .claude/
@@ -19,17 +31,18 @@ Thumbs.db
 .antigravity/
 .trae/
 .kiro/
+.cursor/
+.windsurf/
 brain/
 scratch/
 plan_act_agent*/
 CLAUDE.md
+AGENTS.md
 skills/
 skills-lock.json
 *.session
-.cursor/
-.windsurf/
 
-# --- Frontend (Vue/Vite) ---
+# --- Frontend (Vue 3 / Vite) ---
 frontend/node_modules/
 frontend/dist/
 frontend/dist-ssr/
@@ -44,6 +57,8 @@ frontend/.stylelintcache
 **/*.py[cod]
 **/*$py.class
 **/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
 **/.venv/
 **/venv/
 **/env/
@@ -51,9 +66,13 @@ frontend/.stylelintcache
 **/build/
 **/dist/
 **/*.egg-info/
-backend/.env
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
 
-# --- Project Data & Databases ---
+# --- Project data & databases ---
 data/
 backend/data/*
 !backend/data/.gitkeep
@@ -62,6 +81,8 @@ backend/logs/*
 backend/scratch/
 *.db
 *.sqlite3
+*.sqlite
+*.rdb
 
 # --- Simulator ---
 simulator/bin/
@@ -69,8 +90,10 @@ simulator/data/*
 !simulator/data/.gitkeep
 simulator/uploads/
 
-# --- Test Data ---
+# --- Test data & media ---
 testdata/
+backend/uploads/
+uploads/
 
 # --- IDEs ---
 .vscode/
@@ -79,28 +102,29 @@ testdata/
 *.swo
 .history/
 
-# --- Redis ---
-*.rdb
-
-# --- Binaries ---
+# --- Third-party binaries ---
 bin/
+**/bin/ffmpeg.exe
+**/bin/ffmpeg
+**/ffmpeg.zip
+**/MediaMTX/
 
-# --- Temporary Test Scripts ---
-backend/final_verify.py
-backend/test_*.py
-!backend/tests/
-
-# --- Root HTML Design Proposals ---
-/*.html
-
-# --- Temporary Development Task Guides ---
-CHANGE_GUIDE.md
-PERFORMANCE_OPTIMIZATION_GUIDE.md
-REFACTORING_GUIDE.md
-
-# --- 软著申请材料（不提交） ---
+# --- Copyright registration material (not published) ---
 ruanzhu/
 
-# --- Claude Code MCP config (contains secrets) ---
-.claude/mcp.json
+# --- Internal documentation (not part of the open-source release) ---
+docs/
+CLAUDE.md
+skills-lock.json
 .mcp.json
+.claude/mcp.json
+
+# --- Ad-hoc local verification scripts ---
+backend/final_verify.py
+backend/verify_*.py
+backend/check_*.py
+_verify*.py
+
+# --- OS / editor noise ---
+*.html.bak
+.DS_Store

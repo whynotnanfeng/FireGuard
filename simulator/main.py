@@ -23,7 +23,7 @@ except ImportError:
 # --- Configuration ---
 BASE_DIR = Path(__file__).resolve().parent
 UPLOADS_DIR = BASE_DIR / "data" / "uploads"
-# 【V1.5.0 统一化】：优先使用根目录下的合并 bin 目录
+# [V1.5.0 unification]: prefer the merged bin directory at the repo root
 ROOT_BIN = BASE_DIR.parent / "bin"
 BIN_DIR = ROOT_BIN if ROOT_BIN.exists() else BASE_DIR / "bin"
 TOOLS_DIR = BIN_DIR 
@@ -47,7 +47,7 @@ _METADATA_CACHE_TTL = 5.0
 
 
 def get_metadata_cached() -> dict:
-    """带缓存的元数据读取，5 秒内返回缓存结果。"""
+    """Cached metadata read: returns the cached result within 5 seconds."""
     now = time.time()
     if (_metadata_cache["data"] is not None
             and now - _metadata_cache["time"] < _METADATA_CACHE_TTL):
@@ -156,52 +156,52 @@ def evaluate_quality(bpp: float) -> dict:
     if bpp < 0.05:
         return {
             "level": "GRADE_POOR",
-            "label": "画质极低",
+            "label": "Very Low Quality",
             "color": "error",
-            "description": "原视频画质极低，建议仅做流畅导出"
+            "description": "Very low source quality — smooth playback export only"
         }
     elif bpp < 0.1:
         return {
             "level": "GRADE_FAIR",
-            "label": "标准画质",
+            "label": "Standard Quality",
             "color": "warning",
-            "description": "标准画质，支持流畅/标准导出"
+            "description": "Standard quality — supports smooth/standard export"
         }
     elif bpp < 0.2:
         return {
             "level": "GRADE_GOOD",
-            "label": "高清画质",
+            "label": "High Quality",
             "color": "success",
-            "description": "高清画质，支持全量转码选项"
+            "description": "High quality — supports all transcoding options"
         }
     else:
         return {
             "level": "GRADE_EXCELLENT",
-            "label": "极高画质",
+            "label": "Ultra Quality",
             "color": "processing",
-            "description": "极高画质（文件较大），建议转码瘦身"
+            "description": "Ultra quality (large file) — transcoding recommended to slim it down"
         }
 
 
 TRANSCODE_PRESETS = {
     "copy": {
-        "label": "Copy (原编码转发)",
+        "label": "Copy (repack original codec)",
         "vcodec": "copy", "acodec": "copy", "resolution": "original", "fps": 0, "bitrate": "original"
     },
     "low": {
-        "label": "流畅 (720P)",
+        "label": "Low (720P)",
         "vcodec": "h264", "acodec": "aac", "resolution": "1280x720", "fps": 25, "bitrate": "1500k", "crf": 26, "preset": "faster"
     },
     "medium": {
-        "label": "标准 (1080P)",
+        "label": "Medium (1080P)",
         "vcodec": "h264", "acodec": "aac", "resolution": "1920x1080", "fps": 25, "bitrate": "3000k", "crf": 25, "preset": "veryfast"
     },
     "high": {
-        "label": "高清 (2K)",
+        "label": "High (2K)",
         "vcodec": "h264", "acodec": "aac", "resolution": "2560x1440", "fps": 25, "bitrate": "6000k", "crf": 22, "preset": "faster"
     },
     "ultra": {
-        "label": "超清 (原始)",
+        "label": "Ultra (source resolution)",
         "vcodec": "h264", "acodec": "aac", "resolution": "original", "fps": 0, "bitrate": "original", "crf": 20, "preset": "fast"
     }
 }
@@ -226,7 +226,7 @@ mediamtx_process: Optional[subprocess.Popen] = None
 
 
 async def cleanup_port(port: int):
-    """更稳健地查找并杀死占用特定端口的进程（仅杀 mediamtx 进程，保护后端服务）"""
+    """More robustly find and kill the process occupying a given port(only kills mediamtx, to protect backend services)"""
     if os.name != 'nt':
         return
     try:
@@ -260,7 +260,7 @@ async def cleanup_port(port: int):
 
 
 def is_port_in_use(port: int) -> bool:
-    """检查端口是否被占用"""
+    """Check whether a port is in use"""
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
@@ -277,7 +277,7 @@ async def startup():
     fireguard_mode = os.getenv("FIREGUARD_MODE", "development")
     logger.info(f"[Simulator] Running in '{fireguard_mode}' mode")
     
-    rtsp_port = 8555  # 与后端 MediaMTX (8554) 分离，避免端口冲突
+    rtsp_port = 8555  # Kept separate from the backend MediaMTX (8554) to avoid port conflicts
     api_port = 9996
     
     try:
@@ -300,7 +300,7 @@ async def startup():
     except Exception as e:
         logger.info(f"[Simulator] Config center unavailable, using mode defaults: RTSP={rtsp_port}, API={api_port} ({e})")
     
-    # 优雅解决启动竞态条件：只要任一端口被占用，极有可能是另外一个服务正在拉起 mediamtx
+    # Gracefully handle the startup race: if either port is busy, another service is most likely bringing up mediamtx
     if is_port_in_use(rtsp_port) or is_port_in_use(api_port):
         logger.info(f"[Simulator] Detected port activity on :{rtsp_port} or :{api_port}. Waiting for full readiness...")
         await asyncio.sleep(2.0)
@@ -387,7 +387,7 @@ paths:
         }
         r.hset("fireguard:registry", "simulator", _json.dumps(payload))
         
-        # 【重要】：注册为 MediaMTX 所有者，方便后端直接发现，避免等待 30s
+        # [IMPORTANT]: register as the MediaMTX owner so the backend can discover it directly, avoiding a 30s wait
         r.set("fireguard:mediamtx:owner", _json.dumps({
             "rtsp_port": rtsp_port,
             "api_port": api_port,
@@ -489,7 +489,7 @@ def health():
 
 
 @app.post("/videos/upload")
-async def upload_video(file: UploadFile = File(...), device_name: str = Form("未命名设备")):
+async def upload_video(file: UploadFile = File(...), device_name: str = Form("Unnamed Device")):
     file_id = str(uuid.uuid4())
     ext = Path(file.filename).suffix
     save_path = UPLOADS_DIR / f"{file_id}{ext}"
@@ -515,7 +515,7 @@ def list_videos():
             videos.append({
                 "file_id": f.stem,
                 "filename": f.name,
-                "device_name": file_meta.get("name", "未命名"),
+                "device_name": file_meta.get("name", "Unnamed"),
                 "width": file_meta.get("width"),
                 "height": file_meta.get("height"),
                 "codec": file_meta.get("codec"),
@@ -549,13 +549,13 @@ def start_stream_endpoint(req: StreamStartRequest):
             transport=req.transport, hw_accel=req.hw_accel
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"FFmpeg 启动失败: {e}")
+        raise HTTPException(status_code=500, detail=f"FFmpeg failed to start: {e}")
     for s in stream_manager.get_active_streams():
         if s["id"] == stream_id:
             file_id = Path(s["video_path"]).stem
-            s["device_name"] = get_metadata().get(file_id, {}).get("name", "未知")
+            s["device_name"] = get_metadata().get(file_id, {}).get("name", "Unknown")
             return s
-    raise HTTPException(status_code=500, detail="流启动后立即退出，可能是推流目标不可达")
+    raise HTTPException(status_code=500, detail="Stream exited immediately after start — the publish target may be unreachable")
 
 
 @app.get("/streams", response_model=List[StreamInfo])
@@ -564,7 +564,7 @@ def list_streams():
     meta = get_metadata()
     for s in streams:
         file_id = Path(s["video_path"]).stem
-        s["device_name"] = meta.get(file_id, {}).get("name", "未知")
+        s["device_name"] = meta.get(file_id, {}).get("name", "Unknown")
     return streams
 
 

@@ -74,7 +74,7 @@ from functools import lru_cache
 
 
 def get_dir_size(path: str) -> int:
-    """计算目录总大小，结果缓存 30 秒以避免频繁磁盘遍历。"""
+    """Compute the total size of a directory; results are cached for 30 seconds to avoid frequent disk walks."""
     cache_key = time.time() // 30
     return _get_dir_size_cached(path, cache_key)
 

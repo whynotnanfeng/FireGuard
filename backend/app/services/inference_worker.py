@@ -16,7 +16,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 class GlobalInferenceWorker(mp.Process):
-    """全局 AI 推理进程 (独立进程，打破 GIL)"""
+    """Global AI inference process (separate process, breaks the GIL)"""
 
     def __init__(self, in_q: mp.Queue, out_q: mp.Queue, active_tasks_map=None):
         super().__init__(daemon=True)
@@ -28,7 +28,7 @@ class GlobalInferenceWorker(mp.Process):
     def run(self):
         import os as _os, sys as _sys
 
-        # ---- 子进程日志初始化（multiprocessing 不继承父进程 handlers）----
+        # ---- Child process logging init (multiprocessing does not inherit parent handlers) ----
         _log_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "logs")
         _os.makedirs(_log_dir, exist_ok=True)
         _log_file = _os.path.join(_log_dir, "inference_worker.log")
@@ -38,7 +38,7 @@ class GlobalInferenceWorker(mp.Process):
         _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         _root_logger.addHandler(_fh)
 
-        # 子进程需继承 CUDA/cuDNN PATH（multiprocessing 不继承环境变更）
+        # The child process must inherit the CUDA/cuDNN PATH (multiprocessing does not inherit env changes)
         _cur = _os.environ.get("PATH", "")
         _path_additions = []
 
@@ -47,7 +47,7 @@ class GlobalInferenceWorker(mp.Process):
         if _os.path.isdir(_cuda_bin) and _cuda_bin not in _cur:
             _path_additions.append(_cuda_bin)
 
-        # cuDNN: 优先从 pip 包 (nvidia-cudnn-cu12) 查找，其次从手动安装路径
+        # cuDNN: look in the pip package (nvidia-cudnn-cu12) first, then fall back to manual install paths
         _cudnn_bin = ""
         _site_candidates = [
             _p + r"\nvidia\cudnn\bin"
@@ -73,14 +73,14 @@ class GlobalInferenceWorker(mp.Process):
         if _path_additions:
             _os.environ["PATH"] = ";".join(_path_additions + [_cur])
 
-        # 0. 禁用 cuDNN Frontend Engine (Graph API)，回退到传统 cuDNN API
-        #    cuDNN 9.22 Frontend Engine 可能缺少 GTX 1060 (sm_61) 的 kernel image
+# 0. Disable the cuDNN Frontend Engine (Graph API) and fall back to the legacy cuDNN API
+#    The cuDNN 9.22 Frontend Engine may lack kernel images for GTX 1060 (sm_61)
         _os.environ.setdefault("ORT_DISABLE_CUDNN_FE", "1")
 
-        # 1. 延迟导入 Detector，确保 CUDA / ONNXRuntime 运行在子进程上下文中
+        # 1. Import Detector lazily so that CUDA / ONNXRuntime run in the child process context
         from app.services.detector import Detector
 
-        # 进程级别的模型缓存字典 { "model_path|gpu=...": DetectorInstance }
+        # Process-level model cache dict { "model_path|gpu=...": DetectorInstance }
         model_cache = {}
 
         logger.info(f"[InferenceWorker-{self.pid}] Started.")
@@ -91,9 +91,9 @@ class GlobalInferenceWorker(mp.Process):
                 if task_data is None:
                     break
 
-                # 共享内存格式 (>=9 元素) 或旧 JPEG 格式 (<9 元素)
-                # 多模型时末尾携带 model_id（第10/8个元素）
-                # 双帧 SharedMemory: 13 元素, shm_name="DUAL"
+                # Shared memory format (>=9 elements) or legacy JPEG format (<9 elements)
+                # With multiple models, model_id is appended at the end (10th/8th element)
+                # Dual-frame SharedMemory: 13 elements, shm_name="DUAL"
                 _model_id = None
                 _is_dual_shm = False
                 if len(task_data) >= 13 and task_data[5] == "DUAL":
@@ -122,7 +122,7 @@ class GlobalInferenceWorker(mp.Process):
                      conf_floor, jpeg_data, use_gpu) = task_data
                     _is_shm = False
 
-                # 2. 模型缓存管理 (按需加载, 键含 use_gpu)
+                # 2. Model cache management (load on demand, key includes use_gpu)
                 _cache_key = f"{model_path}|gpu={use_gpu}"
                 if _cache_key not in model_cache:
                     logger.info(
@@ -137,7 +137,7 @@ class GlobalInferenceWorker(mp.Process):
 
                 detector = model_cache[_cache_key]
 
-                # 3. 图像解码：共享内存或 JPEG
+                # 3. Image decoding: shared memory or JPEG
                 try:
                     if _is_dual_shm:
                         import multiprocessing.shared_memory as _shm
@@ -173,21 +173,21 @@ class GlobalInferenceWorker(mp.Process):
                     logger.warning(f"[InferenceWorker] Decoded image is None for task {task_id}")
                     continue
 
-                # 4. 执行推理
+                # 4. Run inference
                 detections = detector.detect(
                     input_data,
                     conf=conf_floor,
                     label_mapping=label_mapping
                 )
 
-                # 5. 推送回主进程（附带 GPU provider 诊断）
+                # 5. Push back to the main process (with GPU provider diagnostics)
                 _backend = detector.backend if hasattr(detector, 'backend') else '?'
                 _ap = getattr(detector, 'session', None)
                 _ps = _ap.get_providers()[0] if _ap and hasattr(_ap, 'get_providers') else '?'
                 _result = (task_id, timestamp, detections, 0, None, f"{_backend}|{_ps}")
                 if _model_id is not None:
                     _result = _result + (_model_id,)
-                # 诊断日志：多模型时输出 model_id 和检测数量
+                # Diagnostic log: with multiple models, log the model_id and detection count
                 if _model_id is not None:
                     logger.info(
                         f"[InferenceWorker-{self.pid}] model_id={_model_id[:8]} "

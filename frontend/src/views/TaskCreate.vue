@@ -1,6 +1,6 @@
 <template>
   <a-modal 
-    title="新建检测任务"
+    title="New Detection Task"
     :open="true"
     @cancel="$emit('close')"
     width="720px"
@@ -11,37 +11,37 @@
       <a-form :model="form" :rules="rules" ref="formRef" layout="vertical">
         
         <div class="form-section">
-          <div class="section-title">基本信息</div>
+          <div class="section-title">Basic Information</div>
           <div class="form-row">
-            <a-form-item label="任务名称" name="name" class="form-col-2">
-              <a-input v-model:value="form.name" placeholder="请输入任务名称" :maxlength="50" showCount />
+            <a-form-item label="Task Name" name="name" class="form-col-2">
+              <a-input v-model:value="form.name" placeholder="Enter a task name" :maxlength="50" showCount />
             </a-form-item>
-            <a-form-item label="任务类型" name="task_type" class="form-col-1">
-              <a-select v-model:value="form.task_type" placeholder="请选择" @change="handleTaskTypeChange">
-                <a-select-option value="image">图片检测</a-select-option>
-                <a-select-option value="video">视频检测</a-select-option>
-                <a-select-option value="stream">实时视频流</a-select-option>
+            <a-form-item label="Task Type" name="task_type" class="form-col-1">
+              <a-select v-model:value="form.task_type" placeholder="Select" @change="handleTaskTypeChange">
+                <a-select-option value="image">Image Detection</a-select-option>
+                <a-select-option value="video">Video Detection</a-select-option>
+                <a-select-option value="stream">Live Stream</a-select-option>
               </a-select>
             </a-form-item>
           </div>
         </div>
 
         <div class="form-section">
-          <div class="section-title">模型配置</div>
+          <div class="section-title">Model Configuration</div>
 
-          <!-- 多模型列表 -->
+          <!-- Multi-model list -->
           <div v-for="(sm, idx) in selectedModels" :key="idx" class="multi-model-row">
             <div class="model-row-header">
-              <span class="model-row-label">模型 {{ idx + 1 }}</span>
+              <span class="model-row-label">Model {{ idx + 1 }}</span>
               <a-button v-if="selectedModels.length > 1" type="link" size="small" danger @click="removeModel(idx)">
-                移除
+                Remove
               </a-button>
             </div>
             <div class="form-row">
-              <a-form-item label="选择模型" class="form-col-2">
+              <a-form-item label="Select Model" class="form-col-2">
                 <a-select
                   v-model:value="sm.model_id"
-                  placeholder="请选择检测模型"
+                  placeholder="Select a detection model"
                   :loading="loadingModels"
                   @change="(val: string) => handleMultiModelChange(idx, val)"
                   style="width: 100%"
@@ -56,46 +56,46 @@
                   </a-select-option>
                 </a-select>
               </a-form-item>
-              <a-form-item label="权重" class="form-col-1">
+              <a-form-item label="Weight" class="form-col-1">
                 <a-slider v-model:value="sm.weight" :min="0.1" :max="3.0" :step="0.1" />
               </a-form-item>
             </div>
             <div v-if="sm.model_id" class="model-requirement-hint fade-in">
-              <span class="hint-label">输入类型:</span>
+              <span class="hint-label">Input types:</span>
               <a-tag v-for="t in sm.input_types" :key="t" color="blue" class="requirement-tag">
                 {{ t.toUpperCase() }}
               </a-tag>
               <template v-if="selectedModels.length > 1">
                 <a-button size="small" style="margin-left: 12px" @click="configuringModelIndex = idx; showPerModelConfig = true">
-                  配置类别和阈值
+                  Configure Classes &amp; Thresholds
                 </a-button>
                 <span class="config-summary">
-                  {{ sm.categories.filter(c => c.selected).length }}/{{ sm.categories.length }} 类别已启用
+                  {{ sm.categories.filter(c => c.selected).length }}/{{ sm.categories.length }} classes enabled
                 </span>
               </template>
             </div>
           </div>
 
           <a-button type="dashed" block @click="addModel" class="add-model-btn">
-            + 添加模型
+            + Add Model
           </a-button>
 
-          <!-- 融合配置（多模型时显示） -->
+          <!-- Fusion configuration (shown when multiple models are used) -->
           <div v-if="selectedModels.length > 1" class="fusion-config-section">
             <div class="config-header">
-              <span class="config-title">融合配置</span>
+              <span class="config-title">Fusion Configuration</span>
             </div>
-            <a-form-item label="WBF IoU 阈值">
+            <a-form-item label="WBF IoU Threshold">
               <a-slider v-model:value="fusionConfig.wbf_iou_threshold" :min="0.3" :max="0.8" :step="0.05" />
-              <div class="config-hint">同类别检测框 IoU 超过此值时融合（默认 0.55）</div>
+              <div class="config-hint">Boxes of the same class are fused when their IoU exceeds this value (default 0.55)</div>
             </a-form-item>
           </div>
 
           <div v-if="hasAnyModelSelected" class="inference-device-section">
-            <a-form-item label="推理设备" class="device-item">
+            <a-form-item label="Inference Device" class="device-item">
               <a-radio-group v-model:value="form.use_gpu">
-                <a-radio :value="false">CPU 推理</a-radio>
-                <a-radio :value="true" :disabled="!gpuAvailable && !gpuChecking">GPU 推理</a-radio>
+                <a-radio :value="false">CPU Inference</a-radio>
+                <a-radio :value="true" :disabled="!gpuAvailable && !gpuChecking">GPU Inference</a-radio>
               </a-radio-group>
               <a-button
                 size="small"
@@ -104,7 +104,7 @@
                 style="margin-left: 8px"
               >
                 <template #icon><ThunderboltOutlined /></template>
-                {{ gpuAvailable ? '重新检测 GPU' : '检测 GPU 状态' }}
+                {{ gpuAvailable ? 'Re-check GPU' : 'Check GPU Status' }}
               </a-button>
               <div v-if="gpuStatusMsg" class="gpu-status-msg" :class="{ 'gpu-ok': gpuAvailable, 'gpu-fail': !gpuAvailable }">
                 {{ gpuStatusMsg }}
@@ -114,47 +114,47 @@
           
           <div v-if="selectedModels.length === 1 && selectedModels[0].model_id" class="detection-config-section">
             <div class="config-header">
-              <span class="config-title">检测配置</span>
+              <span class="config-title">Detection Configuration</span>
               <a-button size="small" @click="showDetectionConfig = true">
                 <template #icon><SettingOutlined /></template>
-                配置类别和阈值
+                Configure Classes &amp; Thresholds
               </a-button>
             </div>
             <div class="config-summary" v-if="categories.length > 0">
               <span class="summary-item">
-                已选择 {{ selectedCategoriesCount }}/{{ categories.length }} 个类别
+                {{ selectedCategoriesCount }}/{{ categories.length }} classes selected
               </span>
               <span class="summary-divider">|</span>
               <span class="summary-item">
-                全局阈值: {{ globalThreshold }}
+                Global threshold: {{ globalThreshold }}
               </span>
             </div>
           </div>
         </div>
 
         <div class="form-section data-source-section">
-          <div class="section-title">数据来源</div>
+          <div class="section-title">Data Source</div>
           
-          <!-- 模型未选时的占位 -->
+          <!-- Placeholder shown while no model is selected -->
           <div v-if="!hasAnyModelSelected" class="model-not-selected-placeholder">
             <div class="placeholder-content">
               <InfoCircleOutlined class="icon" />
-              <span>请先选择模型，系统将根据模型要求自动开放上传区域</span>
+              <span>Select a model first — the upload area will unlock based on its requirements</span>
             </div>
           </div>
 
-          <!-- 模型已选后的实际内容 -->
+          <!-- Actual content shown once a model is selected -->
           <div v-else class="data-source-content fade-in">
             <a-form-item name="source_type" class="source-type-item">
               <a-radio-group v-model:value="form.source_type" button-style="solid" @change="handleSourceChange">
                 <a-radio-button value="upload" :disabled="!allowedSourceTypes.upload">
-                  <UploadOutlined /> 文件上传
+                  <UploadOutlined /> File Upload
                 </a-radio-button>
                 <a-radio-button value="url" :disabled="!allowedSourceTypes.url">
-                  <LinkOutlined /> URL链接
+                  <LinkOutlined /> URL
                 </a-radio-button>
                 <a-radio-button value="rtsp" :disabled="!allowedSourceTypes.rtsp">
-                  <VideoCameraOutlined /> RTSP流
+                  <VideoCameraOutlined /> RTSP Stream
                 </a-radio-button>
               </a-radio-group>
             </a-form-item>
@@ -162,13 +162,13 @@
             <template v-if="form.source_type === 'upload'">
               <div class="upload-row" v-if="form.input_types.includes('rgb')">
                 <div class="upload-label">
-                  <span class="required-mark">*</span> RGB 文件
+                  <span class="required-mark">*</span> RGB Files
                 </div>
                 <div class="upload-zone" @click="triggerUpload('rgb')">
                   <CloudUploadOutlined class="icon" />
-                  <div class="text">点击上传 RGB {{form.task_type==='image'?'图片':'视频'}}</div>
+                  <div class="text">Click to upload RGB {{form.task_type==='image'?'images':'videos'}}</div>
                   <div class="files" v-if="rgbFiles.length">
-                    <CheckCircleOutlined /> {{rgbFiles.length}} 个文件已选择
+                    <CheckCircleOutlined /> {{rgbFiles.length}} file(s) selected
                   </div>
                 </div>
                 <input type="file" multiple ref="rgbInput" style="display:none" @change="onFileChange($event, 'rgb')" />
@@ -176,33 +176,33 @@
 
               <div class="upload-row" v-if="form.input_types.includes('ir')">
                 <div class="upload-label">
-                  <span class="required-mark">*</span> IR 文件
+                  <span class="required-mark">*</span> IR Files
                 </div>
                 <div class="upload-zone" @click="triggerUpload('ir')">
                   <CloudUploadOutlined class="icon" />
-                  <div class="text">点击上传 IR {{form.task_type==='image'?'图片':'视频'}}</div>
+                  <div class="text">Click to upload IR {{form.task_type==='image'?'images':'videos'}}</div>
                   <div class="files" v-if="irFiles.length">
-                    <CheckCircleOutlined /> {{irFiles.length}} 个文件已选择
+                    <CheckCircleOutlined /> {{irFiles.length}} file(s) selected
                   </div>
                 </div>
                 <input type="file" multiple ref="irInput" style="display:none" @change="onFileChange($event, 'ir')" />
               </div>
             </template>
 
-            <a-form-item v-else label="RGB 源地址" name="source_url">
+            <a-form-item v-else label="RGB Source URL" name="source_url">
               <a-input
                 v-model:value="form.source_url"
-                :placeholder="hasIrModel ? 'RGB 视频流地址' : sourceUrlPlaceholder"
+                :placeholder="hasIrModel ? 'RGB stream URL' : sourceUrlPlaceholder"
               >
                 <template #prefix>
                   <LinkOutlined style="color: var(--text-muted)" />
                 </template>
               </a-input>
             </a-form-item>
-            <a-form-item v-if="source_type !== 'upload' && hasIrModel" label="IR 源地址" name="source_url_ir">
+            <a-form-item v-if="source_type !== 'upload' && hasIrModel" label="IR Source URL" name="source_url_ir">
               <a-input
                 v-model:value="form.source_url_ir"
-                placeholder="IR 视频流地址"
+                placeholder="IR stream URL"
               >
                 <template #prefix>
                   <LinkOutlined style="color: var(--text-muted)" />
@@ -212,16 +212,16 @@
           </div>
         </div>
 
-        <a-form-item v-if="form.model_id" label="任务描述" class="description-item">
-          <a-textarea v-model:value="form.description" :rows="2" placeholder="可选：添加任务描述信息" :maxlength="200" showCount />
+        <a-form-item v-if="form.model_id" label="Description" class="description-item">
+          <a-textarea v-model:value="form.description" :rows="2" placeholder="Optional: add a task description" :maxlength="200" showCount />
         </a-form-item>
 
       </a-form>
     </div>
 
     <template #footer>
-      <a-button @click="$emit('close')">取消</a-button>
-      <a-button type="primary" :loading="submitting" @click="submit">创建任务</a-button>
+      <a-button @click="$emit('close')">Cancel</a-button>
+      <a-button type="primary" :loading="submitting" @click="submit">Create Task</a-button>
     </template>
     
     <DetectionConfig
@@ -234,7 +234,7 @@
        @success="handleDetectionConfigSuccess"
     />
 
-    <!-- 多模型：每模型类别配置 -->
+    <!-- Multi-model: per-model class configuration -->
     <DetectionConfig
       :task-id="''"
        v-if="showPerModelConfig && configuringModelIndex >= 0"
@@ -284,7 +284,7 @@ const configuringModelIndex = ref<number>(-1)
 const categories = ref<Array<{ id: string; name: string; selected: boolean; threshold: number | null }>>([])
 const globalThreshold = ref<number>(0.6)
 
-// 多模型支持
+// Multi-model support
 interface SelectedModel {
   model_id: string
   weight: number
@@ -352,34 +352,34 @@ const allowedSourceTypes = computed(() => {
 
 const sourceUrlPlaceholder = computed(() => {
   if (form.task_type === 'stream') return 'rtsp://...'
-  return 'http://... 或 https://...'
+  return 'http://... or https://...'
 })
 
 const rules = {
   name: [
-    { required: true, message: '请输入任务名称', trigger: 'blur' },
-    { min: 2, max: 50, message: '名称长度 2-50 个字符', trigger: 'blur' }
+    { required: true, message: 'Please enter a task name', trigger: 'blur' },
+    { min: 2, max: 50, message: 'Name must be 2-50 characters', trigger: 'blur' }
   ],
-  task_type: [{ required: true, message: '请选择任务类型', trigger: 'change' }],
-  input_types: [{ required: true, type: 'array', min: 1, message: '模型要求输入类型缺失', trigger: 'change' }],
-  model_id: [{ required: true, message: '请选择模型', trigger: 'change' }],
-  source_type: [{ required: true, message: '请选择数据来源', trigger: 'change' }],
+  task_type: [{ required: true, message: 'Please select a task type', trigger: 'change' }],
+  input_types: [{ required: true, type: 'array', min: 1, message: 'The selected model requires an input type', trigger: 'change' }],
+  model_id: [{ required: true, message: 'Please select a model', trigger: 'change' }],
+  source_type: [{ required: true, message: 'Please select a data source', trigger: 'change' }],
   source_url: [
-    { required: true, message: '请输入资源地址', trigger: 'blur' },
+    { required: true, message: 'Please enter a source URL', trigger: 'blur' },
     {
       validator: (_rule: any, value: string) => {
         if (!value) return Promise.resolve()
         const url = value.trim().toLowerCase()
         if (form.task_type === 'stream') {
           if (!url.startsWith('rtsp://')) {
-            return Promise.reject(new Error('实时视频流地址必须以 rtsp:// 开头'))
+            return Promise.reject(new Error('The stream URL must start with rtsp://'))
           }
         } else {
           if (url.startsWith('rtsp://')) {
-            return Promise.reject(new Error('图片或视频任务不支持 RTSP 地址'))
+            return Promise.reject(new Error('Image and video tasks do not support RTSP URLs'))
           }
           if (!url.startsWith('http://') && !url.startsWith('https://')) {
-            return Promise.reject(new Error('请输入有效的 HTTP/HTTPS 地址'))
+            return Promise.reject(new Error('Please enter a valid HTTP/HTTPS URL'))
           }
         }
         return Promise.resolve()
@@ -442,7 +442,7 @@ function handleModelChange(modelId: string) {
         }
         
         if (classList.length === 0) {
-            classList = [{ id: 'default', name: '默认类别' }]
+            classList = [{ id: 'default', name: 'Default Category' }]
         }
         
         categories.value = classList.map(cat => ({
@@ -460,7 +460,7 @@ function handleModelChange(modelId: string) {
 function handleTypeChange() {
 }
 
-// ── 多模型函数 ──
+// ── Multi-model functions ──
 
 function addModel() {
     selectedModels.value.push({
@@ -471,7 +471,7 @@ function addModel() {
 function removeModel(idx: number) {
     selectedModels.value.splice(idx, 1)
     syncInputTypes()
-    // 回到单模型时，同步 form.model_id 和类别配置
+    // When falling back to a single model, sync form.model_id and the class configuration
     if (selectedModels.value.length === 1) {
         const sm = selectedModels.value[0]
         if (sm.model_id) {
@@ -492,17 +492,17 @@ function handleMultiModelChange(idx: number, modelId: string) {
     if (!model) return
     const sm = selectedModels.value[idx]
     sm.input_types = [...model.input_types]
-    // 构建该模型的类别配置
+    // Build the class configuration for this model
     let classList: Array<{ id: string; name: string }> = []
     if (model.label_config && Object.values(model.label_config).length > 0) {
         classList = Object.entries(model.label_config).map(([id, name]) => ({ id, name: name as string }))
     } else if (model.class_names && model.class_names.length > 0) {
         classList = model.class_names.map((name: string, i: number) => ({ id: String(i), name }))
     }
-    if (classList.length === 0) classList = [{ id: 'default', name: '默认类别' }]
+    if (classList.length === 0) classList = [{ id: 'default', name: 'Default Category' }]
     sm.categories = classList.map(cat => ({ ...cat, selected: true, threshold: null }))
     sm.global_threshold = 0.6
-    // 同步到主 form（兼容单模型模式）
+    // Sync to the main form (compatible with single-model mode)
     syncInputTypes()
     if (selectedModels.value.length === 1) {
         form.model_id = modelId
@@ -530,7 +530,7 @@ function onFileChange(e: Event, type: 'rgb'|'ir') {
         const maxFileSize = 20 * 1024 * 1024 * 1024 // 20GB limit
         for (const file of files) {
             if (file.size > maxFileSize) {
-                message.error(`文件 "${file.name}" 大小 ${(file.size / 1024 / 1024).toFixed(1)}MB 已超出 20GB 系统最大文件大小限制！`)
+                message.error(`File "${file.name}" (${(file.size / 1024 / 1024).toFixed(1)}MB) exceeds the 20GB maximum file size limit`)
                 target.value = ''
                 return
             }
@@ -547,13 +547,13 @@ async function checkGpuStatus() {
     const res = await taskStore.checkGpuStatus()
     gpuAvailable.value = res.available
     if (res.available) {
-      gpuStatusMsg.value = `GPU就绪: ${res.checks.device_name || '未知'}, 显存: ${res.checks.vram_mb || 0}MB`
+      gpuStatusMsg.value = `GPU ready: ${res.checks.device_name || 'Unknown'}, VRAM: ${res.checks.vram_mb || 0}MB`
     } else {
-      gpuStatusMsg.value = `GPU不可用: ${res.reason || '环境不满足要求'}`
+      gpuStatusMsg.value = `GPU unavailable: ${res.reason || 'The environment does not meet the requirements'}`
     }
   } catch (e: any) {
     gpuAvailable.value = false
-    gpuStatusMsg.value = `GPU检测失败: ${e?.message || '未知错误'}`
+    gpuStatusMsg.value = `GPU check failed: ${e?.message || 'Unknown error'}`
   } finally {
     gpuChecking.value = false
   }
@@ -569,21 +569,21 @@ async function submit() {
 
     if (form.source_type === 'upload') {
         if (form.input_types.includes('rgb') && rgbFiles.value.length === 0) {
-            message.warning('请上传 RGB 文件')
+            message.warning('Please upload an RGB file')
             return
         }
         if (form.input_types.includes('ir') && irFiles.value.length === 0) {
-            message.warning('请上传 IR 文件')
+            message.warning('Please upload an IR file')
             return
         }
     } else if (form.source_type !== 'upload' && hasIrModel.value && !form.source_url_ir) {
-        message.warning('选中的模型包含 IR 输入，请提供 IR 源地址')
+        message.warning('The selected model requires IR input. Please provide an IR source URL')
         return
     }
 
     const validModels = selectedModels.value.filter(sm => sm.model_id)
     if (validModels.length === 0) {
-        message.warning('请至少选择一个检测模型')
+        message.warning('Please select at least one detection model')
         return
     }
 
@@ -613,11 +613,11 @@ async function submit() {
         })
         fd.append('model_ids', JSON.stringify(modelIdsPayload))
         fd.append('fusion_config', JSON.stringify(fusionConfig))
-        // 向后兼容：第一个模型作为主 model_id
+        // Backward compatibility: use the first model as the primary model_id
         fd.append('model_id', validModels[0].model_id)
         fd.append('threshold', String(validModels[0].global_threshold))
     } else {
-        // 单模型模式：从 selectedModels 派生，避免 form.model_id 不同步
+        // Single-model mode: derive from selectedModels to avoid form.model_id going out of sync
         const sm0 = validModels[0]
         fd.append('model_id', sm0.model_id)
         fd.append('threshold', String(sm0.global_threshold || globalThreshold.value))
@@ -643,7 +643,7 @@ async function submit() {
         rgbFiles.value.forEach(f => fd.append('rgb_files', f))
         irFiles.value.forEach(f => fd.append('ir_files', f))
     } else {
-        // 有 IR 模型时，用分号拼接 RGB 和 IR 源地址
+        // With an IR model, join the RGB and IR source URLs with a semicolon
         const url = hasIrModel.value && form.source_url_ir
           ? `${form.source_url};${form.source_url_ir}`
           : form.source_url
@@ -653,10 +653,10 @@ async function submit() {
     submitting.value = true
     try {
         await taskStore.createTask(fd)
-        message.success('任务创建成功')
+        message.success('Task created')
         emit('success')
     } catch(e: any) {
-        message.error('任务创建失败: ' + (e?.message || e?.detail || '未知错误'))
+        message.error('Failed to create task: ' + (e?.message || e?.detail || 'Unknown error'))
     } finally {
         submitting.value = false
     }

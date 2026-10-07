@@ -17,11 +17,11 @@ logger = logging.getLogger(__name__)
 
 class DirectHLSWriter:
     """
-    FFmpeg HLS 录制器（wall clock时间戳 + 二级编码降级）。
+    FFmpeg HLS recorder (wall-clock timestamps + two-level encoding fallback).
 
-    编码降级策略：
-    - Level 0: -c:v copy (零编码，优先)
-    - Level 1: -c:v h264_nvenc/qsv/amf (HW编码)
+    Encoding fallback strategy:
+    - Level 0: -c:v copy (zero encoding, preferred)
+    - Level 1: -c:v h264_nvenc/qsv/amf (hardware encoding)
     """
 
     @staticmethod
@@ -30,9 +30,9 @@ class DirectHLSWriter:
             return 0
         try:
             content = m3u8_path.read_text(encoding="utf-8", errors="ignore")
-            # 匹配所有 .ts 分段文件名中的尾部数字（兼容 stream_rgb0.ts, stream_annotated0.ts 等）
+            # Match the trailing digits of all .ts segment filenames (compatible with stream_rgb0.ts, stream_annotated0.ts, etc.)
             numbers = re.findall(r"(\w+)\.ts", content)
-            # 从匹配到的文件名中提取尾部数字
+            # Extract the trailing digits from the matched filenames
             seg_nums = []
             for name in numbers:
                 m = re.search(r"(\d+)$", name)
@@ -63,7 +63,7 @@ class DirectHLSWriter:
         existing_ts = list(self.output_dir.glob(f"stream_{channel}*.ts")) if self.output_dir.exists() else []
         self._initial_seg_count = len(existing_ts) if resume else 0
         self._is_resume = resume and self._initial_seg_count > 0
-        # 续存模式：备份旧 m3u8 内容，stop 时合并新旧分段
+        # Resume mode: back up the old m3u8 content, merge old and new segments on stop
         self._old_m3u8_content: str | None = None
         if self._is_resume and self.m3u8_path.exists():
             try:
@@ -111,7 +111,7 @@ class DirectHLSWriter:
         ]
 
         if config.USE_WALLCLOCK_TIMESTAMPS:
-            # 输入选项，必须在 -i 之前
+            # Input option, must come before -i
             base_cmd += ["-use_wallclock_as_timestamps", "1"]
 
         base_cmd += ["-i", self.source_url]
@@ -144,11 +144,11 @@ class DirectHLSWriter:
 
     @staticmethod
     def _is_rtsp_source_gone(log_path: Path) -> bool:
-        """检查FFmpeg日志末尾是否包含RTSP 404错误，表示源已断开。"""
+        """Check whether the tail of the FFmpeg log contains an RTSP 404 error, indicating the source is gone."""
         try:
             if not log_path.exists():
                 return False
-            # 读取最后2KB足够覆盖最后几行日志
+            # Reading the last 2KB is enough to cover the last few log lines
             with open(log_path, "rb") as f:
                 f.seek(0, 2)
                 size = f.tell()
@@ -160,7 +160,7 @@ class DirectHLSWriter:
 
     def start(self):
         if self._resume and self._is_resume:
-            # 续存模式：保留旧分片，仅清除 ENDLIST 标记让 FFmpeg 继续追加
+            # Resume mode: keep old segments and only strip the ENDLIST marker so FFmpeg keeps appending
             self._strip_endlist()
             logger.info(
                 f"[DirectHLSWriter] Resume mode for {self.task_id}: "
@@ -178,7 +178,7 @@ class DirectHLSWriter:
         retry_window = 120.0
         crash_timestamps = []
 
-        # CPU affinity 移除 — 交由 OS 自由调度，测试动态资源分配
+        # CPU affinity removed — left to the OS scheduler to test dynamic resource allocation
 
         while not self._stop_event.is_set():
             try:
@@ -206,7 +206,7 @@ class DirectHLSWriter:
 
                     ret = self.process.wait()
 
-                    # 诊断：FFmpeg 退出时记录运行状态
+                    # Diagnostics: record the run state when FFmpeg exits
                     m3u8_exists = self.m3u8_path.exists()
                     ts_count = len(list(self.output_dir.glob(f"stream_{self.channel}*.ts"))) if self.output_dir.exists() else 0
                     logger.info(
@@ -230,22 +230,22 @@ class DirectHLSWriter:
                             f"[DirectHLSWriter] FFmpeg crashed (code {ret}) for {self.task_id} "
                             f"[encode_level={self._encode_level}]"
                         )
-                        # 仅在异常退出后清理僵尸进程，正常启动时跳过
+                        # Clean up zombie processes only after an abnormal exit; skipped on normal startup
                         self._ensure_no_zombie_ffmpeg()
 
-                        # RTSP 源不存在（404）时跳过重试，源不会自动恢复
+                        # Skip retries when the RTSP source is gone (404), since the source will not recover on its own
                         if self._is_rtsp_source_gone(ffmpeg_log_path):
                             logger.warning(
                                 f"[DirectHLSWriter] RTSP source gone (404) for {self.task_id}, "
                                 f"stopping daemon"
                             )
-                            self.error_msg = "视频流源已断开（RTSP 404），录制停止"
+                            self.error_msg = "Video stream source disconnected (RTSP 404), recording stopped"
                             break
 
                         self._consecutive_failures += 1
 
                         if self._consecutive_failures >= self._max_failures_before_escalate:
-                            # 驱动已更新至 8 路并发，恢复 L0→L1 升级策略
+                            # The driver now supports up to 8 concurrent streams, so the L0→L1 escalation strategy is restored
                             max_level = 1 if self._hw_encoder_is_hw else 0
                             if self._encode_level < max_level:
                                 old_level = self._encode_level
@@ -262,7 +262,7 @@ class DirectHLSWriter:
 
                                 if len(crash_timestamps) >= max_retries:
                                     self.error_msg = (
-                                        f"视频流录制在 {retry_window}s 内崩溃了 {max_retries} 次，已停止重试"
+                                        f"Stream recording crashed {max_retries} times within {retry_window}s, no longer retrying"
                                     )
                                     logger.critical(f"[DirectHLSWriter] {self.error_msg}")
                                     break
@@ -273,7 +273,7 @@ class DirectHLSWriter:
 
                             if len(crash_timestamps) >= max_retries:
                                 self.error_msg = (
-                                    f"视频流录制在 {retry_window}s 内崩溃了 {max_retries} 次，已停止重试"
+                                    f"Stream recording crashed {max_retries} times within {retry_window}s, no longer retrying"
                                 )
                                 logger.critical(f"[DirectHLSWriter] {self.error_msg}")
                                 break
@@ -352,7 +352,7 @@ class DirectHLSWriter:
         return max(0, len(current_ts) - self._initial_seg_count)
 
     def _cleanup_old_segments(self):
-        """删除旧的分片和 playlist，避免残留 ENDLIST 或跨会话混合分段"""
+        """Delete old segments and playlists to avoid a leftover ENDLIST or segments mixing across sessions"""
         try:
             for pattern in [f"stream_{self.channel}*.ts", f"stream_{self.channel}*.m3u8*"]:
                 for f in self.output_dir.glob(pattern):
@@ -365,7 +365,7 @@ class DirectHLSWriter:
             logger.warning(f"[DirectHLSWriter] Cleanup warning: {e}")
 
     def _strip_endlist(self):
-        """续存模式：从 m3u8 中移除 ENDLIST 标记，让 FFmpeg 可以继续追加分段"""
+        """Resume mode: remove the ENDLIST marker from the m3u8 so FFmpeg can keep appending segments"""
         if not self.m3u8_path.exists():
             return
         try:
@@ -378,12 +378,12 @@ class DirectHLSWriter:
             logger.warning(f"[DirectHLSWriter] ENDLIST strip failed: {e}")
 
     def _merge_m3u8(self):
-        """续存模式：将旧 m3u8 的分段条目合并到新 m3u8 中，保证历史时长正确"""
+        """Resume mode: merge the old m3u8 segment entries into the new m3u8 so the historical duration stays correct"""
         try:
             new_content = self.m3u8_path.read_text(encoding="utf-8")
             old_content = self._old_m3u8_content
 
-            # 从旧 m3u8 提取 EXTINF + 分段文件名行（成对出现）
+            # Extract EXTINF + segment filename line pairs from the old m3u8
             old_segments = []
             lines = old_content.splitlines()
             i = 0
@@ -391,7 +391,7 @@ class DirectHLSWriter:
                 line = lines[i].strip()
                 if line.startswith("#EXTINF:"):
                     extinf = line
-                    # 下一行是非注释行 = 分段文件名
+                    # A non-comment next line = the segment filename
                     if i + 1 < len(lines):
                         next_line = lines[i + 1].strip()
                         if next_line and not next_line.startswith("#"):
@@ -403,7 +403,7 @@ class DirectHLSWriter:
             if not old_segments:
                 return
 
-            # 从新 m3u8 提取头部（EXTM3U 到最后一个头部行）和分段条目
+            # Extract the header of the new m3u8 (from EXTM3U to the last header line) and its segment entries
             new_header_lines = []
             new_segments = []
             found_first_extinf = False
@@ -421,7 +421,7 @@ class DirectHLSWriter:
                     elif stripped and not stripped.startswith("#") and not stripped.startswith("#EXT"):
                         new_segments.append((extinf, stripped))
 
-            # 合并：头部 + 旧分段 + 新分段 + ENDLIST
+            # Merge: header + old segments + new segments + ENDLIST
             merged_lines = list(new_header_lines)
             for extinf, seg in old_segments:
                 merged_lines.append(extinf)
@@ -468,7 +468,7 @@ class DirectHLSWriter:
                         pass
                 self.process = None
 
-        # 续存模式：合并旧 m3u8 与新 m3u8，确保历史分段不丢失
+        # Resume mode: merge the old m3u8 with the new m3u8 so historical segments are not lost
         if self._old_m3u8_content and self.m3u8_path.exists():
             self._merge_m3u8()
 
@@ -542,7 +542,7 @@ class StorageManager:
             pass
 
     def _build_vod_from_m3u8(self, base_dir, m3u8_path, end_time_sec, label="raw"):
-        """从 m3u8 构建 VOD 快照，返回 (snapshot_text, total_duration) 或 (None, 0)"""
+        """Build a VOD snapshot from an m3u8, returning (snapshot_text, total_duration) or (None, 0)"""
         try:
             with open(m3u8_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
@@ -601,7 +601,7 @@ class StorageManager:
         if not annotated_m3u8.exists() and not raw_m3u8.exists():
             raise HTTPException(status_code=404, detail="Stream playlist not found")
 
-        # 优先标注流，但快照过短（< 预期的 50%）时回退到原始流
+        # Prefer the annotated stream, but fall back to the raw stream when the snapshot is too short (< 50% of expected)
         snapshot = None
         duration = 0.0
 

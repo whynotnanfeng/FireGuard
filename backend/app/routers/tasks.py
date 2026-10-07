@@ -104,7 +104,7 @@ def _to_response(task: Task, session: Session, models_map: dict[str, str] | None
             dm = session.get(DetectionModel, task.model_id)
             if dm:
                 model_name = dm.name
-    # 多模型信息
+    # Multi-model info
     task_models_info = None
     from app.models.task_model import TaskModel
     tms = list(session.exec(select(TaskModel).where(TaskModel.task_id == task.id)).all())
@@ -195,7 +195,7 @@ def list_tasks(
     )
     items = session.exec(query.offset(skip).limit(limit).order_by(Task.created_at.desc())).all()
     total = session.exec(select(func.count()).select_from(query.subquery())).one()
-    # 批量预加载 model 名称，避免 N+1 查询
+    # Batch preload model names to avoid N+1 queries
     model_ids = {t.model_id for t in items if t.model_id}
     models_map: dict[str, str] = {}
     if model_ids:
@@ -213,7 +213,7 @@ async def create_task(
     name: str = Form(...),
     task_type: str = Form(...),           # image | video | stream
     input_types: str = Form(...),         # JSON array
-    model_id: str = Form(default=""),     # 单模型ID（向后兼容）
+    model_id: str = Form(default=""),     # Single model ID (backward compatible)
     source_type: str = Form(...),         # upload | url | rtsp
     source_url: Optional[str] = Form(default=None),
     description: str = Form(default=""),
@@ -224,7 +224,7 @@ async def create_task(
     enabled_classes: Optional[str] = Form(default=None),
     threshold: Optional[float] = Form(default=None),
     category_thresholds: Optional[str] = Form(default=None),
-    # 多模型字段（可选）
+    # Multi-model fields (optional)
     model_ids: Optional[str] = Form(default=None),  # JSON: [{model_id, weight, enabled_classes, per_class_thresholds}]
     fusion_config: Optional[str] = Form(default=None),  # JSON: {wbf_iou_threshold: 0.55}
     session: Session = Depends(get_session),
@@ -238,7 +238,7 @@ async def create_task(
             if not check_storage_limit(current_user.id, content_length):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Storage limit exceeded. 上传大小 {content_length / 1024 / 1024:.1f}MB 已超出您的剩余配额空间。请先清理历史任务以释放存储。"
+                    detail=f"Storage limit exceeded. The upload size of {content_length / 1024 / 1024:.1f}MB exceeds your remaining quota. Please clean up historical tasks to free up storage."
                 )
         except ValueError:
             pass
@@ -253,7 +253,7 @@ async def create_task(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid input_types")
 
-    # 多模型支持：解析 model_ids 或回退到单 model_id
+    # Multi-model support: parse model_ids or fall back to the single model_id
     parsed_model_ids = None  # [{model_id, weight, enabled_classes, per_class_thresholds}]
     if model_ids:
         try:
@@ -270,14 +270,14 @@ async def create_task(
             if not _dm or _dm.user_id != current_user.id:
                 raise HTTPException(status_code=404, detail=f"Model {mi['model_id']} not found")
             if dm is None:
-                dm = _dm  # 第一个模型作为主模型
+                dm = _dm  # The first model acts as the primary model
     else:
         if not model_id:
             raise HTTPException(status_code=400, detail="model_id or model_ids required")
         dm = session.get(DetectionModel, model_id)
         if not dm or dm.user_id != current_user.id:
             raise HTTPException(status_code=404, detail="Model not found")
-    # 多模型时验证所有模型的 input_types 并集
+    # With multiple models, validate the union of all models' input_types
     if parsed_model_ids:
         all_model_types: set = set()
         for mi in parsed_model_ids:
@@ -329,7 +329,7 @@ async def create_task(
             if categories_list:
                 detection_config["categories"] = categories_list
 
-    # 多模型时 model_id 使用第一个模型（向后兼容），fusion_config 存入 detection_config
+    # With multiple models, model_id uses the first model (backward compatible) and fusion_config is stored in detection_config
     effective_model_id = model_id if not parsed_model_ids else parsed_model_ids[0]["model_id"]
     if fusion_config and parsed_model_ids:
         detection_config["fusion_config"] = json.loads(fusion_config)
@@ -350,7 +350,7 @@ async def create_task(
     session.commit()
     session.refresh(task)
 
-    # 多模型：创建 TaskModel 关联记录
+    # Multi-model: create the TaskModel association records
     if parsed_model_ids:
         from app.models.task_model import TaskModel
         for idx, mi in enumerate(parsed_model_ids):
@@ -413,7 +413,7 @@ async def create_task(
     except Exception as e:
         logger.error(f"[Tasks] Failed to complete task creation for task {task.id}: {e}", exc_info=True)
         task.status = "failed"
-        task.error_msg = f"创建失败: {str(e)}"
+        task.error_msg = f"Creation failed: {str(e)}"
         task.updated_at = now_beijing()
         session.add(task)
         session.commit()
@@ -448,7 +448,7 @@ async def get_task_snapshot(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """前端进入监控页面的首个请求：拉取当前状态和最近检测框"""
+    """First request when the frontend enters the monitoring page: fetch the current status and the latest bounding boxes"""
     task = session.get(Task, task_id)
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -468,7 +468,7 @@ async def get_task_snapshot(
             "confidence": r.confidence,
             "box": json.loads(r.box),
             "detected_at": r.detected_at.isoformat(),
-            "timestamp_ms": int(r.detected_at.timestamp() * 1000),  # 同步时间戳
+            "timestamp_ms": int(r.detected_at.timestamp() * 1000),  # Synchronized timestamp
         }
         for r in records
     ]
@@ -493,7 +493,7 @@ async def get_task_snapshot(
         "ntp_offset_ms": clock_monitor.last_offset_ms,
         "ntp_avg_offset_ms": clock_monitor.avg_offset_ms,
         "ntp_synced": clock_monitor.last_offset_ms != 0.0,
-        # 【P0-3 改进】：时间审计统计
+        # [P0-3 improvement]: time audit statistics
         "ntp_offset_stats": clock_monitor.get_offset_stats(),
     }
 
@@ -584,14 +584,14 @@ async def delete_task(
     if result_dir.exists():
         shutil.rmtree(result_dir, ignore_errors=True)
 
-    # Delete detection records and task-model associations (批量删除，避免全量加载到内存)
+    # Delete detection records and task-model associations (batch delete to avoid loading everything into memory)
     from sqlalchemy import delete as sa_delete
     from app.models.task_model import TaskModel
     session.exec(sa_delete(TaskModel).where(TaskModel.task_id == task_id))
     session.exec(sa_delete(DetectionRecord).where(DetectionRecord.task_id == task_id))
     session.exec(sa_delete(DetectionEvent).where(DetectionEvent.task_id == task_id))
 
-    # V1.2.15: 清理录制视频分段
+    # V1.2.15: clean up recorded video segments
     history_dir = config.VIDEO_STORAGE_DIR / task_id
     if history_dir.exists():
         shutil.rmtree(history_dir, ignore_errors=True)
@@ -603,7 +603,7 @@ async def delete_task(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _rebuild_m3u8_from_segments(m3u8_path: Path, ts_files: list[Path], task_id: str) -> None:
-    """从现有 .ts 分段文件重建 m3u8 播放列表（当原 m3u8 损坏或丢失时）"""
+    """Rebuild the m3u8 playlist from the existing .ts segment files (when the original m3u8 is corrupted or missing)"""
     import re
 
     segment_entries = []
@@ -648,7 +648,7 @@ async def execute_task(
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # V12: 允许 pending/exception/failed/running 状态执行
+    # V12: allow execution from pending/exception/failed/running status
     if task.status == "running" and task.task_type != "stream":
         raise HTTPException(status_code=400, detail="Task is already running")
     
@@ -661,7 +661,7 @@ async def execute_task(
         from app.models.model import DetectionModel
         from app.models.task_model import TaskModel
 
-        # 多模型支持：优先从 task_models 表加载，回退到单 model_id
+        # Multi-model support: load from the task_models table first, fall back to the single model_id
         task_models = list(session.exec(
             select(TaskModel).where(TaskModel.task_id == task.id)
         ).all())
@@ -706,13 +706,13 @@ async def execute_task(
                     "is_rgbir": len(model_input_types) > 1 and "ir" in model_input_types,
                     "per_class_config": per_class_config,
                 })
-            # 第一个模型作为主模型（兼容）
+            # The first model acts as the primary model (compatibility)
             dm = session.get(DetectionModel, task_models[0].model_id)
             mapping = model_configs[0]["label_mapping"]
             det_cfg = json.loads(task.detection_config) if task.detection_config else {}
             fusion_config = det_cfg.get("fusion_config", {})
         else:
-            # 单模型模式（向后兼容）
+            # Single-model mode (backward compatible)
             dm = session.get(DetectionModel, task.model_id)
             if not dm:
                 raise HTTPException(status_code=404, detail="Model not found")
@@ -722,16 +722,16 @@ async def execute_task(
                 except Exception:
                     pass
 
-        # V12: 强制冷启动 - 先停止旧流（如有），保证资源干净
+        # V12: force a cold start - stop the old stream first (if any) to guarantee clean resources
         old_stream = stream_manager.get_stream(task.id)
         stream_manager.stop_stream(task.id)
         if old_stream and hasattr(old_stream, '_drain_done'):
-            # 等待旧流彻底释放资源（最多 5s），防止新旧进程冲突
+            # Wait for the old stream to fully release its resources (up to 5s) to prevent old/new process conflicts
             await asyncio.to_thread(old_stream._drain_done.wait, timeout=3.0)
 
-        # 续存判断：基于数据完整性
-        # .ts 分段和 m3u8 是视频历史（类似数据库），停止时不清除，重启时不删除
-        # 只要 .ts 分段存在就续存；m3u8 损坏则从 .ts 文件重建
+        # Resume decision: based on data integrity
+        # .ts segments and m3u8 are the video history (like a database); they are not cleared on stop and not deleted on restart
+        # Resume as long as .ts segments exist; if the m3u8 is corrupted, rebuild it from the .ts files
         task_dir = Path(config.VIDEO_STORAGE_DIR) / task.id
         is_resume = False
         if task_dir.exists():
@@ -748,7 +748,7 @@ async def execute_task(
                                 f"{len(old_segments)} old segments, m3u8 intact"
                             )
                         else:
-                            # m3u8 损坏：从 .ts 文件重建，不丢失视频历史
+                            # m3u8 corrupted: rebuild from the .ts files without losing video history
                             _rebuild_m3u8_from_segments(old_m3u8, old_segments, task.id)
                             is_resume = True
                             logger.warning(
@@ -768,8 +768,8 @@ async def execute_task(
         if not is_resume:
             logger.info(f"[Tasks] Fresh start for task {task.id}")
 
-        # 防御性清理：关闭上次运行遗留的孤立 ENTER 事件（left_at=NULL）
-        # 正常停止时 _flush_active_tracks 已处理，这里兜底处理异常退出/崩溃的情况
+        # Defensive cleanup: close orphaned ENTER events (left_at=NULL) left over from the last run
+        # _flush_active_tracks handles this on a normal stop; this is the fallback for abnormal exits/crashes
         from app.models.detection_event import DetectionEvent
         orphaned = session.exec(
             select(DetectionEvent).where(
@@ -793,9 +793,9 @@ async def execute_task(
         session.add(task)
         session.commit()
 
-        # V12: 在线程池中启动流，避免 start_grabbers() 的 RTSP 重试阻塞事件循环
+        # V12: start the stream in the thread pool to avoid blocking the event loop on start_grabbers() RTSP retries
         loop = asyncio.get_running_loop()
-        _mc = model_configs  # 闭包捕获
+        _mc = model_configs  # closure capture
         _fc = fusion_config
         future = loop.run_in_executor(
             None,
@@ -852,7 +852,7 @@ async def pause_task(
         if stream and stream._drain_done:
             stream._drain_done.wait(timeout=10.0)
 
-        # 确保旧 FFmpeg 进程完全退出，防止续存时新旧进程冲突导致花屏
+        # Make sure the old FFmpeg process has fully exited to prevent garbled frames from old/new process conflicts during resume
         if stream and hasattr(stream, 'pipeline') and stream.pipeline:
             writer = getattr(stream.pipeline, 'annotated_writer', None)
             if writer and writer.process:
@@ -943,19 +943,19 @@ def get_result(
 @router.get("/{task_id}/detections")
 def get_historical_detections(
     task_id: str,
-    start_time: float = Query(..., description="起始绝对时间戳(毫秒)"),
-    end_time: float = Query(..., description="结束绝对时间戳(毫秒)"),
+    start_time: float = Query(..., description="Start absolute timestamp (milliseconds)"),
+    end_time: float = Query(..., description="End absolute timestamp (milliseconds)"),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """前端在历史回放模式下，通过滑动窗口拉取聚合后的历史检测框"""
+    """In historical playback mode, the frontend pulls aggregated historical bounding boxes through a sliding window"""
     task = session.get(Task, task_id)
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
 
     try:
-        # 1. 极速范围查询 (依靠 ix_detection_records_detected_at 索引)
-        # 【双时间戳架构】：start_time/end_time 是 Unix 绝对时间戳（毫秒），转换为本地时间查询
+        # 1. Ultra-fast range query (relying on the ix_detection_records_detected_at index)
+        # [Dual-timestamp architecture]: start_time/end_time are Unix absolute timestamps (ms), converted to local time for querying
         from app.utils.time import BEIJING_TZ
         dt_start = datetime.fromtimestamp(start_time / 1000.0, tz=BEIJING_TZ).replace(tzinfo=None)
         dt_end = datetime.fromtimestamp(end_time / 1000.0, tz=BEIJING_TZ).replace(tzinfo=None)
@@ -968,13 +968,13 @@ def get_historical_detections(
         
         records = session.exec(stmt).all()
         
-        # 【双时间戳架构】：使用 detected_at 的 Unix 时间戳作为 key（毫秒级对齐）
+        # [Dual-timestamp architecture]: use the Unix timestamp of detected_at as the key (millisecond aligned)
         grouped_data = defaultdict(list)
         for r in records:
-            # detected_at 是北京时间（naive datetime），直接按系统本地时区转换
+            # detected_at is Beijing time (naive datetime), convert using the system local time zone directly
             ts_ms = int(r.detected_at.timestamp() * 1000)
             box_data = json.loads(r.box)
-            # 格式化为前端 renderLoop 期望的 boxes 格式
+            # Format into the boxes structure expected by the frontend renderLoop
             grouped_data[ts_ms].append({
                 "x": box_data[0],
                 "y": box_data[1],
@@ -1066,10 +1066,10 @@ def get_detection_events(
     current_user: User = Depends(get_current_user),
 ):
     """
-    获取事件驱动的检测记录
-    
-    返回 Enter/Leave 事件，而非每帧记录。
-    适合高 FPS 场景，数据量减少 90%+
+    Get event-driven detection records
+
+    Returns Enter/Leave events instead of per-frame records.
+    Ideal for high-FPS scenarios, reducing data volume by 90%+
     """
     task = session.get(Task, task_id)
     if not task or task.user_id != current_user.id:
@@ -1132,13 +1132,13 @@ def get_detection_events_summary(
     current_user: User = Depends(get_current_user),
 ):
     """
-    获取任务的事件统计摘要
-    
-    返回：
-    - 总目标数
-    - 各类别目标数
-    - 平均持续时间
-    - 平均置信度
+    Get the event statistics summary for a task
+
+    Returns:
+    - Total number of objects
+    - Object count per class
+    - Average duration
+    - Average confidence
     """
     task = session.get(Task, task_id)
     if not task or task.user_id != current_user.id:
@@ -1223,17 +1223,17 @@ async def download_all(
 
 
 # ── Historical Video API ───────────────────────────────────────────────────
-# 新架构下，HLS 视频流由 DirectHLSWriter (ffmpeg -c:v copy) 直接生成
-# 前端通过 /storage/{task_id}/stream_rgb.m3u8 直接访问静态文件
-# 不再需要通过 FastAPI 代理路由转发
+# In the new architecture, HLS video streams are produced directly by DirectHLSWriter (ffmpeg -c:v copy)
+# The frontend accesses the static files directly via /storage/{task_id}/stream_rgb.m3u8
+# No FastAPI proxy route forwarding is needed anymore
 
 @router.get("/{task_id}/vod-stream", response_class=PlainTextResponse)
 def get_vod_snapshot(
     task_id: str, 
     channel: str = Query("rgb"), 
-    end_time: float = Query(..., description="定格时的相对时间(秒)")
+    end_time: float = Query(..., description="Relative time at the freeze frame (seconds)")
 ):
-    """前端切换到历史模式时，获取带有 ENDLIST 的定格 M3U8 文件"""
+    """When the frontend switches to history mode, fetch the frozen-frame M3U8 file with an ENDLIST"""
     try:
         m3u8_content = storage_manager.generate_vod_snapshot(task_id, channel, end_time)
         return m3u8_content
@@ -1339,7 +1339,7 @@ async def log_diag(
     request: Request,
     body: DiagLogRequest,
 ):
-    """接收前端诊断日志，写入 diag.log 文件"""
+    """Receive frontend diagnostic logs and write them to the diag.log file"""
     config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = config.LOGS_DIR / "diag.log"
     user_id = _extract_user_id_from_token(request)
@@ -1366,7 +1366,7 @@ async def log_frontend_batch(
     body: BatchLogRequest,
 ):
     """
-    接收前端批量日志，写入专门的 frontend.log 文件
+    Receive batched frontend logs and write them to the dedicated frontend.log file
     """
     config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = config.LOGS_DIR / "frontend.log"
@@ -1395,7 +1395,7 @@ async def log_frontend_batch(
 async def gpu_status(
     current_user: User = Depends(get_current_user),
 ):
-    """检查GPU部署环境是否满足GPU推理要求"""
+    """Check whether the GPU deployment environment meets the requirements for GPU inference"""
     checks: dict = {}
     reason_parts: list[str] = []
     
@@ -1404,12 +1404,12 @@ async def gpu_status(
         providers = ort.get_available_providers()
         checks["onnx_gpu"] = "CUDAExecutionProvider" in providers
         if not checks["onnx_gpu"]:
-            reason_parts.append("onnxruntime-gpu未安装或CUDAProvider不可用")
+            reason_parts.append("onnxruntime-gpu is not installed or the CUDA provider is unavailable")
     except Exception as e:
         checks["onnx_gpu"] = False
-        reason_parts.append(f"onnxruntime导入失败: {str(e)}")
+        reason_parts.append(f"Failed to import onnxruntime: {str(e)}")
     
-    # 2. GPU 硬件与显存检查 (使用 pynvml 代替 torch，减小依赖体积)
+    # 2. GPU hardware and VRAM check (using pynvml instead of torch to reduce dependency size)
     try:
         import pynvml
         pynvml.nvmlInit()
@@ -1424,17 +1424,17 @@ async def gpu_status(
                 checks["vram_mb"] = mem_info.total // 1024 // 1024
             else:
                 checks["cuda_available"] = False
-                reason_parts.append("未检测到NVIDIA显卡")
+                reason_parts.append("No NVIDIA GPU detected")
         finally:
             pynvml.nvmlShutdown()
     except Exception as e:
         checks["cuda_available"] = False
-        reason_parts.append(f"GPU硬件检测失败: {str(e)}")
+        reason_parts.append(f"GPU hardware detection failed: {str(e)}")
     
-    # 3. 显存充足性检查 (至少需要 512MB)
+    # 3. VRAM sufficiency check (at least 512MB required)
     checks["vram_sufficient"] = checks.get("vram_mb", 0) >= 512
     if not checks["vram_sufficient"]:
-        reason_parts.append(f"显存不足 (当前: {checks.get('vram_mb', 0)}MB, 需要: 512MB)")
+        reason_parts.append(f"Insufficient VRAM (current: {checks.get('vram_mb', 0)}MB, required: 512MB)")
     
     available = all([
         checks.get("onnx_gpu", False),
@@ -1453,7 +1453,7 @@ async def gpu_status(
 async def registry_status(
     current_user: User = Depends(get_current_user),
 ):
-    """查看配置中心状态：已注册服务、配置项"""
+    """View config registry status: registered services and config entries"""
     from app.services.registry import registry
     return {
         "services": registry.list_services(),

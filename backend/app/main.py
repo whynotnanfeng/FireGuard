@@ -1,13 +1,13 @@
 import os
-# 禁止 OpenCV 输出日志到 stderr（必须在 cv2 import 前设置）
-# 此设置必须位于入口文件的最顶端
+# Suppress OpenCV logging to stderr (must be set before importing cv2)
+# This setting must be at the very top of the entry file
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
-# 全局强制 OpenCV 走 TCP 拉流，解决 UDP 丢包导致的花屏和模型掉帧问题
+# Globally force OpenCV to pull streams over TCP, fixing garbled frames and dropped model frames caused by UDP packet loss
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|threads;1"
 
-import cv2  # 确保环境变量设置后，系统的后续模块再去 import cv2
-# 主进程限制 OpenCV 线程数
+import cv2  # Ensure the environment variables are set before any later module imports cv2
+# Limit OpenCV thread count in the main process
 cv2.setNumThreads(1)
 import asyncio  # noqa: E402
 import json  # noqa: E402
@@ -94,7 +94,7 @@ from app.utils.clock_monitor import clock_monitor  # noqa: E402
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动前清理可能残留的孤儿进程 (Windows 热重载场景)
+    # Clean up orphaned child processes left over from before startup (Windows hot-reload scenario)
     import psutil
     current_pid = os.getpid()
     try:
@@ -111,10 +111,10 @@ async def lifespan(app: FastAPI):
 
     await redis_server.start()
     
-    # 初始化总线连接 (Redis 模式下会建立连接池)
+    # Initialize the bus connection (a connection pool is established in Redis mode)
     await broker.connect()
     
-    # 初始化配置中心：写入默认配置 + 注册后端服务
+    # Initialize the config registry: write default config + register the backend service
     from app.services.registry import registry
     registry.apply_mode_overrides(config.FIREGUARD_MODE)
     registry.register_service("backend", {
@@ -122,25 +122,25 @@ async def lifespan(app: FastAPI):
         "mode": config.FIREGUARD_MODE,
     })
     
-    # 为内存总线注入事件循环 (兼容 InMemoryBroker 模式)
+    # Inject the event loop into the in-memory bus (compatible with InMemoryBroker mode)
     if hasattr(broker, 'set_loop'):
         broker.set_loop(asyncio.get_running_loop())
 
-    # 推理 Worker 是独立进程（不受 GIL），主进程保持 NORMAL 优先级即可
+    # Inference workers are separate processes (not affected by the GIL), so the main process can stay at NORMAL priority
 
     create_db_and_tables()
     
     await media_server.start()
     
-    # 启动时钟偏移监控（纯Python SNTP，不修改系统时钟）
+    # Start the clock offset monitor (pure-Python SNTP, does not modify the system clock)
     clock_monitor.start()
     
     from app.services.task_runner import task_runner, stream_manager
 
-    # 清理上一次非正常退出遗留的 fg_ 动态路径
+    # Clean up fg_ dynamic paths left behind by an abnormal shutdown
     media_gateway.clear_all_proxies()
 
-    # 启动全局推理进程池 (初始 1 个进程，后续按任务量扩容)
+    # Start the global inference process pool (initially 1 process, scaled up with task volume)
     stream_manager.start_inference_pool(worker_count=1)
     
     asyncio.create_task(task_runner.start())
@@ -165,7 +165,7 @@ async def lifespan(app: FastAPI):
     # --- Shutdown ---
     logger.info("Fireguard Backend shutting down...")
 
-    # 1. 先停止所有活跃流（需要 MediaMTX 仍在运行才能正常注销路径）
+    # 1. Stop all active streams first (MediaMTX must still be running to deregister paths cleanly)
     stream_manager.stop_all_streams()
 
     stream_manager.stop_inference_pool()
@@ -174,7 +174,7 @@ async def lifespan(app: FastAPI):
     media_gateway.clear_all_proxies()
     media_gateway.close()
 
-    # 4. 停止内置 MediaMTX（此时所有流已清理完毕）
+    # 4. Stop the built-in MediaMTX (all streams have been cleaned up by now)
     media_server.stop()
 
     clock_monitor.stop()
@@ -192,8 +192,8 @@ async def lifespan(app: FastAPI):
 _is_production = config.FIREGUARD_MODE == "production"
 
 app = FastAPI(
-    title="火灾目标检测系统",
-    description="Fire Detection Platform API",
+    title="Intelligent Fire Monitoring System",
+    description="FireGuard Intelligent Fire Monitoring System API",
     version="2.9.0",
     docs_url=None if _is_production else "/api/docs",
     redoc_url=None if _is_production else "/api/redoc",
@@ -233,9 +233,9 @@ config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/api/results", StaticFiles(directory=str(config.RESULTS_DIR)), name="results")
 
 # --- RT Storage Mounting ---
-# --- Live HLS endpoint: 截断 m3u8 避免无限增长导致 hls.js 性能恶化 ---
+# --- Live HLS endpoint: truncate m3u8 to avoid unbounded growth that degrades hls.js performance ---
 
-# 【性能优化】：m3u8 内容内存缓存，TTL 1 秒，最大 100 条，避免长期运行内存泄漏
+# [Performance optimization]: in-memory cache for m3u8 content, TTL 1 second, max 100 entries to avoid memory leaks during long runs
 _m3u8_cache: dict[str, tuple[str, float]] = {}
 _M3U8_CACHE_TTL = 1.0
 _M3U8_CACHE_MAX = 100
@@ -244,15 +244,15 @@ _M3U8_CACHE_MAX = 100
 @app.get("/api/streams/{task_id}/live.m3u8")
 async def live_m3u8(
     task_id: str = Path(...),
-    limit: int = Query(30, ge=5, le=500, description="保留最近 N 个分片"),
+    limit: int = Query(30, ge=5, le=500, description="Keep the most recent N segments"),
 ):
-    """返回截断版 m3u8（仅最近 N 个 TS 分片），用于直播流播放。
-    全量 m3u8 仍通过 /storage 静态路径提供，用于历史回放。
+    """Return a truncated m3u8 (only the most recent N TS segments) for live stream playback.
+    The full m3u8 is still served from the /storage static path for historical playback.
     """
     cache_key = f"{task_id}:{limit}"
     now = time.time()
 
-    # 检查缓存
+    # Check cache
     if cache_key in _m3u8_cache:
         cached_content, cached_time = _m3u8_cache[cache_key]
         if now - cached_time < _M3U8_CACHE_TTL:
@@ -296,7 +296,7 @@ async def live_m3u8(
         kept = segments[-limit:]
         result_lines: list[str] = []
         for line in header:
-            # 更新 MEDIA-SEQUENCE 以匹配截断后的首个分片
+            # Update MEDIA-SEQUENCE to match the first segment after truncation
             if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
                 try:
                     orig_seq = int(line.split(":", 1)[1])
@@ -305,7 +305,7 @@ async def live_m3u8(
                 skipped = len(segments) - limit
                 result_lines.append(f"#EXT-X-MEDIA-SEQUENCE:{orig_seq + skipped}")
             elif line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE:"):
-                # 截断后该标签不再准确，跳过（hls.js 不需要它）
+                # This tag is no longer accurate after truncation, skip it (hls.js does not need it)
                 continue
             else:
                 result_lines.append(line)
@@ -320,8 +320,8 @@ async def live_m3u8(
 
     return PlainTextResponse(result, media_type="application/vnd.apple.mpegurl")
 
-# 新架构：DirectHLSWriter 生成的 m3u8/ts 文件通过静态文件服务直接提供
-# 前端访问路径: /storage/{task_id}/stream_rgb.m3u8
+# New architecture: m3u8/ts files produced by DirectHLSWriter are served directly by the static file server
+# Frontend access path: /storage/{task_id}/stream_rgb.m3u8
 config.VIDEO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/storage", NoCacheStaticFiles(directory=str(config.VIDEO_STORAGE_DIR)), name="storage")
 
@@ -357,7 +357,7 @@ async def websocket_stream(
     task_id: str,
     token: str = Query(...),
 ):
-    # 在函数顶部导入，避免 UnboundLocalError
+    # Import at the top of the function to avoid UnboundLocalError
     from app.database import engine
     from app.models.task import Task
     from sqlmodel import Session
@@ -435,7 +435,7 @@ async def websocket_stream(
     finally:
         receive_task.cancel()
         send_task.cancel()
-        # 清空队列积压消息，避免内存残留
+        # Drain queued messages to avoid residual memory
         try:
             while not q.empty():
                 q.get_nowait()
@@ -465,8 +465,8 @@ def health():
 @app.post("/api/webrtc")
 async def webrtc_proxy(request: starlette_requests.Request, stream: str = Query(...)):
     """
-    代理前端 WebRTC 信令请求到 MediaMTX。
-    前端发送 SDP offer，后端转发给 MediaMTX 并返回 SDP answer。
+    Proxy frontend WebRTC signaling requests to MediaMTX.
+    The frontend sends an SDP offer, the backend forwards it to MediaMTX and returns the SDP answer.
     """
     from fastapi.responses import Response as FastAPIResponse
 

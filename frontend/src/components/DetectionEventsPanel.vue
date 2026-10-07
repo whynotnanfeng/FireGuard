@@ -1,15 +1,15 @@
 <template>
   <div class="detection-events-panel">
     <div class="panel-header">
-      <h3>检测事件</h3>
+      <h3>Detection Events</h3>
       <div class="stats">
         <span class="stat-item">
           <span class="stat-dot"></span>
-          活跃目标: {{ activeTracks }}
+          Active targets: {{ activeTracks }}
         </span>
         <span class="stat-item">
           <span class="stat-dot green"></span>
-          累计事件: {{ totalEvents }}
+          Total events: {{ totalEvents }}
         </span>
       </div>
     </div>
@@ -34,20 +34,20 @@
           <div class="event-meta">
             <span class="event-time">{{ formatTime(event.entered_at) }}</span>
             <span v-if="event.duration_ms" class="event-duration">
-              持续 {{ formatDuration(event.duration_ms) }}
+              Duration {{ formatDuration(event.duration_ms) }}
             </span>
           </div>
           <div v-if="event.event_type === 'leave'" class="event-summary">
-            最大置信度: {{ (event.max_confidence * 100).toFixed(1) }}% |
-            平均置信度: {{ (event.avg_confidence * 100).toFixed(1) }}% |
-            更新 {{ event.update_count }} 次
+            Max confidence: {{ (event.max_confidence * 100).toFixed(1) }}% |
+            Avg confidence: {{ (event.avg_confidence * 100).toFixed(1) }}% |
+            {{ event.update_count }} updates
           </div>
         </div>
       </div>
 
       <div v-if="displayEvents.length === 0" class="empty-state">
         <span class="empty-icon">📋</span>
-        <span class="empty-text">暂无检测事件</span>
+        <span class="empty-text">No detection events</span>
       </div>
     </div>
   </div>
@@ -84,7 +84,7 @@ const displayEvents = computed(() => {
 
 const formatTime = (timeStr: string) => {
   const date = new Date(timeStr)
-  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 const formatDuration = (ms: number) => {

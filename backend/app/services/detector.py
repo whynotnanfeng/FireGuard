@@ -252,7 +252,7 @@ class Detector:
                         "cudnn_conv_algo_search": "HEURISTIC",
                         "do_copy_in_default_stream": True,
                     }
-                    # GPU 推理不降级：不附带 CPUExecutionProvider 作为后备
+                    # No fallback for GPU inference: CPUExecutionProvider is not attached as a backup
                     return [
                         ("CUDAExecutionProvider", cuda_options),
                     ]
@@ -312,7 +312,7 @@ class Detector:
             # Run inference
             input_feed = {"rgb": rgb_tensor, "ir": ir_tensor}
 
-            # ---- 诊断：预处理张量统计（仅前5帧） ----
+            # ---- Diagnostics: preprocessed tensor statistics (first 5 frames only) ----
             self._rgbir_preproc_diag = getattr(self, '_rgbir_preproc_diag', 0) + 1
             if self._rgbir_preproc_diag <= 5:
                 logger.info(
@@ -337,7 +337,7 @@ class Detector:
             else:
                 outputs = self.session.run(None, input_feed)
 
-            # ---- 诊断：ONNX 输出元数据（仅前3帧） ----
+            # ---- Diagnostics: ONNX output metadata (first 3 frames only) ----
             if self._rgbir_preproc_diag <= 3:
                 out_infos = self.session.get_outputs()
                 for i, (out, meta) in enumerate(zip(outputs, out_infos)):
@@ -346,7 +346,7 @@ class Detector:
                         f"dtype={out.dtype} min={float(out.min()):.6f} max={float(out.max()):.6f} "
                         f"mean={float(out.mean()):.6f}"
                     )
-                    # 打印前3个查询的原始值
+                    # Log the raw values of the first 3 queries
                     if out.ndim >= 2:
                         flat = out.reshape(-1, out.shape[-1])
                         for q in range(min(3, flat.shape[0])):
@@ -727,7 +727,7 @@ class Detector:
                 iou_scores = iou_scores.squeeze(-1)  # (300,1) -> (300,)
             pred_scores = pred_scores * iou_scores[:, np.newaxis]
 
-        # ---- 诊断日志 ----
+        # ---- Diagnostic log ----
         self._rgbir_diag_counter = getattr(self, '_rgbir_diag_counter', 0) + 1
         if self._rgbir_diag_counter <= 5 or self._rgbir_diag_counter % 50 == 0:
             _box_min = float(np.min(pred_boxes)) if pred_boxes.size > 0 else 0.0
@@ -744,7 +744,7 @@ class Detector:
                 f"score_range=[{_score_min:.6f}, {_score_max:.6f}] "
                 f"conf_thresh={conf_thresh} high_conf={_high_conf_count}/{len(pred_scores)} "
                 f"ratio={ratio:.4f} pad=({pad[0]},{pad[1]}) orig=({orig_w}x{orig_h})\n"
-                f"[DIAG-RGBIR-HIST] max_score分布: {_hist_str}"
+                f"[DIAG-RGBIR-HIST] max_score distribution: {_hist_str}"
             )
 
         pad_w, pad_h = pad
@@ -772,7 +772,7 @@ class Detector:
             bx2 = (x2 * self.INPUT_SIZE - pad_w) / ratio
             by2 = (y2 * self.INPUT_SIZE - pad_h) / ratio
 
-            # ---- 诊断日志 ----
+            # ---- Diagnostic log ----
             if self._rgbir_diag_counter <= 5 and i < 3:
                 logger.info(
                     f"[DIAG-RGBIR-BOX] i={i} cxcywh=({cx:.4f},{cy:.4f},{bw:.4f},{bh:.4f}) "

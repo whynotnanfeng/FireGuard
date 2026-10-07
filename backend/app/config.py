@@ -50,13 +50,13 @@ class Config:
     VIDEO_SEGMENT_DURATION: int = int(os.getenv("VIDEO_SEGMENT_DURATION", "300"))
 
     # --- [SECTION 3: DETECTION ENGINE] ---
-    # 推理 FPS 上限。0 表示不限。
-    # 自适应调度硬上限，默认 15（与源帧率对齐）
+    # Upper bound for inference FPS. 0 means unlimited.
+    # Hard cap for adaptive scheduling, default 15 (aligned with the source frame rate)
     DETECTION_FPS_STREAM: int = int(os.getenv("DETECTION_FPS_STREAM", "15"))
     DETECTION_FPS_VIDEO: int = int(os.getenv("DETECTION_FPS_VIDEO", "5"))
     DETECTION_FPS_IMAGE: int = int(os.getenv("DETECTION_FPS_IMAGE", "10"))
     
-    # 【P0优化】：缩短批处理窗口从 200ms 到 100ms，减少检测框延迟
+    # [P0 optimization]: shorten the batch window from 200ms to 100ms to reduce bounding box latency
     DETECTION_BATCH_WINDOW_MS: int = int(os.getenv("DETECTION_BATCH_WINDOW_MS", "100"))
 
     # --- [SECTION 4: HARDWARE & PARALLELISM] ---
@@ -75,7 +75,7 @@ class Config:
 
     @cached_property
     def IS_WSL(self) -> bool:
-        """检测是否在 WSL/WSL2 环境中运行。"""
+        """Whether we are running inside WSL/WSL2."""
         try:
             with open("/proc/version", "r") as f:
                 content = f.read().lower()
@@ -85,11 +85,11 @@ class Config:
     
     @property
     def HW_ACCEL_PRIORITY(self) -> list[str] | None:
-        """HLS 录制硬件编码器优先级列表"""
+        """Priority list of hardware encoders for HLS recording"""
         raw = os.getenv("HW_ACCEL_PRIORITY", "auto")
         if raw == "auto" or raw == "":
-            return None  # resolve_hls_encoder 会使用默认优先级
-        # 支持逗号分隔的列表，如 "nvenc,qsv,amf"
+            return None  # resolve_hls_encoder will use the default priority
+        # Supports a comma-separated list, e.g. "nvenc,qsv,amf"
         return [p.strip() for p in raw.split(",") if p.strip()]
 
     # --- [SECTION 5: NETWORK & BROKER] ---
@@ -105,7 +105,7 @@ class Config:
     # --- [SECTION 6: MEDIA GATEWAY (PROPERTIES)] ---
     @cached_property
     def MEDIAMTX_API_PORT(self) -> int:
-        """MediaMTX API 端口（默认 9997，development 模式下优先从注册表读取模拟器实际端口）"""
+        """MediaMTX API port (default 9997; in development mode the simulator's actual port is read from the registry first)"""
         try:
             env_val = int(os.getenv("MEDIAMTX_API_PORT", "9997"))
         except ValueError:
@@ -122,7 +122,7 @@ class Config:
 
     @cached_property
     def MEDIAMTX_RTSP_PORT(self) -> int:
-        """MediaMTX RTSP 端口（默认 8554，development 模式下优先从注册表读取模拟器实际端口）"""
+        """MediaMTX RTSP port (default 8554; in development mode the simulator's actual port is read from the registry first)"""
         try:
             env_val = int(os.getenv("MEDIAMTX_RTSP_PORT", "8554"))
         except ValueError:
@@ -139,7 +139,7 @@ class Config:
 
     @property
     def MEDIAMTX_HLS_PORT(self) -> int:
-        """MediaMTX HLS 端口（默认 8888）"""
+        """MediaMTX HLS port (default 8888)"""
         try:
             return int(os.getenv("MEDIAMTX_HLS_PORT", "8888"))
         except ValueError:
@@ -147,17 +147,17 @@ class Config:
 
     @property
     def MEDIAMTX_API_URL(self) -> str:
-        """MediaMTX API 基础 URL"""
+        """MediaMTX API base URL"""
         return os.getenv("MEDIAMTX_API_URL", f"http://127.0.0.1:{self.MEDIAMTX_API_PORT}")
 
     @property
     def MEDIAMTX_RTSP_BASE(self) -> str:
-        """MediaMTX RTSP 基础 URL"""
+        """MediaMTX RTSP base URL"""
         return os.getenv("MEDIAMTX_RTSP_BASE", f"rtsp://127.0.0.1:{self.MEDIAMTX_RTSP_PORT}/")
 
     @property
     def MEDIAMTX_HLS_URL(self) -> str:
-        """MediaMTX HLS 基础 URL"""
+        """MediaMTX HLS base URL"""
         return os.getenv("MEDIAMTX_HLS_URL", f"http://127.0.0.1:{self.MEDIAMTX_HLS_PORT}/")
 
     @cached_property
@@ -187,7 +187,7 @@ class Config:
     # --- [SECTION 7: HLS RECORDING] ---
     @property
     def USE_WALLCLOCK_TIMESTAMPS(self) -> bool:
-        """HLS 录制时使用系统时钟作为时间戳（默认 False，使用 PTS）"""
+        """Use the system clock as the timestamp during HLS recording (default False, use PTS)"""
         return os.getenv("USE_WALLCLOCK_TIMESTAMPS", "False").lower() == "true"
 
 

@@ -1,16 +1,16 @@
 """
-多目标追踪器 - 基于 IoU 的贪心匹配算法
+Multi-object tracker - greedy matching algorithm based on IoU
 
-核心功能：
-1. 将当前帧的检测框与已有轨迹匹配
-2. 匹配成功 → UPDATE 事件
-3. 匹配失败 → 新目标 ENTER 事件
-4. 超过 N 帧未匹配 → LEAVE 事件
+Core functionality:
+1. Match the current frame's detection boxes against existing tracks
+2. Match succeeded -> UPDATE event
+3. Match failed -> new object ENTER event
+4. Unmatched for more than N frames -> LEAVE event
 
-事件驱动设计：
-- 不再每帧写入数据库
-- 仅在目标 Enter/Leave 时生成记录
-- 大幅减少数据库 I/O（90%+ 降低）
+Event-driven design:
+- No longer writes to the database every frame
+- Records are generated only when an object enters or leaves
+- Greatly reduces database I/O (90%+ reduction)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class TrackState(Enum):
-    """目标状态"""
+    """Object state"""
     ENTER = "enter"
     UPDATE = "update"
     LEAVE = "leave"
@@ -34,7 +34,7 @@ class TrackState(Enum):
 
 @dataclass
 class TrackEvent:
-    """追踪事件"""
+    """Tracking event"""
     track_id: int
     state: TrackState
     class_name: str
@@ -46,7 +46,7 @@ class TrackEvent:
 
 @dataclass
 class TrackedObject:
-    """被追踪的目标对象"""
+    """A tracked object instance"""
     track_id: int
     class_name: str
     first_seen_ms: int
@@ -75,16 +75,16 @@ class TrackedObject:
 
 class ObjectTracker:
     """
-    基于 IoU 的多目标追踪器
-    
-    使用示例:
+    Multi-object tracker based on IoU
+
+    Usage example:
         tracker = ObjectTracker(max_disappeared_frames=30)
         events = tracker.update(detections, timestamp_ms)
         for event in events:
             if event.state == TrackState.ENTER:
-                print(f"目标 {event.track_id} 出现")
+                print(f"object {event.track_id} appeared")
             elif event.state == TrackState.LEAVE:
-                print(f"目标 {event.track_id} 消失，持续 {event.duration_ms}ms")
+                print(f"object {event.track_id} disappeared, lasted {event.duration_ms}ms")
     """
     
     def __init__(
@@ -102,14 +102,14 @@ class ObjectTracker:
         
     def update(self, detections: List[Detection], timestamp_ms: int) -> List[TrackEvent]:
         """
-        处理一帧检测结果，返回事件列表
-        
+        Process one frame of detections and return the list of events
+
         Args:
-            detections: 当前帧检测框
-            timestamp_ms: 当前帧时间戳（毫秒）
-            
+            detections: Detection boxes for the current frame
+            timestamp_ms: Current frame timestamp (milliseconds)
+
         Returns:
-            事件列表（Enter/Update/Leave）
+            List of events (Enter/Update/Leave)
         """
         self._frame_count += 1
         events = []
@@ -177,7 +177,7 @@ class ObjectTracker:
         return events
     
     def reset(self):
-        """重置追踪器"""
+        """Reset the tracker"""
         self.tracks.clear()
         self.next_track_id = 0
         self._frame_count = 0
@@ -210,8 +210,8 @@ class ObjectTracker:
         timestamp_ms: int
     ) -> Tuple[List[Detection], List[TrackedObject], List[Detection], List[int]]:
         """
-        基于 IoU 的贪心匹配算法
-        
+        Greedy matching algorithm based on IoU
+
         Returns:
             (matched_detections, matched_tracks, unmatched_detections, unmatched_track_ids)
         """
@@ -247,7 +247,7 @@ class ObjectTracker:
     
     @staticmethod
     def _calculate_iou(box1: List[int], box2: List[int]) -> float:
-        """计算两个边界框的 IoU"""
+        """Compute the IoU of two bounding boxes"""
         if not box1 or not box2:
             return 0.0
         

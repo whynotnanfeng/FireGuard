@@ -1,7 +1,7 @@
 <template>
   <div class="custom-pagination-container">
     <ul class="custom-pagination">
-      <!-- 上一页 -->
+      <!-- Previous page -->
       <li 
         class="pagination-item pagination-prev" 
         :class="{ 'pagination-disabled': current <= 1 }"
@@ -10,12 +10,12 @@
         <LeftOutlined />
       </li>
 
-      <!-- 左侧省略号 -->
+      <!-- Left ellipsis -->
       <li v-if="paginationWindow.start > 1" class="pagination-ellipsis">
         <span>...</span>
       </li>
 
-      <!-- 页码列表 (严格限制最多4个) -->
+      <!-- Page numbers (strictly capped at 4) -->
       <li 
         v-for="p in visiblePages" 
         :key="p"
@@ -26,12 +26,12 @@
         <span>{{ p }}</span>
       </li>
 
-      <!-- 右侧省略号 -->
+      <!-- Right ellipsis -->
       <li v-if="paginationWindow.end < totalPages" class="pagination-ellipsis">
         <span>...</span>
       </li>
 
-      <!-- 下一页 -->
+      <!-- Next page -->
       <li 
         class="pagination-item pagination-next" 
         :class="{ 'pagination-disabled': current >= totalPages }"
@@ -40,12 +40,11 @@
         <RightOutlined />
       </li>
 
-      <!-- 快速跳转 -->
+      <!-- Quick jump -->
       <li class="pagination-options">
         <div class="pagination-options-quick-jumper">
-          跳至
+          Go to
           <input type="text" v-model="jumpInput" @keydown.enter="handleJump" />
-          页
         </div>
       </li>
     </ul>
@@ -71,7 +70,7 @@ watch(() => props.current, () => {
   jumpInput.value = ''
 })
 
-// 滑动窗口逻辑：计算 4 页长度的“可见窗口”
+// Sliding window logic: compute a 4-page-long "visible window"
 const paginationWindow = computed(() => {
   const total = totalPages.value
   const current = props.current
@@ -80,7 +79,7 @@ const paginationWindow = computed(() => {
     return { start: 1, end: total }
   }
   
-  // 按照您的规则：以当前页为中心偏移（左1右2）
+  // Following your rule: centre on the current page with an offset (1 left, 2 right)
   let start = current - 1
   let end = current + 2
   
@@ -225,7 +224,7 @@ const handleJump = (e: any) => {
   border-color: var(--primary-blue);
 }
 
-/* 适配暗色模式变量，如果项目中未定义则使用备选值 */
+/* Dark theme variable fallbacks, in case the project does not define them */
 :root {
   --primary-blue: #1677ff;
   --border-color: #d9d9d9;
@@ -234,7 +233,7 @@ const handleJump = (e: any) => {
   --bg-card: #ffffff;
 }
 
-/* 假设项目中已有变量 */
+/* Assumes the project already defines these variables */
 [data-theme='dark'] .pagination-item {
   background-color: transparent;
 }

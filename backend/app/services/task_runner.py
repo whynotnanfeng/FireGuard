@@ -49,7 +49,8 @@ class StreamManager:
         # High-integrity identity tracking
         self._stream_tokens: Dict[str, object] = {} 
         
-        # [核心优化]: 延迟初始化 MP 资源，防止 Windows 下 re-import 导致的 Manager 爆炸
+        # [Core optimization]: lazily initialize MP resources to prevent a Manager explosion
+        # caused by re-import on Windows
         self._manager = None
         self.active_tasks_map = None
         self.global_inference_in_q = None
@@ -61,18 +62,18 @@ class StreamManager:
         self._dispatcher_dead = False
         self._lock = threading.Lock()
 
-        # ── Per-model worker pool (多模型并行推理) ──
+        # ── Per-model worker pool (parallel inference for multiple models) ──
         # model_cache_key → { 'in_q': mp.Queue, 'out_q': mp.Queue, 'worker': Process, 'model_ids': set }
         self._model_workers: Dict[str, dict] = {}
 
     def start_inference_pool(self, worker_count: int = 1):
-        """启动全局推理进程池和结果分发线程"""
+        """Start the global inference process pool and the result dispatcher thread"""
         from app.services.inference_worker import GlobalInferenceWorker
         import sys
         import os
 
-        # Windows spawn 模式下，子进程默认使用系统 Python 而非虚拟环境
-        # 必须通过 set_executable 强制子进程使用当前虚拟环境的 Python
+        # In Windows spawn mode, child processes default to the system Python instead of the virtualenv
+        # set_executable must force child processes to use the current virtualenv Python
         if os.name == 'nt' and hasattr(mp, 'set_executable'):
             venv_python = os.path.join(sys.prefix, 'Scripts', 'python.exe')
             if os.path.exists(venv_python) and sys.executable != venv_python:
@@ -82,7 +83,7 @@ class StreamManager:
                 except Exception as e:
                     logger.warning(f"[StreamManager] Failed to set MP executable: {e}")
 
-        # 0. [核心修复]: 仅在主进程中通过 lifespan 显式初始化一次 MP 资源
+        # 0. [Core fix]: initialize MP resources exactly once, explicitly, in the main process via lifespan
         if self._manager is None:
             logger.info("[StreamManager] Initializing Multiprocessing Resources...")
             self._manager = mp.Manager()
@@ -90,7 +91,7 @@ class StreamManager:
             self.global_inference_in_q = mp.Queue(maxsize=500)
             self.global_inference_out_q = mp.Queue(maxsize=500)
 
-        # 1. 启动结果分发线程 (支持自动重启)
+        # 1. Start the result dispatcher thread (with automatic restart support)
         if self._dispatcher_thread is None or not self._dispatcher_thread.is_alive():
             if self._dispatcher_thread is not None and not self._dispatcher_thread.is_alive():
                 logger.warning("[StreamManager] Dispatcher thread died! Restarting...")
@@ -99,7 +100,7 @@ class StreamManager:
             self._dispatcher_dead = False
             logger.info("Started Results Dispatcher Thread.")
 
-        # 2. 补齐共享队列 Worker（单模型流兼容）
+        # 2. Top up shared-queue workers (single-model stream compatibility)
         current_count = len(self.workers)
         if current_count < worker_count:
             for i in range(current_count, worker_count):
@@ -110,14 +111,14 @@ class StreamManager:
 
         logger.info(f"Inference Pool adjusted to {len(self.workers)} shared workers.")
 
-        # 3. 确保启动负载监视线程 (仅启动一次)
+        # 3. Ensure the load monitor thread is running (started only once)
         if self._scaling_thread is None:
             self._scaling_thread = threading.Thread(target=self._background_scaling_loop, daemon=True)
             self._scaling_thread.start()
             logger.info("Started Elastic Scaling Background Monitor.")
 
     def ensure_model_workers(self, model_configs: list):
-        """为多模型配置确保每个模型有独立的推理 Worker 进程（并行推理，消除串行瓶颈）"""
+        """Ensure each model in a multi-model configuration has its own inference worker process (parallel inference, eliminating the serial bottleneck)"""
         from app.services.inference_worker import GlobalInferenceWorker
         import sys
         import os
@@ -150,7 +151,8 @@ class StreamManager:
                     f"[StreamManager] Per-model Worker started: {cache_key[:60]} (PID={w.pid})"
                 )
             else:
-                # 清理复用 worker 的残留结果，防止旧任务的空结果污染新任务
+                # Drain stale results from a reused worker to keep empty results from an old
+                # task from polluting a new task
                 entry = self._model_workers[cache_key]
                 _drained = 0
                 try:
@@ -173,28 +175,28 @@ class StreamManager:
         )
 
     def get_model_queue(self, model_path: str, use_gpu: bool) -> Optional[mp.Queue]:
-        """根据模型路径获取对应的推理输入队列
+        """Get the inference input queue corresponding to a model path
 
-        注意: cache_key 必须与 ensure_model_workers() 一致，
-        两者都使用 _infer_use_gpu_from_configs() 推断的 GPU 状态。
+        Note: cache_key must match ensure_model_workers(); both use the GPU state
+        inferred by _infer_use_gpu_from_configs().
         """
-        # 与 ensure_model_workers 保持一致: 始终使用推断值而非调用方的 use_gpu
+        # Kept consistent with ensure_model_workers: always use the inferred value, not the caller's use_gpu
         inferred_gpu = self._infer_use_gpu_from_configs([])
         cache_key = f"{model_path}|gpu={inferred_gpu}"
         entry = self._model_workers.get(cache_key)
         return entry['in_q'] if entry else None
 
     def get_model_output_queues(self) -> list:
-        """获取所有 per-model worker 的输出队列列表"""
+        """Get the list of output queues of all per-model workers"""
         return [entry['out_q'] for entry in self._model_workers.values()]
 
     @staticmethod
     def _infer_use_gpu_from_configs(model_configs: list) -> bool:
-        """从 model_configs 推断 GPU 使用状态。当前多模型流默认使用 GPU。"""
+        """Infer GPU usage from model_configs. Multi-model streams currently default to GPU."""
         return True
 
     def _background_scaling_loop(self):
-        """后台负载监视循环：每 15 秒检查一次 CPU 压力并动态扩缩容（增加冷却期防抖动）"""
+        """Background load monitoring loop: checks CPU pressure every 15 seconds and dynamically scales up/down (with a cooldown period to prevent oscillation)"""
         logger.info("[ElasticScaling] Background monitor loop started.")
         last_adjust_time = 0.0
         cooldown_seconds = 10.0
@@ -202,13 +204,13 @@ class StreamManager:
         while not self._stop_event.is_set():
             try:
                 now = time.time()
-                # 冷却期内跳过调整，防止频繁扩缩容加剧CPU抖动
+                # Skip adjustments during the cooldown period to prevent frequent scaling from worsening CPU jitter
                 if now - last_adjust_time >= cooldown_seconds:
                     if self._streams:
                         self._adjust_worker_count()
                         last_adjust_time = now
                 
-                # Dispatcher 线程健康检查与自动重启
+                # Dispatcher thread health check and automatic restart
                 if self._dispatcher_dead or (self._dispatcher_thread is not None and not self._dispatcher_thread.is_alive()):
                     logger.warning("[ElasticScaling] Dispatcher thread is dead, restarting...")
                     self._dispatcher_thread = threading.Thread(target=self._result_dispatcher_loop, daemon=True)
@@ -217,13 +219,13 @@ class StreamManager:
             except Exception as e:
                 logger.error(f"[ElasticScaling] Monitor loop error: {e}")
             
-            # 每 3 秒巡检一次
+            # Patrol once every 3 seconds
             for _ in range(3):
                 if self._stop_event.is_set(): break
                 time.sleep(1.0)
 
     def _adjust_worker_count(self):
-        """根据系统实时负载，动态调整推理进程池大小 (弹性伸缩策略)"""
+        """Dynamically adjust the inference process pool size based on real-time system load (elastic scaling strategy)"""
         from app.services.inference_worker import GlobalInferenceWorker
         import psutil
 
@@ -231,7 +233,7 @@ class StreamManager:
 
         cpu_usage = psutil.cpu_percent(interval=None)
 
-        # 【P0 修复】：先清理已死亡的 Worker，防止计数虚高导致永不扩容
+        # [P0 fix]: clean up dead workers first, preventing an inflated count from blocking scale-up forever
         alive_workers = []
         for w in self.workers:
             if w.is_alive():
@@ -241,48 +243,48 @@ class StreamManager:
         dead_count = len(self.workers) - len(alive_workers)
         self.workers = alive_workers
 
-        # 清理已死亡的 per-model workers
+        # Clean up dead per-model workers
         dead_model_keys = [k for k, v in self._model_workers.items() if not v['worker'].is_alive()]
         for k in dead_model_keys:
             logger.warning(f"[ElasticScaling] Dead per-model worker detected: {k[:60]}, removing...")
             del self._model_workers[k]
 
-        # 即使没有活跃流，我们也保留 1 个"种子进程"以确保新任务秒开
+        # Keep one "seed process" even with no active streams, so new tasks start instantly
         if active_count == 0:
             target_workers = 1
             strategy = "IDLE_SEED"
         else:
-            # --- 弹性伸缩算法 (Elastic Scaling Algorithm) ---
+            # --- Elastic Scaling Algorithm ---
             target_workers = 1
             target_per_task = 1
             strategy = "DEFAULT"
-            # 多模型流使用 per-model workers，不需要额外的 shared workers
+            # Multi-model streams use per-model workers and need no extra shared workers
             per_model_count = len(self._model_workers)
             if per_model_count > 0:
-                # 多模型模式：per-model workers 已处理推理，shared worker 仅保留种子
+                # Multi-model mode: per-model workers already handle inference, shared workers are kept only as a seed
                 target_per_task = 1
                 target_workers = 1
                 strategy = "PER_MODEL (dedicated workers active)"
             elif cpu_usage > config.CPU_THRESHOLD_SURVIVAL:
-                # 红色水位：极高负载。每路监控回归 1:1 分配，保命优先
+                # Red watermark: extremely high load. Revert to 1:1 allocation per stream; survival first
                 target_per_task = 1
                 strategy = "SURVIVAL (1:1)"
             elif cpu_usage > config.CPU_THRESHOLD_BALANCED:
-                # 黄色水位：高负载。压缩并行度，释放资源给系统调度
+                # Yellow watermark: high load. Compress parallelism to free resources for OS scheduling
                 target_per_task = max(1, config.WORKERS_PER_TASK_LIMIT // 2)
                 strategy = "BALANCED (M/2)"
             else:
-                # 绿色水位：负载健康。火力全开，加速单路推理
+                # Green watermark: healthy load. Full firepower to speed up single-stream inference
                 target_per_task = config.WORKERS_PER_TASK_LIMIT
                 strategy = "PERFORMANCE (MAX)"
 
             if per_model_count == 0:
-                # 计算最终目标：受限于系统核心总上限
+                # Compute the final target: bounded by the total system core limit
                 target_workers = min(active_count * target_per_task, config.MAX_TOTAL_WORKERS)
-                # 至少要有一个进程服务
+                # At least one process must serve
                 target_workers = max(1, target_workers)
 
-            # 改造：将 INFO 降级为 DEBUG，仅在策略变更时输出 INFO
+            # Refinement: downgrade INFO to DEBUG, only emitting INFO when the strategy changes
             if not hasattr(self, '_last_strategy'): self._last_strategy = ""
             if strategy != self._last_strategy:
                 logger.info(f"[ElasticScaling] Strategy changed: {self._last_strategy} -> {strategy} (CPU: {cpu_usage}%)")
@@ -292,14 +294,15 @@ class StreamManager:
 
         current_workers = len(self.workers)
 
-        # 情况 1: 需要扩容（含死亡 Worker 重生）
+        # Case 1: scale-up needed (including respawning dead workers)
         if target_workers > current_workers or dead_count > 0:
-            # 稳定性加固：如果当前 CPU 已经很高，禁止扩容，防止新进程加载模型瞬间抢占解码资源导致 H.264 报错
+            # Stability hardening: forbid scale-up when CPU is already high, since a new process loading a
+            # model can momentarily starve decode resources and cause H.264 errors
             respawn_needed = dead_count > 0
             if cpu_usage > 75 and not respawn_needed:
                 logger.info(f"[ElasticScaling] Scale-UP suppressed due to High CPU ({cpu_usage}%). Keeping {current_workers} workers.")
             else:
-                # 先补充死亡的 Worker（不受 CPU 阈值限制，确保推理管线不中断）
+                # Replace dead workers first (not subject to the CPU threshold, ensuring the inference pipeline stays up)
                 if respawn_needed:
                     logger.info(f"[ElasticScaling] Respawning {dead_count} dead worker(s) to maintain inference pipeline...")
                     for i in range(dead_count):
@@ -308,33 +311,33 @@ class StreamManager:
                         self.workers.append(w)
                         logger.info(f"[ElasticScaling] Dead worker respawned (PID={w.pid})")
 
-                # 再按需扩容
+                # Then scale up as needed
                 if target_workers > len(self.workers):
                     self.start_inference_pool(target_workers)
 
-        # 情况 2: 需要缩容 (仅在任务数减少或负载过高时主动释放)
+        # Case 2: scale-down needed (only released proactively when task count drops or load is too high)
         elif target_workers < current_workers:
-            # 为了 Windows 稳定性，我们采取温和缩容：一次仅杀掉 1 个多余进程，防止系统剧烈抖动
+            # For Windows stability we scale down gently: kill only one surplus process at a time to avoid severe system jitter
             logger.info(f"[ElasticScaling] Scaling DOWN: Current {current_workers} -> Target {target_workers}")
             try:
                 w = self.workers.pop()
                 w.stop()
-                # 加固：增加超时
-                self.global_inference_in_q.put(None, timeout=1.0) # 塞毒丸
+                # Hardening: add a timeout
+                self.global_inference_in_q.put(None, timeout=1.0) # poison pill
             except Exception:
                 pass
-            # 提示：实际物理进程会在 Join 之后回收
+            # Note: the actual physical process is reclaimed after Join
 
-        # 回滚缩容逻辑
-        # 为了 Windows 系统的绝对稳定，我们不再自动杀掉多余的进程。
-        # 保持 1-2 个空闲进程对系统几乎无负荷，但能极大提升任务启动速度。
+        # Scale-down logic rolled back
+        # For the absolute stability of Windows systems, we no longer automatically kill surplus processes.
+        # Keeping 1-2 idle processes places almost no load on the system and greatly speeds up task startup.
 
     def stop_inference_pool(self):
-        """安全关闭进程池"""
-        # 1. 发送停止信号
+        """Safely shut down the process pool"""
+        # 1. Send the stop signal
         self._stop_event.set()
 
-        # 2. 停止 per-model workers
+        # 2. Stop per-model workers
         for cache_key, entry in self._model_workers.items():
             w = entry['worker']
             w.stop()
@@ -347,11 +350,11 @@ class StreamManager:
                 w.terminate()
         self._model_workers.clear()
 
-        # 3. 停止所有共享 Worker 进程
+        # 3. Stop all shared worker processes
         for w in self.workers:
             w.stop()
             try:
-                self.global_inference_in_q.put(None, timeout=1.0) # 塞毒丸
+                self.global_inference_in_q.put(None, timeout=1.0) # poison pill
             except Exception:
                 pass
 
@@ -360,29 +363,29 @@ class StreamManager:
             if w.is_alive():
                 w.terminate()
 
-        # 4. 停止分发线程
+        # 4. Stop the dispatcher thread
         if self._dispatcher_thread:
             try:
-                # 加固：增加超时，防止由于队列满导致的退出挂起
+                # Hardening: add a timeout to prevent exit from hanging due to a full queue
                 self.global_inference_out_q.put(None, timeout=1.0)
             except Exception:
                 pass
             self._dispatcher_thread.join(timeout=2.0)
 
-        # 5. 停止弹性伸缩线程
+        # 5. Stop the elastic scaling thread
         if self._scaling_thread:
             self._scaling_thread.join(timeout=2.0)
 
         logger.info("[StreamManager] Inference Pool and background threads stopped.")
 
     def stop_monitor(self):
-        """停止异步监控协程"""
+        """Stop the async monitoring coroutine"""
         if self._monitor_task:
             self._monitor_task.cancel()
             logger.info("[StreamManager] Monitor task cancelled.")
 
     def stop_all_streams(self, timeout: float = 5.0):
-        """停止所有活跃流，等待 drain 完成。关闭前调用，确保 MediaMTX 注销正常。"""
+        """Stop all active streams and wait for drain to complete. Call before shutdown to ensure MediaMTX deregistration is clean."""
         import time
         with self._lock:
             task_ids = list(self._streams.keys())
@@ -394,7 +397,7 @@ class StreamManager:
                 self.stop_stream(task_id)
             except Exception as e:
                 logger.warning(f"[StreamManager] Error stopping stream {task_id}: {e}")
-        # 等待所有流 drain 完成
+        # Wait for all streams to finish draining
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self._lock:
@@ -412,35 +415,35 @@ class StreamManager:
             logger.info("[StreamManager] All streams stopped cleanly.")
 
     def _result_dispatcher_loop(self):
-        """核心路由：从全局队列拿结果，支持【批处理聚合】和【时序重排】"""
+        """Core router: pulls results from the global queues, supporting [batch aggregation] and [temporal reordering]"""
         from collections import defaultdict
-        from app.services.video_stream import db_executor  # 用于卸载 process_detections
+        from app.services.video_stream import db_executor  # used to offload process_detections
 
         logger.info("[Dispatcher] Result dispatcher thread started. Batching enabled.")
-        
-        # 任务结果缓冲区 { task_id: [ (timestamp, payload), ... ] }
+
+        # Per-task result buffer { task_id: [ (timestamp, payload), ... ] }
         batch_buffers = defaultdict(list)
-        # 上次发送时间 { task_id: last_send_time }
+        # Last send time { task_id: last_send_time }
         last_send_times = defaultdict(float)
         
         batch_window = config.DETECTION_BATCH_WINDOW_MS / 1000.0
         _dispatcher_heartbeat_ts = time.time()
         _dispatcher_result_count = 0
         
-        # P0 修复：推理管线背压监控
+        # P0 fix: inference pipeline backpressure monitoring
         _dispatcher_last_result_ts = 0.0
         _dispatcher_max_gap = 0.0
         _dispatcher_result_timestamps = []
         _backpressure_warned = False
         _last_backpressure_log = time.time()
-        BACKPRESSURE_THRESHOLD = 200  # 队列深度超过 200 时告警
+        BACKPRESSURE_THRESHOLD = 200  # Warn when queue depth exceeds 200
         
         while not self._stop_event.is_set():
             try:
-                # 从 per-model workers 和 shared queue 中获取结果
+                # Pull results from per-model workers and the shared queue
                 result = None
                 _result_source = "none"
-                # 1. 优先检查 per-model output queues（多模型并行推理）
+                # 1. Check per-model output queues first (parallel inference for multiple models)
                 for _mq in self.get_model_output_queues():
                     try:
                         result = _mq.get_nowait()
@@ -448,7 +451,7 @@ class StreamManager:
                         break
                     except queue.Empty:
                         continue
-                # 2. 回退到共享队列（单模型流兼容）
+                # 2. Fall back to the shared queue (single-model stream compatibility)
                 if result is None:
                     try:
                         result = self.global_inference_out_q.get(timeout=0.1)
@@ -469,7 +472,7 @@ class StreamManager:
                             for k, v in self._model_workers.items()
                         }
                         
-                        # P0 修复：背压监控日志
+                        # P0 fix: backpressure monitoring log
                         if queue_size > BACKPRESSURE_THRESHOLD:
                             if not _backpressure_warned or (now - _last_backpressure_log) > 60:
                                 logger.warning(
@@ -511,14 +514,14 @@ class StreamManager:
                         break
                     continue 
 
-                # 增加严格校验，防止 NoneType 崩溃
-                # 改进支持 3/4/5 元组格式
-                # 5 元组包含 jpeg_data，确保帧与检测结果严格对应
+                # Add strict validation to prevent NoneType crashes
+                # Improved to support the 3/4/5-tuple formats
+                # The 5-tuple carries jpeg_data, ensuring frames and detection results correspond strictly
                 if not isinstance(result, (list, tuple)) or len(result) < 3:
                     logger.warning(f"[Dispatcher] Malformed inference result: {result}")
                     continue
 
-                # 解析结果：兼容多种格式（result[5] = provider 诊断信息, result[6] = model_id）
+                # Parse the result: compatible with several formats (result[5] = provider diagnostics, result[6] = model_id)
                 task_id, timestamp, raw_detections = result[0], result[1], result[2]
                 inference_time_ms = result[3] if len(result) >= 4 else 0
                 returned_jpeg_data = result[4] if len(result) >= 5 else None
@@ -533,12 +536,12 @@ class StreamManager:
                     raw_detections = []
                 _dispatcher_result_count += 1
                 
-                # 诊断日志监控结果间隔
+                # Diagnostic log monitoring the interval between results
                 if _dispatcher_last_result_ts > 0:
                     gap = timestamp - _dispatcher_last_result_ts
                     if gap > _dispatcher_max_gap:
                         _dispatcher_max_gap = gap
-                    # 诊断日志如果间隔超过 5 秒，输出警告
+                    # Emit a warning if the diagnostic log interval exceeds 5 seconds
                     if gap > 5.0:
                         logger.warning(
                             f"[DIAG-DISP] Large gap detected: {gap:.2f}s since last result for task {task_id}, "
@@ -552,11 +555,11 @@ class StreamManager:
                     logger.warning(f"[DIAG-DISP] No stream found for task {task_id}, discarding result")
                     continue
 
-                # 1. 应用过滤配置
+                # 1. Apply the filter configuration
                 detections = [Detection(**d) if isinstance(d, dict) else d for d in raw_detections]
                 filtered = stream._apply_detection_config(detections, stream.detection_config)
 
-                # 诊断日志：多模型时记录每个结果的 max_conf 和过滤情况
+                # Diagnostic log: with multiple models, record each result's max_conf and filtering outcome
                 if _result_model_id and _dispatcher_result_count % 5 == 0:
                     _max_conf = max((d.confidence for d in detections), default=0.0)
                     _max_conf_f = max((d.confidence for d in filtered), default=0.0)
@@ -575,19 +578,20 @@ class StreamManager:
                         f"ts={timestamp:.3f}"
                     )
 
-                # 2. 构造载荷
-                # 【P0 修复 - 时间戳基准统一】：
-                # timestamp 是相对时间（从会话开始的秒数，如 210.5s）
-                # 需要转换为 Unix 绝对时间戳，前端才能正确匹配
-                # 获取流的会话起始时间
+                # 2. Build the payload
+                # [P0 fix - unified timestamp base]:
+                # timestamp is relative time (seconds since the session started, e.g. 210.5s)
+                # It must be converted to an absolute Unix timestamp so the frontend can match correctly
+                # Read the session start timestamp
                 stream_start_time = stream._session_start_time if hasattr(stream, '_session_start_time') else time.time()
                 ntp_offset_ms = clock_monitor.avg_offset_ms or 0.0
                 current_abs_time = int((stream_start_time + timestamp) * 1000 - ntp_offset_ms)
                 
-                # 推理结果路径 —— 仅做追踪 + 事件处理 + 更新最新检测结果。
-                # 检测框绘制和 HLS 写入由 _annotated_frame_writer 线程独立处理
-                # （源帧率 15fps，与推理速率解耦）。
-                # 多模型：按model_id路由到各自的缓冲区（不写全局缓冲区，避免双写竞态）
+                # Inference result path — only tracking + event processing + updating the latest detection results.
+                # Detection box drawing and HLS writing are handled independently by the
+                # _annotated_frame_writer thread (source frame rate 15fps, decoupled from the inference rate).
+                # Multi-model: route to each model's own buffer by model_id (do not write the global
+                # buffer, to avoid a dual-write race)
                 if _result_model_id and hasattr(stream, '_latest_results_by_model'):
                     with stream._results_by_model_lock:
                         stream._latest_results_by_model[_result_model_id] = filtered
@@ -600,15 +604,15 @@ class StreamManager:
                             f"detections={len(filtered)} raw={len(raw_detections)} ts={timestamp:.3f}"
                         )
                 else:
-                    # 单模型：更新全局缓冲区
+                    # Single model: update the global buffer
                     with stream._lock:
                         stream._latest_results = filtered
                         stream._latest_results_timestamp = timestamp
                         stream._latest_results_wall_time = time.time()
 
                 if stream.pipeline and stream._pipeline_initialized:
-                    # 卸载到线程池避免 process_detections 持有 GIL
-                    # 阻塞 grabber/writer 线程（日志确诊：CPU 94% 时帧间隔达 263ms）
+                    # Offload to the thread pool so process_detections does not hold the GIL,
+                    # which would block the grabber/writer threads (log diagnosis: frame gaps reached 263ms at 94% CPU)
                     try:
                         logger.info(
                             f"[Dispatcher] Submitting process_detections: task_id={task_id}, "
@@ -620,8 +624,8 @@ class StreamManager:
                     except Exception as e:
                         logger.error(f"Pipeline process_detections failed: {e}", exc_info=True)
                 
-                # 3. 构造 WebSocket 载荷
-                # 从 consumer 记录的 PTS→墙钟映射中读取精确帧采集时刻
+                # 3. Build the WebSocket payload
+                # Read the exact frame capture moment from the PTS→wall-clock map recorded by the consumer
                 _frame_wall_clock = stream._frame_wall_clock_map.get(
                     timestamp, stream_start_time + timestamp
                 )
@@ -630,7 +634,7 @@ class StreamManager:
                     "timestamp": current_abs_time,
                     "timestamp_ms": current_abs_time,
                     "wall_clock": _frame_wall_clock,
-                    "frame_pts": timestamp,  # 前端诊断用
+                    "frame_pts": timestamp,  # For frontend diagnostics
                     "boxes": [
                         {
                             "x": float(d.box[0]), "y": float(d.box[1]),
@@ -642,18 +646,18 @@ class StreamManager:
                     "inference_time_ms": inference_time_ms,
                 }
                 
-                # 3. 加入缓冲区
+                # 3. Append to the buffer
                 batch_buffers[task_id].append((timestamp, payload))
                 
-                # 4. 如果缓冲区满了或者窗口到了，则发出
+                # 4. Emit when the buffer is full or the window has elapsed
                 now = time.time()
                 is_first_frame = last_send_times[task_id] == 0.0
                 if is_first_frame or len(batch_buffers[task_id]) >= 10 or (now - last_send_times[task_id]) >= batch_window:
                     self._flush_batch(task_id, batch_buffers, last_send_times)
                     
-                # 5. 数据库持久化
+                # 5. Database persistence
                 if filtered:
-                    # 添加诊断日志，确认检测记录保存被调用
+                    # Add a diagnostic log confirming the detection record save was called
                     logger.info(
                         f"[Dispatcher] Saving {len(filtered)} detections for task {task_id}, "
                         f"timestamp_ms={current_abs_time}"
@@ -663,30 +667,32 @@ class StreamManager:
 
             except Exception as e:
                 err_str = str(e)
-                if "handle is closed" in err_str or "Event loop is closed" in err_str or "句柄无效" in err_str or "invalid handle" in err_str.lower():
+                # The localized Windows "invalid handle" message is escaped so this match keeps
+                # working on Chinese locales while the source file stays ASCII
+                if "handle is closed" in err_str or "Event loop is closed" in err_str or "\u53e5\u67c4\u65e0\u6548" in err_str or "invalid handle" in err_str.lower():
                     logger.warning(f"[Dispatcher] Transient event loop error ({err_str}). Continuing...")
                     time.sleep(0.5)
                     continue
                 
-                # 设置死亡标志，触发弹性伸缩监控自动重启
+                # Mark the process dead to trigger an automatic restart
                 logger.error(f"Dispatcher loop error: {e}", exc_info=True)
                 self._dispatcher_dead = True
                 time.sleep(1.0)
 
     def _flush_batch(self, task_id, buffers, last_send_times):
-        """将缓存的结果排序并批量上报"""
+        """Sort the buffered results and report them in a batch"""
         if not buffers[task_id]:
             return
             
-        # 1. 关键修复：时序重排 (解决多核并行导致的帧乱序)
+        # 1. Key fix: temporal reordering (fixes out-of-order frames caused by multi-core parallelism)
         batch = sorted(buffers[task_id], key=lambda x: x[0])
         payloads = [x[1] for x in batch]
         
-        # 2. 清空缓冲区
+        # 2. Clear the buffer
         buffers[task_id] = []
         last_send_times[task_id] = time.time()
         
-        # 3. 发布
+        # 3. Publish
         channel_name = f"detections:{task_id}"
         try:
             broker.publish_sync(channel_name, {
@@ -765,7 +771,7 @@ class StreamManager:
                                     if recorded_duration > 0 and r_task.cumulative_running_seconds < recorded_duration:
                                         r_task.cumulative_running_seconds = recorded_duration
                                     r_task.status = "exception"
-                                    r_task.error_msg = "系统重启或非预期中断 (状态自愈)"
+                                    r_task.error_msg = "System restart or unexpected interruption (state self-healed)"
                                     session.add(r_task)
                                     healed.append((r_task.id, r_task.error_msg))
                         if healed:
@@ -788,7 +794,7 @@ class StreamManager:
                         for t in init_tasks:
                             if t.updated_at and (beijing_now - t.updated_at).total_seconds() > 120:
                                 t.status = "exception"
-                                t.error_msg = "初始化超时，请检查视频源和模型配置"
+                                t.error_msg = "Initialization timed out; please check the video source and model configuration"
                                 session.add(t)
                                 timed_out.append((t.id, t.error_msg))
                         if timed_out:
@@ -819,11 +825,11 @@ class StreamManager:
         model_configs: Optional[List[dict]] = None,
         fusion_config: Optional[dict] = None,
     ) -> "VideoStream":
-        """V12: 冷启动 - 始终创建新流实例（由调用方负责先stop旧流）
+        """V12: cold start - always create a new stream instance (the caller is responsible for stopping the old stream first)
 
         Args:
-            model_configs: 多模型配置列表，每个元素包含 model_path, label_mapping, model_id, weight 等
-            fusion_config: 融合引擎配置（如 wbf_iou_threshold）
+            model_configs: Multi-model configuration list; each element contains model_path, label_mapping, model_id, weight, etc.
+            fusion_config: Fusion engine configuration (e.g. wbf_iou_threshold)
         """
         from app.services.video_stream import VideoStream
 
@@ -840,14 +846,14 @@ class StreamManager:
             if task and task.detection_config:
                 try:
                     detection_config = json.loads(task.detection_config)
-                    # [P1-A 架构对齐]: 统一 0-1 尺度迁移逻辑
+                    # [P1-A architecture alignment]: unified 0-1 scale migration logic
                     if detection_config:
                         gt = detection_config.get("global_threshold", 0.25)
                         if gt > 1:
                             detection_config["global_threshold"] = gt / 100.0
                             logger.info(f"[Migration] Normalized global_threshold for {task_id}: {gt} -> {gt/100.0}")
 
-                        # 类别阈值迁移
+                        # Per-class threshold migration
                         for cat in detection_config.get("categories", []):
                             if cat.get("threshold") and cat["threshold"] > 1:
                                 old_t = cat["threshold"]
@@ -859,13 +865,13 @@ class StreamManager:
                     logger.warning(f"Failed to parse initial config for {task_id}: {e}")
 
         # Create unique identity token for this run
-        token_val = str(time.time()) # 使用时间戳字符串作为可序列化 Token
+        token_val = str(time.time()) # Use a timestamp string as the serializable token
         self._stream_tokens[task_id] = token_val
         self.active_tasks_map[task_id] = token_val
 
-        # 模型预加载：向推理队列发送预加载指令（jpeg_data=None），让 Worker 提前加载模型
+        # Model preloading: send a preload instruction to the inference queue (jpeg_data=None) so the Worker loads the model ahead of time
         if model_configs:
-            # 多模型模式：确保每个模型有独立 Worker，并预加载到对应队列
+            # Multi-model mode: ensure each model has its own worker and preload to the matching queue
             self.ensure_model_workers(model_configs)
             for mc in model_configs:
                 try:
@@ -887,7 +893,7 @@ class StreamManager:
             except Exception as e:
                 logger.warning(f"[Preload] Failed to send preload for {task_id}: {e}")
 
-        # 创建并启动新流
+        # Start the new video stream processing
         new_stream = VideoStream(
             task_id, source, model_path, token_val, mapping,
             use_gpu=use_gpu,
@@ -898,16 +904,17 @@ class StreamManager:
         new_stream._is_resuming = is_resume
         new_stream.detection_config = detection_config # Inject config
 
-        # 先注册到管理器，再启动 grabbers，确保失败时 monitor 能检测到并清理
+        # Register with the manager before starting the grabbers, so the monitor can detect
+        # failures and clean up
         with self._lock:
             self._streams[task_id] = new_stream
         self._paused.discard(task_id)
 
         new_stream.start_grabbers()
 
-        # 动态调整进程池
+        # Dynamically adjust the process pool
         self._adjust_worker_count()
-        
+
         logger.info(f"Stream {task_id} cold-started successfully using Global Pool")
         return new_stream
 
@@ -930,31 +937,33 @@ class StreamManager:
             stream = self._streams.get(task_id)
         if stream:
             stream.stop()
-            # 注意：不再此处立即 del self._streams[task_id]
-            # 由 VideoStream 的 deferred_stop 线程在 Drain 完成后回调 _remove_stream
+            # Note: self._streams[task_id] is no longer deleted here
+            # VideoStream's deferred_stop thread calls _remove_stream back after the drain completes
         
         # Invalidate the token to kill any lingering threads
         if task_id in self._stream_tokens:
             del self._stream_tokens[task_id]
         
-        # [核心修复]：从共享状态中移除，让推理子进程立即感知并丢弃积压帧
+        # [Core fix]: remove from shared state so inference child processes immediately
+        # notice and drop their backlogged frames
         if task_id in self.active_tasks_map:
             del self.active_tasks_map[task_id]
             
-        # [新增] 瞬间排空该任务在全局输入队列中的剩余帧，防止 Stop 后依然狂转
+        # [New] Instantly drain this task's remaining frames from the global input queue,
+        # preventing it from spinning wildly after Stop
         try:
             temp_list = []
             while not self.global_inference_in_q.empty():
                 item = self.global_inference_in_q.get_nowait()
                 if item and item[0] != task_id:
                     temp_list.append(item)
-            # 放回不属于该任务的帧
+            # Put back the frames that do not belong to this task
             for item in temp_list:
                 self.global_inference_in_q.put_nowait(item)
         except Exception:
             pass
 
-        # 排空 per-model 队列中该任务的积压帧
+        # Drain this task's backlogged frames from the per-model queues
         for entry in self._model_workers.values():
             try:
                 temp_list = []
@@ -969,17 +978,17 @@ class StreamManager:
             
         self._paused.discard(task_id)
 
-        # 清理不再需要的 per-model workers
+        # Clean up per-model workers that are no longer needed
         self._cleanup_idle_model_workers()
 
-        # 动态调整进程池
+        # Dynamically adjust the process pool
         self._adjust_worker_count()
 
         logger.info(f"Stream {task_id} logically detached (awaiting physical drain)")
 
     def _cleanup_idle_model_workers(self):
-        """清理不再被任何活跃流使用的 per-model workers"""
-        # 收集所有活跃流仍在使用的 model_path|gpu 键
+        """Clean up per-model workers no longer used by any active stream"""
+        # Collect the model_path|gpu keys still in use by all active streams
         active_model_keys = set()
         with self._lock:
             for stream in self._streams.values():
@@ -988,7 +997,7 @@ class StreamManager:
                         cache_key = f"{mc['model_path']}|gpu={stream.use_gpu}"
                         active_model_keys.add(cache_key)
 
-        # 找出不再需要的 workers
+        # Find the workers that are no longer needed
         idle_keys = [k for k in self._model_workers if k not in active_model_keys]
         for k in idle_keys:
             entry = self._model_workers.pop(k)
@@ -1001,7 +1010,7 @@ class StreamManager:
             logger.info(f"[StreamManager] Cleaned up idle per-model worker: {k[:60]}")
 
     def _remove_stream(self, task_id: str, stream: object):
-        """由 VideoStream 内部 Drain 完成后回调，彻底清理资源"""
+        """Called back by VideoStream after its internal drain completes, to fully release resources"""
         with self._lock:
             if self._streams.get(task_id) is stream:
                 del self._streams[task_id]
@@ -1083,7 +1092,7 @@ class TaskRunner:
                 logger.info(f"Task {task_id} was cancelled before execution started")
                 return
 
-            # 多模型支持：优先从 task_models 表加载，回退到单 model_id
+            # Multi-model support: load from the task_models table first, falling back to a single model_id
             task_models = list(session.exec(
                 select(TaskModel).where(TaskModel.task_id == task.id)
             ).all())
@@ -1202,7 +1211,7 @@ class TaskRunner:
         is_multi_model = model_configs is not None and len(model_configs) > 1
 
         def _run() -> tuple:
-            # 加载模型：多模型模式下按 model_configs 加载；单模型模式下加载单个
+            # Load models: in multi-model mode load per model_configs; in single-model mode load just one
             detectors: dict[str, tuple] = {}  # model_id -> (detector, config)
             if is_multi_model:
                 for mc in model_configs:
@@ -1264,7 +1273,7 @@ class TaskRunner:
                 if img_rgb is None:
                     continue
 
-                # 加载 IR 图像（如有）
+                # Load the IR image (if present)
                 img_ir = None
                 if has_ir_dir:
                     ir_path = ir_dir / img_path.name
@@ -1272,7 +1281,7 @@ class TaskRunner:
                         img_ir = cv2.imread(str(ir_path))
 
                 if is_multi_model:
-                    # ── 多模型分派 + 融合 ──
+                    # ── Multi-model dispatch + fusion ──
                     model_results: list[ModelDetection] = []
                     for mid, (det, mc) in detectors.items():
                         input_data = img_rgb
@@ -1294,14 +1303,14 @@ class TaskRunner:
 
                     final_dets = fusion_engine.fuse(model_results, rgb_frame=img_rgb)
                 else:
-                    # ── 单模型（向后兼容）──
+                    # ── Single model (backward compatible) ──
                     det, mc = detectors["__single__"]
                     is_multimodal = mc["is_rgbir"] and img_ir is not None
                     input_data = [img_rgb, img_ir] if is_multimodal else img_rgb
                     dets = det.detect(input_data, label_mapping=mc.get("label_mapping"))
                     final_dets = self._apply_detection_config(dets, detection_config)
 
-                # 保存 RGB 标注图
+                # Save the RGB annotated image
                 annotated = Detector.draw_boxes(img_rgb, final_dets)
                 out_name = f"annotated_{img_path.name}"
                 out_path = result_dir / out_name
@@ -1310,7 +1319,7 @@ class TaskRunner:
                     first_result_path = str(out_path)
                 all_detections[out_name] = [d.to_dict() for d in final_dets]
 
-                # 保存 IR 标注图（如有 IR 输入）
+                # Save the IR annotated image (if IR input exists)
                 if img_ir is not None:
                     ir_annotated = Detector.draw_boxes(img_ir, final_dets)
                     ir_out_name = f"ir_annotated_{img_path.name}"
@@ -1371,7 +1380,7 @@ class TaskRunner:
         is_multi_model = model_configs is not None and len(model_configs) > 1
 
         def _run() -> tuple:
-            # 加载模型
+            # Load models
             detectors: dict[str, tuple] = {}
             if is_multi_model:
                 for mc in model_configs:
@@ -1453,7 +1462,7 @@ class TaskRunner:
                 output_fps = max(1, fps // frame_step)
                 writer = cv2.VideoWriter(str(out_path), fourcc, output_fps, (w, h))
 
-                # IR 标注视频 writer（多模态时生成）
+                # IR annotated video writer (generated in multimodal mode)
                 ir_writer = None
                 if cap_ir is not None:
                     ir_out_name = f"ir_annotated_{video_path_obj.stem}.webm"
@@ -1482,7 +1491,7 @@ class TaskRunner:
                     # Only detect and WRITE every Nth frame
                     if frame_idx % frame_step == 0:
                         if is_multi_model:
-                            # ── 多模型分派 + 融合 ──
+                            # ── Multi-model dispatch + fusion ──
                             model_results: list[ModelDetection] = []
                             for mid, (det, mc) in detectors.items():
                                 input_data = frame_rgb
@@ -1504,7 +1513,7 @@ class TaskRunner:
 
                             final_dets = fusion_engine.fuse(model_results, rgb_frame=frame_rgb)
                         else:
-                            # ── 单模型（向后兼容）──
+                            # ── Single model (backward compatible) ──
                             det, mc = detectors["__single__"]
                             is_multimodal = mc["is_rgbir"] and frame_ir is not None
                             input_data = [frame_rgb, frame_ir] if is_multimodal else frame_rgb

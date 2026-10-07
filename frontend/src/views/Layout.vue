@@ -6,22 +6,22 @@
           <FireOutlined />
         </div>
         <div class="logo-text">
-          <h2>火灾监测系统</h2>
-          <span class="logo-sub">FIRE DETECTION</span>
+          <h2>FireGuard</h2>
+          <span class="logo-sub">Intelligent Fire Monitoring System</span>
         </div>
       </div>
       <nav class="nav-menu">
         <router-link to="/monitor" class="nav-item" active-class="active">
           <span class="nav-icon"><DashboardOutlined /></span>
-          <span class="nav-label">监控看板</span>
+          <span class="nav-label">Dashboard</span>
         </router-link>
         <router-link to="/tasks" class="nav-item" active-class="active">
           <span class="nav-icon"><UnorderedListOutlined /></span>
-          <span class="nav-label">任务管理</span>
+          <span class="nav-label">Tasks</span>
         </router-link>
         <router-link to="/models" class="nav-item" active-class="active">
           <span class="nav-icon"><AppstoreOutlined /></span>
-          <span class="nav-label">模型库</span>
+          <span class="nav-label">Models</span>
         </router-link>
       </nav>
       <div class="sidebar-footer">
@@ -31,15 +31,15 @@
 
     <div class="main-content">
       <header class="header">
-        <div class="page-title">{{ route.path === '/monitor' ? '监控看板' : (route.path === '/models' ? '模型库' : '任务管理') }}</div>
+        <div class="page-title">{{ route.path === '/monitor' ? 'Dashboard' : (route.path === '/models' ? 'Models' : 'Tasks') }}</div>
         <div class="user-info">
           <a-dropdown :trigger="['click']">
             <span class="dropdown-link" @click.prevent>
-              <UserOutlined /> {{ authStore.user?.username || '用户' }}
+              <UserOutlined /> {{ authStore.user?.username || 'User' }}
             </span>
             <template #overlay>
               <a-menu>
-                <a-menu-item key="logout" @click="handleCommand('logout')">退出登录</a-menu-item>
+                <a-menu-item key="logout" @click="handleCommand('logout')">Log Out</a-menu-item>
               </a-menu>
             </template>
           </a-dropdown>
@@ -56,15 +56,15 @@
       <nav class="mobile-nav">
         <router-link to="/monitor" class="mobile-nav-item" active-class="active">
           <DashboardOutlined />
-          <span>监控</span>
+          <span>Monitor</span>
         </router-link>
         <router-link to="/tasks" class="mobile-nav-item" active-class="active">
           <UnorderedListOutlined />
-          <span>任务</span>
+          <span>Tasks</span>
         </router-link>
         <router-link to="/models" class="mobile-nav-item" active-class="active">
           <AppstoreOutlined />
-          <span>模型</span>
+          <span>Models</span>
         </router-link>
       </nav>
     </div>

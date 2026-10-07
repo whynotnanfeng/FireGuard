@@ -27,7 +27,7 @@
       <div class="actions">
         <a-button type="dashed" size="small" @click="addRow">
           <template #icon><PlusOutlined /></template>
-          添加标签
+          Add Label
         </a-button>
       </div>
     </div>
@@ -53,8 +53,8 @@ const mappingList = ref<MappingItem[]>([])
 
 const columns = [
   { title: 'ID', key: 'id', width: 100 },
-  { title: '标签名称', key: 'name' },
-  { title: '操作', key: 'action', width: 80 }
+  { title: 'Label Name', key: 'name' },
+  { title: 'Actions', key: 'action', width: 80 }
 ]
 
 // Helper to convert internal list back to object for comparison (skipping empty rows)

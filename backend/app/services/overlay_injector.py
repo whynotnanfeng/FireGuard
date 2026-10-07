@@ -1,11 +1,12 @@
 """
-检测框帧内注入器
+In-frame detection box injector
 
-将检测结果直接绘制到视频帧，实现五位一体天然同步。
-核心优势：
-- 检测框与画面在同一帧内，0ms 同步延迟
-- 前端无需 Canvas 绘制，降低复杂度
-- 历史回放直接播放，零额外逻辑
+Draws detection results directly onto video frames, achieving natural synchronization
+of the five-in-one pipeline.
+Key advantages:
+- Boxes and picture share the same frame, so sync latency is 0ms
+- No Canvas drawing needed on the frontend, reducing complexity
+- Historical playback just plays the recorded stream, zero extra logic
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class OverlayStyle:
-    """检测框样式配置"""
+    """Detection box style configuration"""
     thickness: int = 2
     font_size: float = 0.6
     font_thickness: int = 1
@@ -38,14 +39,14 @@ class OverlayStyle:
 
 class OverlayInjector:
     """
-    将检测框直接绘制到视频帧
-    
-    使用示例:
+    Draws detection boxes directly onto video frames
+
+    Usage example:
         injector = OverlayInjector()
         annotated_frame = injector.inject(frame, detections, timestamp_ms)
     """
-    
-    # BGR 颜色：与 Detector.draw_boxes 保持一致
+
+    # BGR colors: kept consistent with Detector.draw_boxes
     DEFAULT_COLORS = {
         "fire": (0, 60, 255),      # Red-Orange
         "smoke": (80, 80, 80),     # Dark Gray
@@ -68,16 +69,16 @@ class OverlayInjector:
         copy: bool = True,
     ) -> np.ndarray:
         """
-        在帧上绘制检测框和时间水印
-        
+        Draw detection boxes and a timestamp watermark on the frame
+
         Args:
-            frame: 原始 BGR 帧 (H, W, 3)
-            detections: 检测结果列表
-            timestamp_ms: Unix 时间戳（毫秒）
-            copy: 是否创建帧的副本。如果为 False，则直接在原图上绘制。
-            
+            frame: Raw BGR frame (H, W, 3)
+            detections: List of detection results
+            timestamp_ms: Unix timestamp (milliseconds)
+            copy: Whether to create a copy of the frame. If False, drawing happens in place.
+
         Returns:
-            带检测框的 BGR 帧
+            BGR frame with detection boxes drawn
         """
         if not detections:
             if self.style.show_timestamp and timestamp_ms > 0:

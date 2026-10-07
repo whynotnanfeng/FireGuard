@@ -12,10 +12,10 @@ if TYPE_CHECKING:
 
 
 class TaskModel(SQLModel, table=True):
-    """任务-模型关联表：支持多模型任务配置。
+    """Task-model association table: supports multi-model task configuration.
 
-    每条记录代表一个任务中的一个模型及其融合配置。
-    单模型任务通过 Task.model_id 兼容，不使用此表。
+    Each record represents one model within a task and its fusion configuration.
+    Single-model tasks stay compatible through Task.model_id and do not use this table.
     """
 
     __tablename__ = "task_models"
@@ -27,7 +27,7 @@ class TaskModel(SQLModel, table=True):
     )
     task_id: str = Field(foreign_key="tasks.id", index=True)
     model_id: str = Field(foreign_key="detection_models.id")
-    weight: float = Field(default=1.0)  # 融合权重
+    weight: float = Field(default=1.0)  # Fusion weight
     per_class_thresholds: str = Field(default="{}")  # JSON: {class_name: threshold}
     enabled_classes: str = Field(default="[]")  # JSON: [class_name, ...]
     order_index: int = Field(default=0)

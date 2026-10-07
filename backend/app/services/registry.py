@@ -22,16 +22,18 @@ DEFAULT_CONFIG = {
 
 class ServiceRegistry:
     """
-    基于 Redis 的统一配置中心与服务注册表。
+    Redis-based unified configuration center and service registry.
 
-    核心能力：
-    1. 配置中心：所有端口/地址从 Redis 读取，一处修改全局生效
-    2. 服务注册：服务启动时注册自身信息，支持心跳保活
-    3. 服务发现：查询已注册的服务实例
+    Core capabilities:
+    1. Configuration center: all ports/addresses are read from Redis, so a single
+       change takes effect globally
+    2. Service registration: services register themselves on startup and support
+       heartbeat keep-alive
+    3. Service discovery: query registered service instances
 
-    Redis 数据结构：
-    - fireguard:config          Hash  全局配置项
-    - fireguard:registry        Hash  服务实例注册 {name: json_info}
+    Redis data structures:
+    - fireguard:config          Hash  global configuration items
+    - fireguard:registry        Hash  service instance registrations {name: json_info}
     """
 
     def __init__(self, redis_url: str = "redis://localhost:6379/0"):
@@ -115,14 +117,14 @@ class ServiceRegistry:
         return self.get_config("mediamtx_rtsp_port", 8554)
 
     def get_simulator_api_port(self) -> int:
-        """从注册表读取模拟器实际注册的 API 端口"""
+        """Read the actual API port registered by the simulator from the registry"""
         info = self.get_service("simulator")
         if info:
             return info.get("api_port", 9997)
         return 9997
 
     def get_simulator_rtsp_port(self) -> int:
-        """从注册表读取模拟器实际注册的 RTSP 端口"""
+        """Read the actual RTSP port registered by the simulator from the registry"""
         info = self.get_service("simulator")
         if info:
             return info.get("rtsp_port", 8554)
@@ -224,7 +226,7 @@ class ServiceRegistry:
                 pass
 
     def register_mediamtx_owner(self, rtsp_port: int, api_port: int, pid: int):
-        """注册 MediaMTX 所有者信息"""
+        """Register MediaMTX owner information"""
         r = self._get_redis()
         if r is None:
             logger.warning("[Registry] Cannot register MediaMTX owner: Redis unavailable")
@@ -244,7 +246,7 @@ class ServiceRegistry:
             return False
 
     def get_mediamtx_owner(self) -> Optional[Dict]:
-        """获取 MediaMTX 所有者信息"""
+        """Get MediaMTX owner information"""
         r = self._get_redis()
         if r is None:
             return None
@@ -255,7 +257,7 @@ class ServiceRegistry:
             return None
 
     def is_mediamtx_owned_by(self, pid: int) -> bool:
-        """检查 MediaMTX 是否由指定 PID 拥有"""
+        """Check whether MediaMTX is owned by the given PID"""
         owner = self.get_mediamtx_owner()
         if owner is None:
             return False
@@ -266,7 +268,7 @@ class ServiceRegistry:
             self.set_config("mediamtx_api_port", 9997)
             self.set_config("mediamtx_rtsp_port", 8554)
         else:
-            # development 模式使用模拟器默认端口 (api=9996, rtsp=8555)
+            # development mode uses the simulator default ports (api=9996, rtsp=8555)
             self.set_config("mediamtx_api_port", 9996)
             self.set_config("mediamtx_rtsp_port", 8555)
 

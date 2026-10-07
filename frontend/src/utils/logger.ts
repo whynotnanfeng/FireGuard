@@ -2,21 +2,21 @@ import axios from 'axios'
 import { useAuthStore } from '@/stores/auth'
 
 /**
- * 结构化日志系统
- * 所有日志发送到后端存储，禁止在浏览器控制台输出
+ * Structured logging system
+ * All logs are sent to the backend for storage; nothing is printed to the browser console.
  */
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type LogCategory =
-  | 'stream'      // 视频流操作
-  | 'task'        // 任务管理
-  | 'playback'    // 播放相关
-  | 'websocket'   // WebSocket 连接
-  | 'hls'         // HLS 播放
-  | 'webrtc'      // WebRTC 播放
-  | 'ui'          // UI 交互
-  | 'api'         // API 调用
-  | 'system'      // 系统级
+  | 'stream'      // stream operations
+  | 'task'        // task management
+  | 'playback'    // playback related
+  | 'websocket'   // WebSocket connection
+  | 'hls'         // HLS playback
+  | 'webrtc'      // WebRTC playback
+  | 'ui'          // UI interaction
+  | 'api'         // API calls
+  | 'system'      // system level
 
 interface LogEntry {
   timestamp: string
@@ -76,7 +76,7 @@ class Logger {
       }
       await axios.post('/api/logs/batch', { logs: logsToSend }, { timeout: 5000, headers })
     } catch {
-      // 如果发送失败，丢弃日志，避免累积
+      // Drop the logs if sending fails, to avoid unbounded accumulation
     }
   }
 

@@ -1,5 +1,5 @@
 """
-测试新架构模块：OverlayInjector, ObjectTracker, EventProcessor
+Tests for the new architecture modules: OverlayInjector, ObjectTracker, EventProcessor
 """
 import pytest
 import numpy as np
