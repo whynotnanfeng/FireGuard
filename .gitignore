@@ -126,6 +126,9 @@ backend/verify_*.py
 backend/check_*.py
 _verify*.py
 
+# --- git history rewrite artefacts ---
+.git-rewrite/
+
 # --- OS / editor noise ---
 *.html.bak
 .DS_Store
