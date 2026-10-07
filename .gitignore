@@ -33,6 +33,7 @@ credentials.json
 .kiro/
 .cursor/
 .windsurf/
+.workbuddy/
 brain/
 scratch/
 plan_act_agent*/

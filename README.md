@@ -11,7 +11,8 @@ and serves the results through a web console for task management, model manageme
 live monitoring, and detection-event forensics.
 
 This repository is the English-language open-source release of **FireGuard Intelligent
-Fire Monitoring System V1.0** (registered name: FireGuard 火灾智能监测系统).
+Fire Monitoring System V1.0**, the name under which the project is registered for
+software copyright (registered pinyin name: *Huozai Renzhi Jiance Xitong*).
 
 ---
 
