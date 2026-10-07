@@ -69,9 +69,14 @@ frontend/.stylelintcache
 **/*.egg-info/
 .coverage
 .coverage.*
+**/.coverage
+**/.coverage.*
 coverage.xml
+**/coverage.xml
 htmlcov/
+**/htmlcov/
 .pytest_cache/
+**/.pytest_cache/
 
 # --- Project data & databases ---
 data/
