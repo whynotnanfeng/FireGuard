@@ -277,11 +277,27 @@ Never commit a populated `.env`; it is excluded from version control.
 | Backend API | 8000 |
 | Frontend dev server | 5173 |
 | Redis | 6379 |
-| MediaMTX RTSP | 8554 |
+| MediaMTX RTSP (backend) | 8554 |
 | MediaMTX HLS | 8888 |
 | MediaMTX WebRTC | 8889 |
-| MediaMTX control API | 9997 |
-| Stream simulator | 8001 |
+| MediaMTX control API (backend) | 9997 |
+| Stream simulator API | 8001 |
+| MediaMTX RTSP (simulator) | 8555 |
+| MediaMTX control API (simulator) | 9996 |
+
+### Start everything (three terminals)
+
+| Terminal | Working directory | Command | URL |
+|----------|-------------------|---------|-----|
+| 1 | `backend` | `uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload` | <http://localhost:8000/api/docs> |
+| 2 | `frontend` | `npm run dev` | <http://localhost:5173> |
+| 3 | `simulator` | `uvicorn main:app --host 0.0.0.0 --port 8001` | <http://localhost:8001> |
+
+On Windows, run the backend with `run_backend.bat` inside `backend/` — it finds a local
+`.venv`, `venv` or `env` automatically and falls back to the `python` on `PATH`, so no
+absolute interpreter path is needed.
+
+The simulator is optional — only start it if you have no physical camera available.
 
 ---
 
@@ -348,16 +364,29 @@ wall-clock time within a 50 ms tolerance.
 ## Stream Simulator
 
 `simulator/` contains a lightweight synthetic stream generator, useful for development
-when no physical camera is available.
+when no physical camera is available. It publishes uploaded video files over RTSP and
+exposes a small dashboard for monitoring stream health.
 
 ```bash
 cd simulator
+
+python -m venv .venv
+# Windows:   .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
+
 pip install -r requirements.txt
-python main.py
+
+# Windows
+.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8001
+# Linux/macOS
+python -m uvicorn main:app --host 0.0.0.0 --port 8001
 ```
 
-It publishes test patterns over RTSP and exposes a small dashboard for monitoring
-stream health.
+The dashboard is then available at <http://localhost:8001>.
+
+The simulator starts its own media gateway on RTSP `8555` / API `9996` (deliberately
+offset from the backend gateway on `8554` / `9997`, so both can run side by side). It
+also needs FFmpeg and a `mediamtx` binary on `PATH` (or under `bin/`).
 
 ---
 
