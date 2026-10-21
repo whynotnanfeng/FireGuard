@@ -1,0 +1,63 @@
+import axios from 'axios'
+import { message } from 'ant-design-vue'
+
+const request = axios.create({
+  baseURL: '/api',
+  timeout: 60000,
+})
+
+// Tasks being deleted whose requests must be blocked
+export const terminatingTasks = new Set<string>()
+
+request.interceptors.request.use((config) => {
+  if (config.url) {
+    for (const taskId of terminatingTasks) {
+      if (config.url.includes(`/tasks/${taskId}`)) {
+        console.warn(`[CircuitBreaker] Blocking request to terminating task: ${taskId}`)
+        const controller = new AbortController()
+        config.signal = controller.signal
+        controller.abort('Task is terminating')
+        break
+      }
+    }
+  }
+
+  const token = localStorage.getItem('token')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+request.interceptors.response.use(
+  (res) => res.data,
+  (err) => {
+    const status = err.response?.status
+    const detail = err.response?.data?.detail
+
+    // Avoid a redirect loop on the login page
+    if (status === 401) {
+      localStorage.removeItem('token')
+      const isLoginRequest = err.config?.url?.includes('/auth/login')
+      if (!isLoginRequest) {
+        window.location.href = '/login'
+      }
+      return Promise.reject(err)
+    }
+
+    const errorMsg =
+      typeof detail === 'string'
+        ? detail
+        : Array.isArray(detail)
+        ? detail.map((e: any) => e.msg).join('; ')
+        : err.message || 'Request failed'
+
+    // 409 and canceled errors are handled by the caller
+    if (status !== 409 && !axios.isCancel(err) && err.message !== 'canceled') {
+      message.error(errorMsg)
+    }
+    return Promise.reject(err)
+  }
+)
+
+export default request

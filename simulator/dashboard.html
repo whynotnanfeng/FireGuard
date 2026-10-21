@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FireGuard Stream Simulator PRO v2</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    
+    <style>
+        :root {
+            /* Theme tokens */
+            --primary-hue: 220;
+            --primary: oklch(60% 0.18 var(--primary-hue));
+            --primary-muted: oklch(60% 0.18 var(--primary-hue) / 0.1);
+            --bg: oklch(98% 0.01 var(--primary-hue));
+            --surface: oklch(100% 0 0);
+            --surface-secondary: oklch(96% 0.01 var(--primary-hue));
+            --border: oklch(0% 0 0 / 0.08);
+            --text: oklch(25% 0.02 var(--primary-hue));
+            --text-secondary: oklch(50% 0.02 var(--primary-hue));
+            --text-tertiary: oklch(70% 0.01 var(--primary-hue));
+            
+            --success: oklch(65% 0.15 150);
+            --warning: oklch(75% 0.15 80);
+            --error: oklch(60% 0.18 25);
+            
+            --radius-lg: 16px;
+            --radius-md: 12px;
+            --radius-sm: 8px;
+            --transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            --shadow: 0 4px 20px -4px oklch(0% 0 0 / 0.05), 0 2px 8px -2px oklch(0% 0 0 / 0.03);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            background-color: var(--bg);
+            background-image: 
+                radial-gradient(at 0% 0%, oklch(90% 0.05 var(--primary-hue) / 0.3) 0px, transparent 50%),
+                radial-gradient(at 100% 0%, oklch(92% 0.05 150 / 0.2) 0px, transparent 50%);
+            color: var(--text);
+            font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+            font-size: 14px;
+            line-height: 1.6;
+            min-height: 100vh;
+            padding: 32px 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* Header */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            padding: 0 4px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .logo-box {
+            width: 44px;
+            height: 44px;
+            background: var(--primary);
+            border-radius: var(--radius-md);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+            color: white;
+            box-shadow: 0 8px 16px var(--primary-muted);
+        }
+
+        .brand h1 {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .system-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: var(--surface);
+            padding: 6px 14px;
+            border-radius: 100px;
+            border: 1px solid var(--border);
+            font-size: 13px;
+            font-weight: 600;
+            box-shadow: var(--shadow);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--success);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.4); opacity: 0.6; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        /* Cards */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow);
+            margin-bottom: 32px;
+            overflow: hidden;
+        }
+
+        /* Upload */
+        .upload-card {
+            padding: 24px;
+            display: grid;
+            grid-template-columns: 1.2fr 1fr auto;
+            gap: 20px;
+            align-items: end;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .form-group label {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .input-wrapper {
+            position: relative;
+        }
+
+        /* Input icons only */
+        .input-wrapper > i:not(.custom-file-upload i) {
+            position: absolute;
+            left: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-tertiary);
+            pointer-events: none;
+        }
+
+        input[type="text"], input[type="file"], select {
+            width: 100%;
+            background: var(--surface-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px 10px 38px;
+            color: var(--text);
+            font-family: inherit;
+            font-size: 14px;
+            transition: var(--transition);
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--primary);
+            background: var(--surface);
+            box-shadow: 0 0 0 4px var(--primary-muted);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 10px 24px;
+            border-radius: var(--radius-sm);
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition);
+            border: 1px solid transparent;
+            font-family: inherit;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 4px 12px var(--primary-muted);
+        }
+
+        /* Grid and cards */
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            padding: 0 4px;
+        }
+
+        .section-header h2 {
+            font-size: 18px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .badge {
+            background: var(--primary-muted);
+            color: var(--primary);
+            padding: 2px 10px;
+            border-radius: 100px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .library-grid, .streams-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
+            gap: 24px;
+            margin-bottom: 48px;
+        }
+
+        .video-card, .stream-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            box-shadow: var(--shadow);
+            transition: var(--transition);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .video-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 30px -10px oklch(0% 0 0 / 0.1);
+        }
+
+        .custom-file-upload {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 18px;
+            background: var(--surface-secondary);
+            border: 2px dashed var(--border);
+            border-radius: var(--radius-sm);
+            transition: var(--transition);
+            color: var(--text-secondary);
+            font-weight: 600;
+            min-height: 44px;
+        }
+
+        .custom-file-upload:hover {
+            border-color: var(--primary);
+            background: oklch(from var(--primary) l c h / 0.05);
+            color: var(--primary);
+        }
+
+        .custom-file-upload i {
+            font-size: 20px;
+            color: var(--primary);
+            opacity: 0.8;
+            /* Override inherited absolute positioning */
+            position: static !important;
+            transform: none !important;
+        }
+
+        #fileNameDisplay {
+            font-size: 13px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 260px;
+        }
+
+        .card-header-v {
+            padding: 18px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: oklch(99% 0 0);
+        }
+
+        .grade-tag {
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .grade-tag.success { background: oklch(90% 0.1 150 / 0.3); color: var(--success); border: 1px solid oklch(var(--success) / 0.2); }
+        .grade-tag.warning { background: oklch(95% 0.1 80 / 0.3); color: var(--warning); border: 1px solid oklch(var(--warning) / 0.2); }
+        .grade-tag.error { background: oklch(90% 0.1 25 / 0.3); color: var(--error); border: 1px solid oklch(var(--error) / 0.2); }
+        .grade-tag.processing { background: var(--primary-muted); color: var(--primary); border: 1px solid oklch(var(--primary) / 0.2); }
+
+        .card-body-v {
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .meta-grid-v {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+            background: var(--surface-secondary);
+            padding: 12px;
+            border-radius: var(--radius-sm);
+        }
+
+        .meta-item-v { text-align: center; }
+        .meta-label { font-size: 9px; color: var(--text-tertiary); text-transform: uppercase; font-weight: 700; margin-bottom: 2px; }
+        .meta-val { font-size: 13px; font-weight: 600; }
+
+        .config-panel-v {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .config-row-v {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .field-v label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .field-v .hint { color: var(--primary); font-size: 10px; font-weight: 700; }
+
+        .card-actions-v {
+            padding: 16px 20px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 12px;
+            background: oklch(99% 0 0);
+        }
+
+        /* Streams */
+        .stream-card { position: relative; border-left: 4px solid var(--success); padding: 20px; }
+        .stream-header { display: flex; justify-content: space-between; margin-bottom: 12px; }
+        .rtsp-box {
+            background: var(--surface-secondary);
+            padding: 10px 14px;
+            border-radius: var(--radius-sm);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            color: var(--primary);
+            border: 1px solid var(--border);
+            margin-bottom: 12px;
+        }
+        .tag-pool { display: flex; flex-wrap: wrap; gap: 6px; }
+        .tag-item {
+            background: oklch(0% 0 0 / 0.04);
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        /* Overlay */
+        .overlay {
+            position: fixed;
+            inset: 0;
+            background: oklch(100% 0 0 / 0.8);
+            backdrop-filter: blur(8px);
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+        .spinner {
+            width: 36px; height: 36px;
+            border: 3px solid var(--primary-muted);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 12px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @media (max-width: 900px) {
+            .upload-card { grid-template-columns: 1fr; }
+            .library-grid, .streams-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div id="loadingText" style="font-weight: 600; color: var(--text-secondary);">Processing...</div>
+    </div>
+
+    <div class="container">
+        <header>
+            <div class="brand">
+                <div class="logo-box"><i class="bi bi-broadcast"></i></div>
+                <div>
+                    <h1>FireGuard Stream Simulator</h1>
+                    <p style="font-size: 11px; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">High-performance streaming simulation console</p>
+                </div>
+            </div>
+            <div class="system-status">
+                <div class="status-dot"></div>
+                System Ready · <span id="clock">00:00:00</span>
+            </div>
+        </header>
+
+        <!-- Upload -->
+        <div class="card upload-card">
+            <div class="form-group">
+                <label>Device ID</label>
+                <div class="input-wrapper">
+                    <i class="bi bi-display"></i>
+                    <input type="text" id="deviceName" placeholder="e.g. Warehouse 1 main camera">
+                </div>
+            </div>
+            <div class="form-group" style="flex: 1;">
+                <label>Video Source File</label>
+                <div class="upload-area-wrapper">
+                    <label for="fileInput" class="custom-file-upload">
+                        <i class="bi bi-cloud-arrow-up-fill"></i>
+                        <span id="fileNameDisplay">Click to select or drag a video file...</span>
+                    </label>
+                    <input type="file" id="fileInput" accept="video/*" style="display:none;" onchange="updateFileName(this)">
+                </div>
+            </div>
+            <button class="btn btn-primary" onclick="upload()">
+                <i class="bi bi-plus-lg"></i> Upload Source
+            </button>
+        </div>
+
+
+        <!-- Active streams -->
+        <div class="section-header">
+            <h2><i class="bi bi-activity"></i> Active Streams <span class="badge" id="activeCount">0</span></h2>
+        </div>
+        <div class="streams-grid" id="activeStreams"></div>
+
+        <!-- Video library -->
+        <div class="section-header">
+            <h2><i class="bi bi-collection-play"></i> Video Library</h2>
+        </div>
+        <div class="library-grid" id="videoLibrary"></div>
+    </div>
+
+    <script>
+        function showLoading(text = 'Processing...') {
+            document.getElementById('loadingText').innerText = text;
+            document.getElementById('loadingOverlay').style.display = 'flex';
+        }
+        function hideLoading() {
+            document.getElementById('loadingOverlay').style.display = 'none';
+        }
+
+        function formatBitrate(bps) {
+            if (!bps) return '-';
+            return (bps / 1000000).toFixed(1) + ' Mbps';
+        }
+
+        let lastVideoData = '';
+        let lastStreamData = '';
+
+        async function refresh() {
+            try {
+                const [vRes, sRes] = await Promise.all([fetch('/videos'), fetch('/streams')]);
+                const videos = await vRes.json();
+                const streams = await sRes.json();
+
+                const activeEl = document.activeElement;
+                const isInteracting = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'SELECT');
+
+                const videoDataStr = JSON.stringify(videos);
+                const streamDataStr = JSON.stringify(streams);
+                
+                const videosChanged = videoDataStr !== lastVideoData;
+                const streamsChanged = streamDataStr !== lastStreamData;
+
+                document.getElementById('activeCount').innerText = streams.length;
+                
+                if (streamsChanged && (!isInteracting || !document.getElementById('activeStreams').contains(activeEl))) {
+                    const streamsHtml = streams.map(s => `
+                        <div class="stream-card">
+                            <div class="stream-header">
+                                <div>
+                                    <h3 style="font-size: 16px; font-weight: 700;">${s.device_name || 'Unknown Device'}</h3>
+                                    <p style="font-size: 12px; color: var(--text-secondary);">${s.video_path.split(/[\\/]/).pop()}</p>
+                                </div>
+                                <button class="btn" style="background: oklch(90% 0.1 25 / 0.2); color: var(--error); padding: 4px 12px; font-size: 12px;" onclick="stopStream('${s.id}', this)">
+                                    <i class="bi bi-stop-fill"></i> Stop
+                                </button>
+                            </div>
+                            <div class="rtsp-box">
+                                <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.rtsp_url}</span>
+                                <i class="bi bi-copy" style="cursor:pointer;" onclick="copyUrl('${s.rtsp_url}', this)"></i>
+                            </div>
+                            <div class="tag-pool">
+                                <div class="tag-item"><i class="bi bi-camera-reels"></i> ${s.final_vcodec || s.vcodec}</div>
+                                <div class="tag-item"><i class="bi bi-soundwave"></i> ${s.acodec}</div>
+                                <div class="tag-item"><i class="bi bi-aspect-ratio"></i> ${s.resolution}</div>
+                                <div class="tag-item"><i class="bi bi-speedometer2"></i> ${s.fps > 0 ? s.fps + 'fps' : 'Source FPS'}</div>
+                                <div class="tag-item"><i class="bi bi-lightning"></i> ${s.bitrate}</div>
+                                <div class="tag-item"><i class="bi bi-cpu"></i> ${s.preset}</div>
+                                <div class="tag-item" style="color: var(--primary); font-weight: 700;">${s.transport.toUpperCase()}</div>
+                                ${s.hw_accel_used ? '<div class="tag-item" style="color: var(--success); font-weight: 700;"><i class="bi bi-gpu-card"></i> HW</div>' : ''}
+                            </div>
+                        </div>
+                    `).join('');
+                    document.getElementById('activeStreams').innerHTML = streamsHtml || '<div class="empty-zone" style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-tertiary);">No active streams</div>';
+                    lastStreamData = streamDataStr;
+                }
+
+                if (videosChanged && (!isInteracting || !document.getElementById('videoLibrary').contains(activeEl))) {
+                    const libraryHtml = videos.map(v => `
+                        <div class="video-card">
+                            <div class="card-header-v">
+                                <div>
+                                    <h3 style="font-size: 15px; font-weight: 700;">${v.device_name}</h3>
+                                    <p style="font-size: 11px; color: var(--text-tertiary);">${v.filename}</p>
+                                </div>
+                                <span class="grade-tag ${v.grade?.color || 'processing'}">${v.grade?.label || 'Parsing'}</span>
+                            </div>
+                            <div class="card-body-v">
+                                <div class="meta-grid-v">
+                                    <div class="meta-item-v"><div class="meta-label">Resolution</div><div class="meta-val">${v.width}x${v.height}</div></div>
+                                    <div class="meta-item-v"><div class="meta-label">Codec</div><div class="meta-val">${v.codec}</div></div>
+                                    <div class="meta-item-v"><div class="meta-label">Frame Rate</div><div class="meta-val">${v.fps || '-'}</div></div>
+                                    <div class="meta-item-v"><div class="meta-label">Bitrate</div><div class="meta-val">${formatBitrate(v.bit_rate)}</div></div>
+                                </div>
+                                
+                                <div class="config-panel-v">
+                                    <div class="field-v">
+                                        <label>Custom Stream Path <span class="hint">rtsp://ip/</span></label>
+                                        <input type="text" id="path_${v.file_id}" value="cam_${v.file_id.slice(0,4)}">
+                                    </div>
+                                    <div class="config-row-v">
+                                        <div class="field-v">
+                                            <label>Transport</label>
+                                            <select id="transport_${v.file_id}">
+                                                <option value="tcp" selected>TCP</option>
+                                                <option value="udp">UDP</option>
+                                            </select>
+                                        </div>
+                                        <div class="field-v">
+                                            <label>Hardware Encoder <span class="hint" id="hw_hint_${v.file_id}">Auto-detect</span></label>
+                                            <select id="hw_accel_${v.file_id}">
+                                                <option value="auto" selected>Auto (recommended)</option>
+                                                <option value="nvenc">NVIDIA NVENC</option>
+                                                <option value="qsv">Intel QuickSync</option>
+                                                <option value="amf">AMD AMF</option>
+                                                <option value="cpu">CPU (libx264)</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="config-row-v">
+                                        <div class="field-v">
+                                            <label>Video Codec <span class="hint">Source: ${v.codec}</span></label>
+                                            <select id="vcodec_${v.file_id}">
+                                                <option value="libx264">H.264</option>
+                                                <option value="libx265">H.265 (HEVC)</option>
+                                                <option value="copy">Original (Copy)</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="config-row-v">
+                                        <div class="field-v">
+                                            <label>Audio Codec</label>
+                                            <select id="acodec_${v.file_id}">
+                                                <option value="copy" selected>Original (Copy)</option>
+                                                <option value="aac">AAC</option>
+                                                <option value="none">No audio (None)</option>
+                                            </select>
+                                        </div>
+                                        <div class="field-v">
+                                            <label>Resolution <span class="hint">Source: ${v.width}x${v.height}</span></label>
+                                            <select id="res_${v.file_id}">
+                                                <option value="original" selected>Original</option>
+                                                <option value="3840x2160">3840x2160 (4K)</option>
+                                                <option value="2560x1440">2560x1440 (2K)</option>
+                                                <option value="1920x1080">1920x1080 (1080P)</option>
+                                                <option value="1280x720">1280x720 (720P)</option>
+                                                <option value="854x480">854x480 (480P)</option>
+                                                <option value="640x360">640x360 (360P)</option>
+                                                <option value="426x240">426x240 (240P)</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="config-row-v">
+                                        <div class="field-v">
+                                            <label>Frame Rate (FPS) <span class="hint">Source: ${v.fps || '-'}</span></label>
+                                            <select id="fps_${v.file_id}">
+                                                <option value="0" selected>Original</option>
+                                                <option value="60">60 FPS</option>
+                                                <option value="30">30 FPS</option>
+                                                <option value="25">25 FPS</option>
+                                                <option value="15">15 FPS</option>
+                                                <option value="10">10 FPS</option>
+                                                <option value="5">5 FPS</option>
+                                            </select>
+                                        </div>
+                                        <div class="field-v">
+                                            <label>Video Bitrate <span class="hint">Source: ${formatBitrate(v.bit_rate)}</span></label>
+                                            <select id="bitrate_${v.file_id}">
+                                                <option value="original" selected>Original</option>
+                                                <option value="8000k">8 Mbps</option>
+                                                <option value="4000k">4 Mbps</option>
+                                                <option value="1000k">1 Mbps</option>
+                                                <option value="500k">500 Kbps</option>
+                                                <option value="200k">200 Kbps</option>
+                                                <option value="100k">100 Kbps</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="field-v">
+                                        <label>Encoding Preset <span class="hint">Speed vs quality</span></label>
+                                        <select id="preset_${v.file_id}">
+                                            <option value="ultrafast">Ultrafast</option>
+                                            <option value="faster">Faster</option>
+                                            <option value="medium" selected>Medium (balanced)</option>
+                                            <option value="slow">Slow (quality)</option>
+                                        </select>
+                                    </div>
+                                    <input type="hidden" id="crf_${v.file_id}" value="23">
+                                </div>
+                            </div>
+                            <div class="card-actions-v">
+                                <button class="btn btn-primary" style="flex:1" onclick="startStream(this, '${v.file_id}')">
+                                    <i class="bi bi-play-fill"></i> Start Simulation
+                                </button>
+                                <button class="btn" style="border: 1px solid var(--border); color: var(--text-secondary);" onclick="deleteVideo('${v.file_id}')">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+                    `).join('');
+                    document.getElementById('videoLibrary').innerHTML = libraryHtml || '<div class="empty-zone" style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-tertiary);">Video library is empty</div>';
+                    lastVideoData = videoDataStr;
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        function updateFileName(input) {
+            const display = document.getElementById('fileNameDisplay');
+            if (input.files && input.files[0]) {
+                display.innerText = input.files[0].name;
+                display.style.color = 'var(--text)';
+            } else {
+                display.innerText = 'Select or drag a video file...';
+                display.style.color = 'var(--text-tertiary)';
+            }
+        }
+
+        async function upload() {
+            const fileInput = document.getElementById('fileInput');
+            const deviceInput = document.getElementById('deviceName');
+            const file = fileInput.files[0];
+            if(!file) return;
+            showLoading('Uploading and parsing video...');
+            const fd = new FormData();
+            fd.append('file', file);
+            fd.append('device_name', deviceInput.value || 'Unnamed Device');
+            try {
+                const res = await fetch('/videos/upload', { method: 'POST', body: fd });
+                if (res.ok) {
+                    fileInput.value = '';
+                    deviceInput.value = '';
+                    updateFileName(fileInput);
+                }
+            } catch (e) { alert('Upload failed: ' + e.message); } finally { hideLoading(); refresh(); }
+        }
+
+        async function startStream(btn, fileId) {
+            const originalHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Starting...';
+            let params = {
+                file_id: fileId,
+                stream_path: document.getElementById('path_' + fileId).value,
+                transport: document.getElementById('transport_' + fileId).value,
+                hw_accel: document.getElementById('hw_accel_' + fileId).value,
+                vcodec: document.getElementById('vcodec_' + fileId).value,
+                acodec: document.getElementById('acodec_' + fileId).value,
+                resolution: document.getElementById('res_' + fileId).value,
+                fps: parseFloat(document.getElementById('fps_' + fileId).value),
+                bitrate: document.getElementById('bitrate_' + fileId).value,
+                crf: parseInt(document.getElementById('crf_' + fileId).value),
+                preset: document.getElementById('preset_' + fileId).value
+            };
+            try {
+                const res = await fetch('/streams/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(params) });
+                if (!res.ok) { const err = await res.json(); alert('Failed to start: ' + (err.detail || 'Unknown error')); }
+            } catch (e) { alert('Network error'); } finally { btn.disabled = false; btn.innerHTML = originalHtml; refresh(); }
+        }
+
+        async function stopStream(id, btn) {
+            btn.disabled = true;
+            await fetch('/streams/' + id, { method: 'DELETE' });
+            refresh();
+        }
+
+        async function deleteVideo(id) { 
+            if(confirm('Permanently delete this video source?')) {
+                showLoading('Removing...');
+                await fetch('/videos/' + id, { method: 'DELETE' }); 
+                hideLoading();
+                refresh(); 
+            } 
+        }
+        
+        async function copyUrl(url, icon) {
+            try {
+                await navigator.clipboard.writeText(url);
+                icon.className = 'bi bi-check2 text-success';
+                setTimeout(() => { icon.className = 'bi bi-copy'; }, 2000);
+            } catch (err) { console.error(err); }
+        }
+
+        function updateClock() {
+            document.getElementById('clock').innerText = new Date().toLocaleTimeString('en-GB', { hour12: false });
+        }
+
+        async function init() {
+            refresh();
+            setInterval(refresh, 20000);
+            setInterval(updateClock, 1000);
+            updateClock();
+        }
+        init();
+    </script>
+</body>
+</html>

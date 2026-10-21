@@ -1,0 +1,37 @@
+# FireGuard backend dependencies
+# CPU: pip install -r requirements.txt
+# GPU: pip install -r requirements-gpu.txt
+
+# Web framework
+fastapi>=0.104.1,<1.0.0
+uvicorn[standard]>=0.24.0,<1.0.0
+python-multipart>=0.0.6
+
+# Database / ORM
+sqlmodel>=0.0.14,<1.0.0
+pydantic>=2.5.0,<3.0.0
+
+# Auth
+python-jose[cryptography]>=3.3.0,<4.0.0
+passlib[bcrypt]>=1.7.4,<2.0.0
+
+# Rate limiting
+slowapi>=0.1.9,<1.0.0
+
+# Inference (CPU)
+onnxruntime==1.20.0
+opencv-python>=4.8.1.78,<5.0.0
+numpy>=1.24.4,<2.0.0
+
+# GPU monitoring
+nvidia-ml-py>=12.535.133
+psutil>=5.9.0
+
+# Async / networking
+aiofiles>=23.2.0,<24.0.0
+websockets>=12.0,<14.0.0
+redis>=5.0.0,<6.0.0
+httpx>=0.24.0,<1.0.0
+
+# Configuration
+python-dotenv>=1.0.0,<2.0.0

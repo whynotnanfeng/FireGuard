@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.venv/
+venv/
+
+# Local Data & Logs
+logs/*
+!logs/.gitkeep
+data/*
+!data/.gitkeep
+*.db
+*.log
+
+# Environment
+.env
