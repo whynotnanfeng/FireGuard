@@ -29,7 +29,12 @@ def detect_hw_encoders(ffmpeg_path: str) -> dict:
 
 
 def resolve_hls_encoder(ffmpeg_path: str, priority: list[str] | None = None) -> tuple[str, bool]:
-    """Pick an HLS encoder. Returns (encoder_name, is_hw)."""
+    """
+    Select the optimal encoder for HLS recording.
+
+    Returns:
+        (encoder_name, is_hw): encoder name and whether it is hardware-accelerated
+    """
     encoders = detect_hw_encoders(ffmpeg_path)
     if priority is None:
         priority = ["nvenc", "qsv", "amf"]
@@ -46,19 +51,19 @@ def resolve_hls_encoder(ffmpeg_path: str, priority: list[str] | None = None) -> 
             logger.info(f"[HWAccel] HLS encoder resolved: {encoder_name}")
             return encoder_name, is_hw
 
-    logger.critical("[HWAccel] No hardware encoder (NVENC/QSV/AMF) detected. "
-                     "Hardware encoding is required for real-time HLS streaming.")
-    raise RuntimeError(
-        "No hardware encoder available. DetPlatform requires NVIDIA NVENC, "
-        "Intel QuickSync (QSV), or AMD AMF for real-time HLS encoding. "
-        "Please install a supported GPU or enable GPU passthrough."
+    logger.warning(
+        "[HWAccel] No hardware encoder (NVENC/QSV/AMF) detected. "
+        "Falling back to libx264; expect higher CPU usage per stream."
     )
+    return "libx264", False
 
 
 def build_hls_encode_args(encoder: str, is_hw: bool, fps: float = 15.0, hls_time: int = 1) -> list[str]:
-    """Build FFmpeg encode args for the chosen encoder.
+    """
+    Build FFmpeg encoding arguments based on the encoder type.
 
-    Unused in copy mode. GOP = fps * hls_time so every HLS segment starts with a keyframe.
+    Note: copy mode does not need these arguments; this function is only used when copy fails.
+    GOP = fps × hls_time, ensuring that every HLS segment starts with a keyframe.
     """
     args = ["-c:v", encoder]
     gop = int(fps * hls_time)
@@ -77,7 +82,7 @@ def build_hls_encode_args(encoder: str, is_hw: bool, fps: float = 15.0, hls_time
                 "-preset", "p1",
                 "-tune", "ll",
                 "-rc", "cbr",
-                "-b:v", "3M",       # 3M avoids blocking in complex scenes
+                "-b:v", "3M",       # Raised from 2M to 3M, no blocking artifacts in complex scenes
                 "-maxrate", "3M",
                 "-bufsize", "6M",    # 2-second buffer to absorb sudden scene changes
                 "-gpu", "0",

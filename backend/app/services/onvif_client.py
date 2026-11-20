@@ -1,8 +1,14 @@
 """
-ONVIF client for Profile S (streaming) devices.
+ONVIF standard device access module
 
-Works with common Hikvision, Dahua and Uniview cameras: RTSP URI lookup,
-device information, profiles and WS-Discovery.
+Follows the ONVIF Profile S (video streaming) and Profile G (recording) specifications.
+Compatible with mainstream IP cameras from Hikvision, Dahua, Uniview, etc.
+
+Usage:
+    devices = await ONVIFDevice.discover_devices()
+    device = ONVIFDevice(host="<camera_ip>", user="<username>", password="<password>")
+    rtsp_url = await device.get_stream_uri()
+    info = await device.get_device_info()
 """
 
 from typing import Optional
@@ -14,7 +20,15 @@ logger = logging.getLogger(__name__)
 
 
 class ONVIFDevice:
-    """ONVIF device connection settings and cached service proxies."""
+    """ONVIF device client
+
+    Attributes:
+        host: Device IP address
+        port: ONVIF service port (default 80)
+        user: Username
+        password: Password
+        auth_type: Authentication type ("digest" or "basic")
+    """
 
     def __init__(
         self,
@@ -36,7 +50,14 @@ class ONVIFDevice:
         self._executor = ThreadPoolExecutor(max_workers=2)
 
     def _create_service(self, service_type: str):
-        """Create a device, media or ptz service proxy."""
+        """Create an ONVIF service client
+
+        Args:
+            service_type: Service type ("device", "media", "ptz")
+
+        Returns:
+            ONVIFCamera: The ONVIF service client
+        """
         try:
             from onvif import ONVIFCamera
 
@@ -64,7 +85,14 @@ class ONVIFDevice:
             raise
 
     async def get_stream_uri(self, profile_token: Optional[str] = None) -> str:
-        """Return the RTSP URI, using the first profile when no token is given."""
+        """Get the RTSP stream address (ONVIF Media Service)
+
+        Args:
+            profile_token: Profile token; None means use the first one
+
+        Returns:
+            str: RTSP stream address
+        """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self._executor,
@@ -97,7 +125,11 @@ class ONVIFDevice:
         return response.Uri
 
     async def get_device_info(self) -> dict:
-        """Return manufacturer, model, firmware and serial fields."""
+        """Get device information (ONVIF Device Service)
+
+        Returns:
+            dict: Device information
+        """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self._executor,
@@ -120,7 +152,11 @@ class ONVIFDevice:
         }
 
     async def get_profiles(self) -> list:
-        """Return the device profiles with token, name and resolution."""
+        """Get the list of device profiles
+
+        Returns:
+            list: List of profiles
+        """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self._executor,
@@ -145,7 +181,14 @@ class ONVIFDevice:
 
     @staticmethod
     async def discover_devices(timeout: float = 5.0) -> list:
-        """Find NetworkVideoTransmitter devices via WS-Discovery; returns host/port/uuid."""
+        """Discover ONVIF devices on the LAN (WS-Discovery)
+
+        Args:
+            timeout: Discovery timeout in seconds
+
+        Returns:
+            list: List of devices, each element containing {"host": str, "port": int, "uuid": str}
+        """
         try:
             from wsdiscovery.discovery import ThreadedWSDiscovery
 

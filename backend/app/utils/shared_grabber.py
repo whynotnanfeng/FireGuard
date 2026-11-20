@@ -1,6 +1,18 @@
-"""Shared frame grabber registry.
+"""
+Shared frame grabber registry (V4.11)
 
-One decode per RTSP URL; frames fan out to every subscribed task.
+Industry-standard approach: decode the same RTSP URL only once and distribute frames to multiple consumers.
+Modeled after the design patterns of Nginx RTMP, MediaMTX, and the GStreamer tee plugin.
+
+Architecture:
+  rtsp://x/cam_a → SharedGrabber → NVDEC×1 → Task A, Task B, Task C
+  rtsp://y/cam_b → SharedGrabber → NVDEC×1 → Task D, Task E, Task F
+
+Usage:
+  grabber = grabber_registry.get_or_create(url, hw_accel, width, height, fps)
+  grabber.subscribe(task_id, frame_callback)
+  ...
+  grabber.unsubscribe(task_id)
 """
 
 import threading
@@ -48,7 +60,7 @@ class SharedGrabber:
             return self._latest_pts_ms
 
     def latest_frame_and_pts(self, timeout: float = 0.05) -> tuple[Optional[np.ndarray], float]:
-        """Atomically read frame and PTS, waiting up to timeout for a new frame."""
+        """Atomically read the frame and PTS, using a condition variable to wait for new frames and avoid polling latency"""
         with self._frame_ready:
             self._frame_ready.wait(timeout=timeout)
             frame = self._latest_frame.copy() if self._latest_frame is not None else None
@@ -118,7 +130,7 @@ class SharedGrabber:
 
     def _loop(self):
         consecutive_fail = 0
-        max_fail = 60  # ~3s window (60 x 50ms read sleep)
+        max_fail = 60  # ~3s fault tolerance window (60 × 50ms sleep ≈ 3s)
         consecutive_restarts = 0
         last_diag = time.time()
         last_restart_time = 0.0
@@ -162,7 +174,7 @@ class SharedGrabber:
                 continue
 
             if consecutive_restarts > 0 and time.time() - last_restart_time > 30:
-                consecutive_restarts = 0  # Reset after 30s of stable operation
+                consecutive_restarts = 0  # Reset the backoff counter after 30s of stable operation
 
             consecutive_fail = 0
             self._frame_count += 1

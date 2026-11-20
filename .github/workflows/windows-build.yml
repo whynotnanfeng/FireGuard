@@ -1,0 +1,92 @@
+name: windows-build
+
+# 发布构建：Rust 核心 + Vue 前端 + 三种安装包（基础 / GPU 附加 / 便携）。
+#
+# 触发：推送 v* tag，或在 Actions 页手动运行。
+# 说明：
+#   - testdata/ 被 git 忽略，金标准在 CI 中自动跳过（本地用 rust\golden.ps1 校验）。
+#   - GPU 附加包依赖 onnxruntime-gpu 与 CUDA/cuDNN 运行库；缺件时构建直接失败。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust format
+        run: cargo fmt --manifest-path rust\Cargo.toml --all -- --check
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path rust\Cargo.toml --workspace --all-targets -- -D warnings
+
+      - name: Dependency direction gate
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File rust\check-deps.ps1
+
+      - name: Rust tests
+        run: cargo test --manifest-path rust\Cargo.toml --workspace
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Prepare GPU runtime payload
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install onnxruntime-gpu nvidia-cudnn-cu12 nvidia-cublas-cu12
+          $capi = python -c "import onnxruntime, os; print(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi'))"
+          if (-not (Test-Path (Join-Path $capi "onnxruntime_providers_cuda.dll"))) {
+            throw "onnxruntime-gpu 安装后仍找不到 CUDA provider: $capi"
+          }
+          "ONNXRUNTIME_DIR=$capi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "FIREGUARD_REQUIRE_GPU=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build Rust distribution
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File packaging\build_rust.ps1 -SkipFrontend
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile installers
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) { $iscc = (Get-Command iscc -ErrorAction Stop).Source }
+          & $iscc packaging\installer\fireguard.iss
+          if (@(Get-ChildItem dist\cuda_runtime -Recurse -File -ErrorAction SilentlyContinue).Count -eq 0) {
+            throw "dist\cuda_runtime 为空，拒绝跳过 GPU 附加包"
+          }
+          & $iscc packaging\installer\cuda_runtime.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FireGuard-Windows
+          if-no-files-found: error
+          path: |
+            packaging/installer/Output/*.exe
+            dist/FireGuard-Portable.zip

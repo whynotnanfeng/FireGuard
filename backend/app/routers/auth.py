@@ -15,7 +15,7 @@ from app.limiter import limiter
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-# Schemas
+# ── Schemas ──────────────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
     username: str
@@ -38,11 +38,12 @@ class UserResponse(BaseModel):
     created_at: str
 
 
-# Endpoints
+# ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/register", response_model=UserResponse, status_code=201)
 @limiter.limit("5/minute")
 def register(request: Request, body: RegisterRequest, session: Session = Depends(get_session)):
+    # Check username already taken
     existing = session.exec(select(User).where(User.username == body.username)).first()
     if existing:
         raise HTTPException(status_code=400, detail="Username already taken")

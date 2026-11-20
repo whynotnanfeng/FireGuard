@@ -12,9 +12,10 @@ if TYPE_CHECKING:
 
 
 class TaskModel(SQLModel, table=True):
-    """Task-model association for multi-model tasks.
+    """Task-model association table: supports multi-model task configuration.
 
-    Single-model tasks use Task.model_id and leave this table empty.
+    Each record represents one model within a task and its fusion configuration.
+    Single-model tasks stay compatible through Task.model_id and do not use this table.
     """
 
     __tablename__ = "task_models"

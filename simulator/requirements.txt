@@ -1,5 +1,7 @@
-# FireGuard simulator dependencies
-# Requires FFmpeg and MediaMTX.
+# ============================================
+# FireGuard Simulator - Python Dependencies
+# ============================================
+# Simulated stream service dependencies (lightweight; requires FFmpeg and MediaMTX only)
 
 fastapi>=0.104.1,<1.0.0
 uvicorn[standard]>=0.24.0,<1.0.0

@@ -1,5 +1,7 @@
 """
-MediaMTX proxy channel management.
+Media gateway manager
+
+Uses the streaming service abstraction layer, supporting the MediaMTX streaming service.
 """
 import logging
 import asyncio
@@ -12,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class MediaGatewayManager:
-    """Creates and removes per-task proxy paths on the streaming server."""
+    """Manages dynamic proxy channels for the streaming service (with namespace isolation)"""
 
     def __init__(self, service_type: Optional[str] = None):
         self.service_type = service_type or "mediamtx"
@@ -21,14 +23,23 @@ class MediaGatewayManager:
 
     @property
     def service(self) -> StreamService:
-        """Create the stream service on first use."""
+        """Lazily instantiate the streaming service"""
         if self._service is None:
             self._service = create_stream_service(self.service_type)
             logger.info(f"[Gateway] Stream service initialized: {self.service_type}")
         return self._service
 
     def register_proxy(self, task_id: str, raw_url: str, channel_idx: int = 0) -> str:
-        """Return the proxy URL for the task channel, or raw_url if proxying is skipped."""
+        """Register a proxy stream
+
+        Args:
+            task_id: Task ID
+            raw_url: Raw stream URL
+            channel_idx: Channel index (0=RGB, 1=IR)
+
+        Returns:
+            str: The proxied stream URL
+        """
         if not raw_url.startswith(("rtsp://", "http://", "https://", "rtmp://")):
             return raw_url
 
@@ -42,8 +53,8 @@ class MediaGatewayManager:
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # Called from a worker thread while the loop runs: block until the
-                # path exists, otherwise FFmpeg would start before registration.
+                # Called from a thread while the loop is already running, so we must
+                # block for the result; otherwise FFmpeg starts before registration finishes
                 from concurrent.futures import TimeoutError
                 future = asyncio.run_coroutine_threadsafe(
                     self.service.register_stream(stream_path, raw_url), loop
@@ -58,7 +69,7 @@ class MediaGatewayManager:
                     self.service.register_stream(stream_path, raw_url)
                 )
         except RuntimeError:
-            # No running loop; run the coroutine directly.
+            # Usually no loop exists in this case, so try running it directly
             success = asyncio.run(
                 self.service.register_stream(stream_path, raw_url)
             )
@@ -74,7 +85,12 @@ class MediaGatewayManager:
         return raw_url
 
     def unregister_proxy(self, task_id: str, channel_count: int = 1):
-        """Remove the proxy paths for the given channel count."""
+        """Unregister proxy streams
+
+        Args:
+            task_id: Task ID
+            channel_count: Number of channels
+        """
         import asyncio
 
         for i in range(channel_count):
@@ -97,19 +113,26 @@ class MediaGatewayManager:
             logger.info(f"[Gateway] Unregistered path: {stream_path}")
 
     def clear_all_proxies(self):
-        """Deprecated: unregister individual paths instead."""
+        """Clean up all proxy streams"""
         logger.warning(
             "[Gateway] clear_all_proxies() is deprecated. "
             "Use stream service's individual unregister methods."
         )
 
     def close(self):
-        """Drop the stream service handle."""
+        """Close the gateway manager"""
         self._service = None
         logger.info("[Gateway] MediaGatewayManager closed gracefully.")
 
     def _is_local_stream(self, url: str) -> bool:
-        """True if the URL points at this host."""
+        """Check whether the stream is local
+
+        Args:
+            url: Stream URL
+
+        Returns:
+            bool: True if the stream is local
+        """
         return "127.0.0.1" in url or "localhost" in url
 
 

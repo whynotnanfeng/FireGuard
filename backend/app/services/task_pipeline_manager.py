@@ -1,9 +1,8 @@
 """
-Server-side frame annotation and HLS writing.
+Server-side frame embedding renderer - frame-accurate detection box alignment
 
-Draws detections into frames via OverlayInjector and feeds AnnotatedHLSWriter,
-alongside tracking and event recording. Output is 720p at 10fps to keep CPU load
-low enough to avoid stutter.
+Restores AnnotatedHLSWriter + OverlayInjector, coexisting with tracker/event_processor.
+720p output at 10fps reduces CPU load and avoids the earlier stuttering problem.
 """
 
 from __future__ import annotations
@@ -159,7 +158,7 @@ class TaskPipelineManager:
         logger.info(f"[TaskPipeline-{self.task_id}] Stopped")
 
     def _flush_active_tracks(self):
-        """Emit LEAVE for every active track so no ENTER record stays open."""
+        """On stop, generate LEAVE events for all active tracks so no ENTER record is left orphaned"""
         import time as _time
 
         active_ids = list(self.tracker.tracks.keys())

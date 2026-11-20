@@ -31,7 +31,12 @@ def _parse_ntp_response(data: bytes) -> float:
 
 
 def query_ntp_offset(server: str = DEFAULT_NTP_SERVER, timeout: float = 3.0) -> float | None:
-    """Return the (local - NTP) offset in seconds, or None on failure."""
+    """
+    Query an NTP server for the offset between the local clock and NTP time (in seconds).
+
+    Returns:
+        offset_seconds: offset between local time and NTP time (seconds), None if the query failed
+    """
     try:
         start = time.time()
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -50,7 +55,12 @@ def query_ntp_offset(server: str = DEFAULT_NTP_SERVER, timeout: float = 3.0) -> 
 
 
 def query_ntp_offset_with_fallback(timeout: float = 3.0) -> float | None:
-    """Try each fallback NTP server. Return the first offset, or None if all fail."""
+    """
+    [Three-tier hybrid calibration - tier 1]: NTP query with fallback servers
+
+    Returns:
+        offset_seconds: offset between local time and NTP time (seconds), None if all servers failed
+    """
     for server in FALLBACK_NTP_SERVERS:
         offset = query_ntp_offset(server, timeout)
         if offset is not None:
@@ -62,7 +72,12 @@ def query_ntp_offset_with_fallback(timeout: float = 3.0) -> float | None:
 
 
 class ClockMonitor:
-    """SNTP clock offset monitor. It never changes the system clock; it samples the offset and alerts on drift."""
+    """
+    Pure-Python SNTP clock offset monitor.
+
+    Does not modify the system clock; it only detects the offset periodically and raises alerts.
+    Used to ensure the accuracy of wall clock timestamps.
+    """
 
     def __init__(self, ntp_server: str = DEFAULT_NTP_SERVER, check_interval: int = CHECK_INTERVAL):
         self.ntp_server = ntp_server
@@ -72,14 +87,14 @@ class ClockMonitor:
         self._last_offset_ms: float = 0.0
         self._offset_history: list[float] = []
         self._max_history = 20
-        # Offset distribution statistics
+        # [P0-3 improvement]: time audit log - record NTP offset distribution statistics
         self._offset_stats = {
             "count": 0,
             "sum": 0.0,
             "sum_sq": 0.0,
             "min": float("inf"),
             "max": float("-inf"),
-            "last_5_values": [],
+            "last_5_values": [],  # The 5 most recent offset values
         }
 
     @property
@@ -93,7 +108,10 @@ class ClockMonitor:
         return sum(self._offset_history) / len(self._offset_history)
 
     def get_offset_stats(self) -> dict:
-        """Return mean, rms, min and max offsets in ms."""
+        """
+        Returns:
+            dict: statistics including mean, rms, min, max, count, etc.
+        """
         stats = self._offset_stats
         if stats["count"] == 0:
             return {"mean": 0.0, "rms": 0.0, "min": 0.0, "max": 0.0, "count": 0}

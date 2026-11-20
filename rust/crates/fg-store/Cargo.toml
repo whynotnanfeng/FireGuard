@@ -1,0 +1,13 @@
+[package]
+name = "fg-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "FireGuard 存储：SQLite 连接、事务、数据行模型与保留清理"
+
+[dependencies]
+fg-domain = { path = "../fg-domain" }
+anyhow = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }

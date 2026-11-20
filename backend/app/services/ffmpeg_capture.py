@@ -1,31 +1,49 @@
 """
-RTSP capture through an FFmpeg subprocess.
+FFmpeg subprocess video capture module
 
-Reads raw BGR frames from stdout. PTS is derived from wall-clock elapsed time
-rather than frame counts, so a looped or slow source does not drift.
+Replaces OpenCV VideoCapture, providing more reliable RTSP stream reading.
+Modelled on MediaMTX's FFmpeg invocation pattern.
+
+Core improvement: uses the PTS timestamps output by FFmpeg, ensuring timestamps
+reset correctly when the video loops.
+
+Usage:
+    capture = FFmpegCapture(rtsp_url="rtsp://127.0.0.1:8554/live/cam1")
+    capture.start()
+    success, frame, pts_ms = capture.read_frame()
+    capture.stop()
 """
 
 import os
 import sys
 import subprocess
 import logging
+import re
 import time
 import threading
 import queue
-import re
 from typing import Optional
 import numpy as np
 
 from app.config import config
+from app.utils.media_clock import MediaClock
 
 logger = logging.getLogger(__name__)
 
-# Process-level cache of decoder availability.
+# Hardware decoder detection result cache (process-level)
 _hw_decoder_cache: dict = {}
 
 
 def detect_hw_decoders(ffmpeg_path: str) -> dict:
-    """Return which hardware decoders exist, cached per ffmpeg path."""
+    """Detect all available hardware decoders and return the detection results (cached)
+
+    Args:
+        ffmpeg_path: Path to the FFmpeg executable
+
+    Returns:
+        dict: Availability of the nvdec, qsv and amf decoders
+    """
+    # Use ffmpeg_path as the cache key
     cache_key = ffmpeg_path
     if cache_key in _hw_decoder_cache:
         return _hw_decoder_cache[cache_key]
@@ -47,7 +65,15 @@ def detect_hw_decoders(ffmpeg_path: str) -> dict:
 
 
 def resolve_hw_accel(hw_accel_config: str, hw_decoders: dict) -> tuple[str, bool]:
-    """Resolve the configured accelerator to an hwaccel name; ("", False) means CPU."""
+    """Select the optimal hardware acceleration strategy based on user configuration and hardware availability
+
+    Args:
+        hw_accel_config: User configuration (auto/nvenc/qsv/amf/cpu)
+        hw_decoders: Hardware decoder detection results
+
+    Returns:
+        tuple: (hwaccel_param, hwaccel_device_param), or ("", "") meaning no hardware acceleration
+    """
     if hw_accel_config == "cpu":
         return "", False
 
@@ -78,7 +104,7 @@ def resolve_hw_accel(hw_accel_config: str, hw_decoders: dict) -> tuple[str, bool
             )
             return "", False
 
-    # Auto: take the first available decoder.
+    # auto strategy: select automatically by priority
     if hw_decoders["nvdec"]:
         logger.info("[FFmpegCapture] Auto-selected CUDA hardware decoder")
         return "cuda", True
@@ -94,10 +120,17 @@ def resolve_hw_accel(hw_accel_config: str, hw_decoders: dict) -> tuple[str, bool
 
 
 def check_rtsp_reachable(rtsp_url: str, timeout: float = 3.0) -> bool:
-    """Check RTSP reachability in two stages: a TCP connect, then a short ffprobe handshake.
+    """Quickly check whether an RTSP source is reachable (two-stage validation: TCP socket + ffprobe)
 
-    Stage 1 rules out an unreachable host or port. Stage 2 catches an open port with
-    a broken RTSP service.
+    Stage 1: TCP connect (1.5s timeout) rules out unreachable host/port
+    Stage 2: ffprobe validates the RTSP handshake (3s timeout), ruling out an open port with a broken service
+
+    Args:
+        rtsp_url: RTSP address
+        timeout: ffprobe timeout in seconds
+
+    Returns:
+        bool: True if the RTSP source is reachable
     """
     import socket as _socket
     from urllib.parse import urlparse
@@ -106,23 +139,20 @@ def check_rtsp_reachable(rtsp_url: str, timeout: float = 3.0) -> bool:
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 554
 
-    # Stage 1: TCP connect.
+    # Stage 1: fast TCP socket check
     try:
         sock = _socket.create_connection((host, port), timeout=1.5)
         sock.close()
     except Exception:
         return False
 
-    # Stage 2: probe only stream existence. A live RTSP stream has no duration, so
-    # ffprobe may exit non-zero even after a successful handshake; any output counts.
-    project_root = config.BASE_DIR.parent
-    if os.name == "nt":
-        ffprobe_bin = os.path.join(project_root, "bin", "ffprobe.exe")
-    else:
-        ffprobe_bin = "ffprobe"
+    # Stage 2: lightweight ffprobe validation (only probes whether the stream exists, without analysing the full duration)
+    # Note: an RTSP live stream has no fixed duration, so ffprobe may return non-zero while having actually connected successfully
+    # Therefore -show_entries stream=codec_type is used for minimal probing, accepting any result with output
+    ffprobe_bin = config.FFPROBE_PATH if os.name == "nt" else "ffprobe"
 
     if not os.path.exists(ffprobe_bin):
-        return True  # TCP is up; ffprobe is unavailable.
+        return True  # TCP connected; assume reachable when ffprobe is unavailable
 
     cmd = [
         ffprobe_bin,
@@ -140,14 +170,19 @@ def check_rtsp_reachable(rtsp_url: str, timeout: float = 3.0) -> bool:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout + 2
         )
-        # Any stdout output means the source answered; live streams may still exit non-zero.
+        # Any stdout output (such as "video" or "N/A") means the RTSP source is reachable
+        # returncode may be non-zero, which is normal behaviour for live streams
         return bool(result.stdout.strip() or result.returncode == 0)
     except (subprocess.TimeoutExpired, Exception):
         return False
 
 
 class FFmpegCapture:
-    """Reads raw BGR frames from an FFmpeg subprocess attached to an RTSP stream."""
+    """FFmpeg subprocess video capture
+
+    Reads an RTSP stream through an FFmpeg subprocess and outputs raw BGR frames to a pipe.
+    Offers better exception recovery than OpenCV VideoCapture.
+    """
 
     def __init__(
         self,
@@ -157,7 +192,6 @@ class FFmpegCapture:
         fps: float = 15.0,
         transport: str = "tcp",
         reconnect_delay: float = 5.0,
-        cumulative_offset: float = 0.0,
         hw_accel: str = "auto",
     ):
         self.rtsp_url = rtsp_url
@@ -166,10 +200,10 @@ class FFmpegCapture:
         self.fps = fps
         self.transport = transport
         self.reconnect_delay = reconnect_delay
-        self._cumulative_offset = cumulative_offset
         self.hw_accel_config = hw_accel
 
         self.process: Optional[subprocess.Popen] = None
+        self._stderr_file = None
         self._frame_size = width * height * 3
         self._frame_count = 0
         self._reconnect_count = 0
@@ -177,35 +211,52 @@ class FFmpegCapture:
 
         self._read_queue: Optional[queue.Queue] = None
         self._read_thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
         self._read_timeout = 2.0
+
+        # Real decode timestamps parsed from `showinfo`, keyed by frame index.
+        # Pairing by index stays correct even when frames are dropped locally.
+        self._pts_by_seq: dict[int, float] = {}
+        self._pts_lock = threading.Lock()
+        self._raw_read_seq = 0
+        self._clock = MediaClock(fallback_interval_ms=1000.0 / fps if fps > 0 else 66.0)
+        self._showinfo_re = re.compile(r"n:\s*(\d+).*pts_time:\s*(-?[0-9.]+)")
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._session_start_time = time.time()
         self._last_wall_clock = 0.0
-        self._pts_reset_count = 0
         self._video_duration_ms = 0.0
         self._frame_rate = fps
 
         self._hw_decoders = {}
         self._hwaccel_param = ""
         self._use_hw_accel = False
-        self._pts_offset = 0.0  # keeps PTS continuous across restarts
 
     def start(self) -> bool:
-        """Start the FFmpeg subprocess; False if it cannot launch."""
-        # Bundled FFmpeg lives in <project_root>/bin; BASE_DIR points at backend/.
-        project_root = config.BASE_DIR.parent
-        if os.name == "nt":
-            ffmpeg_bin = os.path.join(project_root, "bin", "ffmpeg.exe")
-        else:
-            ffmpeg_bin = "ffmpeg"
+        """Start the FFmpeg subprocess
+
+        Returns:
+            bool: True if startup succeeded
+        """
+        # restart() reuses this instance: clear the stop flag and the per-process
+        # PTS index. The MediaClock is intentionally kept so the session timeline
+        # stays monotonic across reconnects.
+        self._stop_event.clear()
+        self._raw_read_seq = 0
+        with self._pts_lock:
+            self._pts_by_seq.clear()
+        self._session_start_time = time.time()
+
+        # Use the FFmpeg executable bundled with the project (bin directory).
+        # config.FFMPEG_PATH resolves both source-tree and _internal layouts.
+        ffmpeg_bin = config.FFMPEG_PATH if os.name == "nt" else "ffmpeg"
 
         if not os.path.exists(ffmpeg_bin):
             logger.error(f"[FFmpegCapture] FFmpeg binary not found at: {ffmpeg_bin}")
             return False
 
-        # Pick the accelerator once per capture instance.
+        # Detect hardware decoders and select the optimal strategy
         self._hw_decoders = detect_hw_decoders(ffmpeg_bin)
         self._hwaccel_param, self._use_hw_accel = resolve_hw_accel(
             self.hw_accel_config, self._hw_decoders
@@ -213,8 +264,11 @@ class FFmpegCapture:
 
         cmd = [
             ffmpeg_bin,
+            "-hide_banner",
+            "-nostats",
         ]
 
+        # Add hardware acceleration parameters
         if self._use_hw_accel:
             if self._hwaccel_param == "cuda":
                 cmd.extend(["-hwaccel", "cuda", "-c:v", "h264_cuvid"])
@@ -235,15 +289,17 @@ class FFmpegCapture:
                 "ignore_err",
                 "-i",
                 self.rtsp_url,
-                "-an",  # no audio, lower overhead
+                "-an",  # Explicitly disable audio to reduce overhead
                 "-vf",
-                f"scale={self.width}:{self.height}",  # fixed size keeps _frame_size correct for mixed-resolution sources
+                # showinfo emits the real decode PTS per frame on stderr; it is
+                # parsed by _stderr_reader and fed into the media clock.
+                f"scale={self.width}:{self.height},showinfo",
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
                 "bgr24",
                 "-fps_mode",
-                "passthrough",
+                "passthrough",  # Updated from -vsync 0
                 "pipe:1",
             ]
         )
@@ -262,18 +318,25 @@ class FFmpegCapture:
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
+            if self._stderr_file:
+                try:
+                    self._stderr_file.close()
+                except Exception:
+                    pass
+            self._stderr_file = open(stderr_log, "a", encoding="utf-8")
+
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=open(stderr_log, "a", encoding="utf-8"),
-                bufsize=self._frame_size * 10,
+                stderr=subprocess.PIPE,
+                bufsize=max(self._frame_size, 1 << 20),
                 startupinfo=startupinfo,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
                 if os.name == "nt"
                 else 0,
             )
 
-            # Poll for readiness; a fixed sleep would add ~600ms to every start.
+            # Poll for readiness instead of fixed 1s sleep (saves ~600ms on average)
             for _ in range(10):
                 time.sleep(0.1)
                 if self.process.poll() is not None:
@@ -283,13 +346,18 @@ class FFmpegCapture:
                     return False
 
             if sys.platform == "win32":
-                self._read_queue = queue.Queue(maxsize=30)  # deep enough to absorb jitter
+                self._read_queue = queue.Queue(maxsize=30)  # Longer queue to buffer jitter
                 self._read_thread = threading.Thread(
                     target=self._read_worker, daemon=True
                 )
                 self._read_thread.start()
 
-            # Duration probing runs in the background so startup is not delayed.
+            self._stderr_thread = threading.Thread(
+                target=self._stderr_reader, daemon=True
+            )
+            self._stderr_thread.start()
+
+            # Probe the video duration asynchronously (does not block startup)
             threading.Thread(target=self._probe_duration_async, daemon=True).start()
 
             logger.info(
@@ -302,7 +370,7 @@ class FFmpegCapture:
             return False
 
     def _probe_duration_async(self):
-        """Probe duration off the main thread."""
+        """Probe the video duration asynchronously"""
         duration = self._probe_video_duration()
         if duration > 0:
             self._video_duration_ms = duration * 1000
@@ -312,31 +380,73 @@ class FFmpegCapture:
             )
 
     def _read_worker(self):
-        """Windows reader thread: move FFmpeg stdout into a bounded queue."""
+        """Reader worker thread on Windows.
+
+        Every raw frame is tagged with a sequence number so the real PTS parsed
+        from stderr can still be matched after frames are dropped from the queue.
+        """
         while not self._stop_event.is_set():
             try:
                 if self.process and self.process.stdout:
                     raw = self.process.stdout.read(self._frame_size)
                     if raw:
+                        seq = self._raw_read_seq
+                        self._raw_read_seq += 1
                         try:
-                            self._read_queue.put(raw, timeout=1.0)
+                            self._read_queue.put((seq, raw), timeout=1.0)
                         except queue.Full:
                             try:
                                 self._read_queue.get_nowait()
-                                self._read_queue.put(raw, timeout=0.5)
+                                self._read_queue.put((seq, raw), timeout=0.5)
                             except queue.Empty:
                                 pass
             except Exception as e:
                 logger.warning(f"[FFmpegCapture] Read worker error: {e}")
                 time.sleep(0.1)
 
+    def _stderr_reader(self):
+        """Drain FFmpeg stderr, persist it, and extract per-frame decode PTS."""
+        stream = self.process.stderr if self.process else None
+        while not self._stop_event.is_set():
+            try:
+                line = stream.readline() if stream else b""
+            except Exception:
+                return
+            if not line:
+                return
+            if not isinstance(line, (bytes, bytearray, str)):
+                # Mocked process in tests: stop instead of spinning.
+                return
+
+            text = line.decode("utf-8", "replace") if isinstance(line, (bytes, bytearray)) else line
+            if self._stderr_file:
+                try:
+                    self._stderr_file.write(text)
+                except Exception:
+                    pass
+
+            match = self._showinfo_re.search(text)
+            if match:
+                seq = int(match.group(1))
+                pts_ms = float(match.group(2)) * 1000.0
+                with self._pts_lock:
+                    self._pts_by_seq[seq] = pts_ms
+                    if len(self._pts_by_seq) > 600:
+                        for key in sorted(self._pts_by_seq)[:-600]:
+                            del self._pts_by_seq[key]
+
+    def _take_pts(self, seq: int) -> Optional[float]:
+        """Pop the decode PTS for a frame index, if it has been parsed yet."""
+        with self._pts_lock:
+            return self._pts_by_seq.pop(seq, None)
+
     def _probe_video_duration(self) -> float:
-        """Return the stream duration in seconds, 0 when unavailable."""
-        project_root = config.BASE_DIR.parent
-        if os.name == "nt":
-            ffprobe_bin = os.path.join(project_root, "bin", "ffprobe.exe")
-        else:
-            ffprobe_bin = "ffprobe"
+        """Get the video duration in seconds using ffprobe
+
+        Returns:
+            float: Video duration in seconds, 0 on failure
+        """
+        ffprobe_bin = config.FFPROBE_PATH if os.name == "nt" else "ffprobe"
 
         if not os.path.exists(ffprobe_bin):
             logger.warning(
@@ -359,7 +469,7 @@ class FFmpegCapture:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0 and result.stdout.strip():
                 duration_str = result.stdout.strip()
-                # Live streams report N/A here.
+                # RTSP live streams return N/A, which is normal behaviour
                 if duration_str.upper() == "N/A":
                     logger.debug(
                         f"[FFmpegCapture] RTSP live stream has no fixed duration (expected)"
@@ -376,17 +486,24 @@ class FFmpegCapture:
         return 0.0
 
     def read_frame(self) -> tuple[bool, Optional[np.ndarray], float]:
-        """Return (success, frame, pts_ms)."""
+        """Read one frame.
+
+        Returns:
+            tuple: (success, frame, media_pts_ms). ``media_pts_ms`` is the
+            monotonic session timeline produced by :class:`MediaClock` — it is
+            derived from the real decode PTS, not from wall-clock time.
+        """
         if not self.process or self.process.poll() is not None:
             return False, None, 0.0
 
         try:
             raw = None
+            seq: Optional[int] = None
 
             if sys.platform == "win32":
                 if self._read_queue:
                     try:
-                        raw = self._read_queue.get(timeout=self._read_timeout)
+                        seq, raw = self._read_queue.get(timeout=self._read_timeout)
                     except queue.Empty:
                         return False, None, 0.0
             else:
@@ -397,6 +514,8 @@ class FFmpegCapture:
                 )
                 if ready and self.process.stdout:
                     raw = self.process.stdout.read(self._frame_size)
+                    seq = self._raw_read_seq
+                    self._raw_read_seq += 1
 
             if not raw or len(raw) < self._frame_size:
                 return False, None, 0.0
@@ -405,28 +524,29 @@ class FFmpegCapture:
                 (self.height, self.width, 3)
             )
 
+            # Real decode PTS may not have been parsed yet; MediaClock then
+            # extrapolates with the smoothed frame interval.
+            decode_pts = self._take_pts(seq) if seq is not None else None
+
             with self._lock:
+                previous_wall_clock = self._last_wall_clock
                 self._frame_count += 1
                 current_wall_clock = time.time()
                 self._last_wall_clock = current_wall_clock
 
-                # Derive PTS from elapsed wall-clock time: frame-count based PTS runs
-                # ahead of real time whenever the source delivers fewer frames than target fps.
-                elapsed_s = current_wall_clock - self._session_start_time
-                pts_ms = elapsed_s * 1000.0 + self._pts_offset
-                pts_ms += self._cumulative_offset * 1000
+                pts_ms = self._clock.tick(decode_pts)
 
                 if self._frame_count % 500 == 0:
+                    source = "extrapolated" if decode_pts is None else f"{decode_pts:.0f}"
                     logger.info(
                         f"[DIAG-PTS] frame={self._frame_count}, "
-                        f"pts_ms={pts_ms:.0f}, "
-                        f"elapsed={(current_wall_clock - self._session_start_time):.2f}s, "
-                        f"video_duration={self._video_duration_ms / 1000:.2f}s, "
-                        f"pts_reset_count={self._pts_reset_count}, "
-                        f"pts_offset={self._pts_offset:.0f}ms"
+                        f"media_pts={pts_ms:.0f}, "
+                        f"decode_pts={source}, "
+                        f"loops={self._clock.loops}, "
+                        f"video_duration={self._video_duration_ms / 1000:.2f}s"
                     )
 
-                # Capture diagnostics every 10 s.
+                # Output capture diagnostics every 10 seconds
                 if not hasattr(self, "_last_capture_diag"):
                     self._last_capture_diag = 0.0
                 if current_wall_clock - self._last_capture_diag >= 10.0:
@@ -443,22 +563,20 @@ class FFmpegCapture:
                         f"reconnects={self._reconnect_count} "
                         f"ffmpeg_alive={ffmpeg_alive} "
                         f"hw={'cuda' if self._use_hw_accel else 'cpu'} "
-                        f"pts_ms={pts_ms:.0f}"
+                        f"media_pts={pts_ms:.0f} "
+                        f"loops={self._clock.loops}"
                     )
 
-                # Frame gap diagnostics: logged when a gap exceeds 3x the frame interval,
-                # which exposes stalls at simulator loop boundaries.
-                if self._last_wall_clock and self._frame_count > 1:
-                    gap_ms = (current_wall_clock - self._last_wall_clock) * 1000
+                # Frame gap diagnostics — logged when the gap exceeds 3x the frame interval
+                if previous_wall_clock and self._frame_count > 1:
+                    gap_ms = (current_wall_clock - previous_wall_clock) * 1000
                     expected_gap_ms = 1000.0 / self._frame_rate
                     if gap_ms > expected_gap_ms * 3:
                         logger.warning(
                             f"[DIAG-FRAME-GAP] frame={self._frame_count}, "
                             f"gap={gap_ms:.0f}ms (expected {expected_gap_ms:.0f}ms), "
                             f"gap_ratio={gap_ms / expected_gap_ms:.1f}x, "
-                            f"elapsed={(current_wall_clock - self._session_start_time):.2f}s, "
-                            f"pts_ms={pts_ms:.0f}, "
-                            f"pts_reset_count={self._pts_reset_count}"
+                            f"media_pts={pts_ms:.0f}"
                         )
 
                 self._last_pts_ms = pts_ms
@@ -470,23 +588,24 @@ class FFmpegCapture:
             return False, None, 0.0
 
     def restart(self) -> bool:
-        """Restart FFmpeg while keeping PTS continuous across the restart."""
+        """Restart the FFmpeg subprocess.
+
+        The MediaClock keeps running, so the session timeline stays monotonic
+        even though the new process restarts its PTS at zero.
+
+        Returns:
+            bool: True if the restart succeeded
+        """
         logger.info(
             f"[FFmpegCapture] Restarting (reconnect_count={self._reconnect_count})..."
         )
-
-        # Offset PTS by the frames already emitted so it keeps increasing after restart.
-        expected_interval_ms = 1000.0 / self._frame_rate
-        self._pts_offset = self._frame_count * expected_interval_ms
 
         self.stop()
         time.sleep(self.reconnect_delay)
 
         self._reconnect_count += 1
-        self._session_start_time = time.time()
         self._frame_count = 0
         self._last_wall_clock = 0.0
-        # _cumulative_offset stays unchanged to keep timestamps continuous.
 
         return self.start()
 
@@ -504,12 +623,37 @@ class FFmpegCapture:
             except Exception as e:
                 logger.warning(f"[FFmpegCapture] Stop error: {e}")
             finally:
+                # Closing the pipes unblocks the reader threads.
+                for stream in (self.process.stderr, self.process.stdout):
+                    try:
+                        if stream:
+                            stream.close()
+                    except Exception:
+                        pass
                 self.process = None
 
             logger.info(f"[FFmpegCapture] Stopped (frames={self._frame_count})")
 
+        for thread in (self._stderr_thread, self._read_thread):
+            if thread and thread.is_alive():
+                thread.join(timeout=1.0)
+        self._stderr_thread = None
+        self._read_thread = None
+        self._read_queue = None
+
+        if self._stderr_file:
+            try:
+                self._stderr_file.close()
+            except Exception:
+                pass
+            self._stderr_file = None
+
     def get_stats(self) -> dict:
-        """Return frame, reconnect and hardware acceleration statistics."""
+        """Get statistics
+
+        Returns:
+            dict: Frame count, reconnect count, running state and hardware acceleration info
+        """
         return {
             "frame_count": self._frame_count,
             "reconnect_count": self._reconnect_count,

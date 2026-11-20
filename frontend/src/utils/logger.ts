@@ -1,19 +1,22 @@
 import axios from 'axios'
 import { useAuthStore } from '@/stores/auth'
 
-// All logs are sent to the backend; nothing is printed to the browser console.
+/**
+ * Structured logging system
+ * All logs are sent to the backend for storage; nothing is printed to the browser console.
+ */
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type LogCategory =
-  | 'stream'
-  | 'task'
-  | 'playback'
-  | 'websocket'
-  | 'hls'
-  | 'webrtc'
-  | 'ui'
-  | 'api'
-  | 'system'
+  | 'stream'      // 视频流操作
+  | 'task'        // 任务管理
+  | 'playback'    // 播放相关
+  | 'websocket'   // WebSocket 连接
+  | 'hls'         // HLS 播放
+  | 'webrtc'      // WebRTC 播放
+  | 'ui'          // UI 交互
+  | 'api'         // API 调用
+  | 'system'      // 系统级
 
 interface LogEntry {
   timestamp: string
@@ -73,7 +76,7 @@ class Logger {
       }
       await axios.post('/api/logs/batch', { logs: logsToSend }, { timeout: 5000, headers })
     } catch {
-      // Drop failed batches to avoid unbounded accumulation
+      // 如果发送失败，丢弃日志，避免累积
     }
   }
 
@@ -105,7 +108,7 @@ class Logger {
   stream(action: string, taskId: string, details?: Record<string, unknown>) {
     this.info('stream', `Task ${taskId}: ${action}`, details)
   }
-
+  // 播放专用日志
   playback(action: string, taskId: string, details?: Record<string, unknown>) {
     this.info('playback', `Task ${taskId}: ${action}`, details)
   }
@@ -117,7 +120,7 @@ class Logger {
   hls(action: string, taskId: string, details?: Record<string, unknown>) {
     this.info('hls', `Task ${taskId}: ${action}`, details)
   }
-
+  // 任务操作日志
   task(action: string, taskId: string, details?: Record<string, unknown>) {
     this.info('task', `Task ${taskId}: ${action}`, details)
   }

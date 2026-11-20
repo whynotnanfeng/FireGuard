@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "fireguardd",
+    "crates/fg-domain",
+    "crates/fg-contracts",
+    "crates/fg-app",
+    "crates/fg-infer",
+    "crates/fg-media",
+    "crates/fg-store",
+    "crates/fg-server",
+]
+resolver = "2"
+
+[workspace.package]
+version = "3.0.0"
+edition = "2021"
+rust-version = "1.82"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -37,7 +37,7 @@ from app.models.detection_record import DetectionRecord
 from app.models.detection_event import DetectionEvent
 from app.services.notifier import notifier
 from app.services.storage_manager import storage_manager
-from app.utils.time import now_beijing
+from app.utils.time import BEIJING_TZ, now_beijing
 from app.limiter import limiter
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 system_router = APIRouter(tags=["system"])
 
 
-# Schemas
+# ── Schemas ──────────────────────────────────────────────────────────────────
 
 class TaskModelInfo(BaseModel):
     model_id: str
@@ -95,6 +95,26 @@ class DetectionConfigUpdate(BaseModel):
     detection_config: dict
 
 
+def _record_abs_ms(record: DetectionRecord) -> int:
+    """UTC epoch for a record, independent of the viewing machine's timezone.
+
+    New rows carry ``abs_ms``; legacy rows stored naive Beijing time, which is
+    interpreted explicitly instead of relying on the host's local timezone.
+    """
+    if record.abs_ms is not None:
+        return int(record.abs_ms)
+    return int(record.detected_at.replace(tzinfo=BEIJING_TZ).timestamp() * 1000)
+
+
+def _record_iso(record: DetectionRecord) -> str:
+    """ISO8601 string with an explicit +08:00 offset."""
+    if record.abs_ms is not None:
+        moment = datetime.fromtimestamp(record.abs_ms / 1000, BEIJING_TZ)
+    else:
+        moment = record.detected_at.replace(tzinfo=BEIJING_TZ)
+    return moment.isoformat(timespec="milliseconds")
+
+
 def _to_response(task: Task, session: Session, models_map: dict[str, str] | None = None) -> TaskResponse:
     model_name = None
     if task.model_id:
@@ -104,6 +124,7 @@ def _to_response(task: Task, session: Session, models_map: dict[str, str] | None
             dm = session.get(DetectionModel, task.model_id)
             if dm:
                 model_name = dm.name
+    # Multi-model info
     task_models_info = None
     from app.models.task_model import TaskModel
     tms = list(session.exec(select(TaskModel).where(TaskModel.task_id == task.id)).all())
@@ -145,7 +166,7 @@ def _to_response(task: Task, session: Session, models_map: dict[str, str] | None
     )
 
 
-# List
+# ── List ─────────────────────────────────────────────────────────────────────
 
 def _build_task_query(
     user_id: str,
@@ -204,7 +225,7 @@ def list_tasks(
     return TaskListResponse(total=total, items=[_to_response(t, session, models_map) for t in items])
 
 
-# Create
+# ── Create ────────────────────────────────────────────────────────────────────
 
 @router.post("", response_model=TaskResponse, status_code=201)
 async def create_task(
@@ -219,6 +240,7 @@ async def create_task(
     use_gpu: bool = Form(default=False),
     rgb_files: List[UploadFile] = File(default=[]),
     ir_files: List[UploadFile] = File(default=[]),
+    # Detection Config Fields
     enabled_classes: Optional[str] = Form(default=None),
     threshold: Optional[float] = Form(default=None),
     category_thresholds: Optional[str] = Form(default=None),
@@ -241,6 +263,7 @@ async def create_task(
         except ValueError:
             pass
 
+    # Validate task_type
     if task_type not in ("image", "video", "stream"):
         raise HTTPException(status_code=400, detail="task_type must be image/video/stream")
 
@@ -250,6 +273,7 @@ async def create_task(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid input_types")
 
+    # Multi-model support: parse model_ids or fall back to the single model_id
     parsed_model_ids = None  # [{model_id, weight, enabled_classes, per_class_thresholds}]
     if model_ids:
         try:
@@ -258,6 +282,7 @@ async def create_task(
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid model_ids format")
 
+    # Validate models belong to user and support input types
     dm = None
     if parsed_model_ids:
         for mi in parsed_model_ids:
@@ -272,7 +297,7 @@ async def create_task(
         dm = session.get(DetectionModel, model_id)
         if not dm or dm.user_id != current_user.id:
             raise HTTPException(status_code=404, detail="Model not found")
-    # Multi-model: each input type must be supported by at least one of the models
+    # With multiple models, validate the union of all models' input_types
     if parsed_model_ids:
         all_model_types: set = set()
         for mi in parsed_model_ids:
@@ -324,7 +349,7 @@ async def create_task(
             if categories_list:
                 detection_config["categories"] = categories_list
 
-    # model_id keeps the first model for compatibility; fusion_config lives in detection_config
+    # With multiple models, model_id uses the first model (backward compatible) and fusion_config is stored in detection_config
     effective_model_id = model_id if not parsed_model_ids else parsed_model_ids[0]["model_id"]
     if fusion_config and parsed_model_ids:
         detection_config["fusion_config"] = json.loads(fusion_config)
@@ -345,6 +370,7 @@ async def create_task(
     session.commit()
     session.refresh(task)
 
+    # Multi-model: create the TaskModel association records
     if parsed_model_ids:
         from app.models.task_model import TaskModel
         for idx, mi in enumerate(parsed_model_ids):
@@ -371,7 +397,7 @@ async def create_task(
             if not check_storage_limit(current_user.id, total_size):
                 raise ValueError("Storage limit exceeded.")
 
-            # Run in a thread so the copy does not block the event loop
+            # Save files in thread pool to prevent blocking the asyncio event loop
             def save_uploaded_files():
                 for f in rgb_files:
                     f.file.seek(0)
@@ -411,7 +437,7 @@ async def create_task(
         task.updated_at = now_beijing()
         session.add(task)
         session.commit()
-        # Remove the partial upload if creation failed
+        # Clean up created directory if upload failed
         if source_type == "upload":
             task_dir = config.UPLOADS_DIR / current_user.id / task.id
             if task_dir.exists():
@@ -421,7 +447,7 @@ async def create_task(
     return _to_response(task, session)
 
 
-# Detail
+# ── Detail ────────────────────────────────────────────────────────────────────
 @router.get("/{task_id}", response_model=TaskResponse)
 def get_task(
     task_id: str,
@@ -434,7 +460,7 @@ def get_task(
     return _to_response(task, session)
 
 
-# Snapshot
+# ── Snapshot (Hot Start) ───────────────────────────────────────────────────
 
 @router.get("/{task_id}/snapshot")
 async def get_task_snapshot(
@@ -442,7 +468,7 @@ async def get_task_snapshot(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Current status and latest detections for the monitoring page's first load"""
+    """First request when the frontend enters the monitoring page: fetch the current status and the latest bounding boxes"""
     task = session.get(Task, task_id)
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -461,8 +487,9 @@ async def get_task_snapshot(
             "class_name": r.class_name,
             "confidence": r.confidence,
             "box": json.loads(r.box),
-            "detected_at": r.detected_at.isoformat(),
-            "timestamp_ms": int(r.detected_at.timestamp() * 1000),  # Synchronized timestamp
+            "detected_at": _record_iso(r),
+            "timestamp_ms": _record_abs_ms(r),  # Synchronized timestamp
+            "media_pts_ms": r.media_pts_ms,
         }
         for r in records
     ]
@@ -487,11 +514,12 @@ async def get_task_snapshot(
         "ntp_offset_ms": clock_monitor.last_offset_ms,
         "ntp_avg_offset_ms": clock_monitor.avg_offset_ms,
         "ntp_synced": clock_monitor.last_offset_ms != 0.0,
+        # [P0-3 improvement]: time audit statistics
         "ntp_offset_stats": clock_monitor.get_offset_stats(),
     }
 
 
-# Update
+# ── Update ────────────────────────────────────────────────────────────────────
 
 @router.put("/{task_id}", response_model=TaskResponse)
 def update_task(
@@ -518,7 +546,7 @@ def update_task(
     return _to_response(task, session)
 
 
-# Detection config
+# ── Update Detection Config ──────────────────────────────────────────────────
 
 @router.put("/{task_id}/detection-config")
 def update_detection_config(
@@ -542,7 +570,7 @@ def update_detection_config(
     return {"message": "Detection config updated"}
 
 
-# Delete
+# ── Delete ────────────────────────────────────────────────────────────────────
 
 @router.delete("/{task_id}")
 async def delete_task(
@@ -554,7 +582,7 @@ async def delete_task(
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Tell observers the task is gone before the row is removed
+    # V1.2.50: Proactively notify observers that this task is gone before physical deletion
     from app.services.task_runner import stream_manager
     stream_manager.stop_stream(task_id)
     await notifier.broadcast_status(task_id, "deleted")
@@ -584,6 +612,7 @@ async def delete_task(
     session.exec(sa_delete(DetectionRecord).where(DetectionRecord.task_id == task_id))
     session.exec(sa_delete(DetectionEvent).where(DetectionEvent.task_id == task_id))
 
+    # V1.2.15: clean up recorded video segments
     history_dir = config.VIDEO_STORAGE_DIR / task_id
     if history_dir.exists():
         shutil.rmtree(history_dir, ignore_errors=True)
@@ -592,10 +621,10 @@ async def delete_task(
     return {"message": "Task deleted"}
 
 
-# Helpers
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _rebuild_m3u8_from_segments(m3u8_path: Path, ts_files: list[Path], task_id: str) -> None:
-    """Rebuild the playlist from existing .ts files when the m3u8 is missing or corrupt"""
+    """Rebuild the m3u8 playlist from the existing .ts segment files (when the original m3u8 is corrupted or missing)"""
     import re
 
     segment_entries = []
@@ -628,7 +657,7 @@ def _rebuild_m3u8_from_segments(m3u8_path: Path, ts_files: list[Path], task_id: 
         logger.error(f"[Tasks] Failed to rebuild m3u8 for task {task_id}: {e}")
 
 
-# Execute
+# ── Execute ───────────────────────────────────────────────────────────────────
 
 @router.post("/{task_id}/execute")
 async def execute_task(
@@ -640,7 +669,7 @@ async def execute_task(
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Stream tasks may be re-executed from any non-terminal status
+    # V12: allow execution from pending/exception/failed/running status
     if task.status == "running" and task.task_type != "stream":
         raise HTTPException(status_code=400, detail="Task is already running")
     
@@ -653,6 +682,7 @@ async def execute_task(
         from app.models.model import DetectionModel
         from app.models.task_model import TaskModel
 
+        # Multi-model support: load from the task_models table first, fall back to the single model_id
         task_models = list(session.exec(
             select(TaskModel).where(TaskModel.task_id == task.id)
         ).all())
@@ -697,12 +727,13 @@ async def execute_task(
                     "is_rgbir": len(model_input_types) > 1 and "ir" in model_input_types,
                     "per_class_config": per_class_config,
                 })
-            # First model is the primary one (compatibility)
+            # The first model acts as the primary model (compatibility)
             dm = session.get(DetectionModel, task_models[0].model_id)
             mapping = model_configs[0]["label_mapping"]
             det_cfg = json.loads(task.detection_config) if task.detection_config else {}
             fusion_config = det_cfg.get("fusion_config", {})
         else:
+            # Single-model mode (backward compatible)
             dm = session.get(DetectionModel, task.model_id)
             if not dm:
                 raise HTTPException(status_code=404, detail="Model not found")
@@ -712,15 +743,16 @@ async def execute_task(
                 except Exception:
                     pass
 
-        # Cold start: stop the old stream first to release its processes and sockets
+        # V12: force a cold start - stop the old stream first (if any) to guarantee clean resources
         old_stream = stream_manager.get_stream(task.id)
         stream_manager.stop_stream(task.id)
         if old_stream and hasattr(old_stream, '_drain_done'):
-            # Wait for the old stream to release resources; overlapping processes corrupt output
+            # Wait for the old stream to fully release its resources (up to 5s) to prevent old/new process conflicts
             await asyncio.to_thread(old_stream._drain_done.wait, timeout=3.0)
 
-        # Resume decision is based on data integrity: .ts segments and the m3u8 are the video
-        # history and survive stops, so resume whenever segments exist, rebuilding a corrupt m3u8.
+        # Resume decision: based on data integrity
+        # .ts segments and m3u8 are the video history (like a database); they are not cleared on stop and not deleted on restart
+        # Resume as long as .ts segments exist; if the m3u8 is corrupted, rebuild it from the .ts files
         task_dir = Path(config.VIDEO_STORAGE_DIR) / task.id
         is_resume = False
         if task_dir.exists():
@@ -757,7 +789,8 @@ async def execute_task(
         if not is_resume:
             logger.info(f"[Tasks] Fresh start for task {task.id}")
 
-        # _flush_active_tracks closes ENTER events on a normal stop; this covers crashes
+        # Defensive cleanup: close orphaned ENTER events (left_at=NULL) left over from the last run
+        # _flush_active_tracks handles this on a normal stop; this is the fallback for abnormal exits/crashes
         from app.models.detection_event import DetectionEvent
         orphaned = session.exec(
             select(DetectionEvent).where(
@@ -781,7 +814,7 @@ async def execute_task(
         session.add(task)
         session.commit()
 
-        # Run in a thread: start_grabbers() retries RTSP connects and would block the event loop
+        # V12: start the stream in the thread pool to avoid blocking the event loop on start_grabbers() RTSP retries
         loop = asyncio.get_running_loop()
         _mc = model_configs  # closure capture
         _fc = fusion_config
@@ -816,7 +849,7 @@ async def execute_task(
         return {"message": "Task queued for execution", "position": position}
 
 
-# Pause
+# ── Pause ─────────────────────────────────────────────────────────────────────
 
 @router.post("/{task_id}/pause")
 async def pause_task(
@@ -840,7 +873,7 @@ async def pause_task(
         if stream and stream._drain_done:
             stream._drain_done.wait(timeout=10.0)
 
-        # Old FFmpeg must exit before resume; leftovers produce garbled frames
+        # Make sure the old FFmpeg process has fully exited to prevent garbled frames from old/new process conflicts during resume
         if stream and hasattr(stream, 'pipeline') and stream.pipeline:
             writer = getattr(stream.pipeline, 'annotated_writer', None)
             if writer and writer.process:
@@ -878,7 +911,7 @@ async def pause_task(
     return {"message": "Task stopped and reset to pending"}
 
 
-# Result
+# ── Result ────────────────────────────────────────────────────────────────────
 
 @router.get("/{task_id}/result")
 def get_result(
@@ -927,7 +960,7 @@ def get_result(
     }
 
 
-# Historical detections
+# ── Historical Detections API (Phase 4) ──────────────────────────────────
 @router.get("/{task_id}/detections")
 def get_historical_detections(
     task_id: str,
@@ -936,15 +969,14 @@ def get_historical_detections(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Aggregated historical boxes for a sliding playback window"""
+    """In historical playback mode, the frontend pulls aggregated historical bounding boxes through a sliding window"""
     task = session.get(Task, task_id)
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
 
     try:
-        # Range query served by the ix_detection_records_detected_at index
-        # start_time/end_time are Unix milliseconds; convert to naive Beijing time for the query
-        from app.utils.time import BEIJING_TZ
+        # 1. Ultra-fast range query (relying on the ix_detection_records_detected_at index)
+        # [Dual-timestamp architecture]: start_time/end_time are Unix absolute timestamps (ms), converted to local time for querying
         dt_start = datetime.fromtimestamp(start_time / 1000.0, tz=BEIJING_TZ).replace(tzinfo=None)
         dt_end = datetime.fromtimestamp(end_time / 1000.0, tz=BEIJING_TZ).replace(tzinfo=None)
         
@@ -956,13 +988,14 @@ def get_historical_detections(
         
         records = session.exec(stmt).all()
         
-        # Key by Unix millisecond of detected_at so timestamps line up with the video clock
+        # [Dual-timestamp architecture]: use the Unix timestamp of detected_at as the key (millisecond aligned)
         grouped_data = defaultdict(list)
         for r in records:
-            # detected_at is naive Beijing time; .timestamp() applies the system local zone
-            ts_ms = int(r.detected_at.timestamp() * 1000)
+            # detected_at is naive Beijing time for legacy rows; _record_abs_ms
+            # converts it with an explicit offset instead of the host timezone.
+            ts_ms = _record_abs_ms(r)
             box_data = json.loads(r.box)
-            # Shape expected by the frontend renderLoop
+            # Format into the boxes structure expected by the frontend renderLoop
             grouped_data[ts_ms].append({
                 "x": box_data[0],
                 "y": box_data[1],
@@ -983,7 +1016,7 @@ def get_historical_detections(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Detection records
+# ── Detection Records ────────────────────────────────────────────────────────
 
 @router.get("/{task_id}/detection-records")
 def get_detection_records(
@@ -1030,15 +1063,16 @@ def get_detection_records(
                 "class_name": r.class_name,
                 "confidence": r.confidence,
                 "box": json.loads(r.box),
-                "detected_at": r.detected_at.isoformat(),
-                "timestamp_ms": int(r.detected_at.timestamp() * 1000),
+                "detected_at": _record_iso(r),
+                "timestamp_ms": _record_abs_ms(r),
+                "media_pts_ms": r.media_pts_ms,
             }
             for r in records
         ]
     }
 
 
-# Detection events
+# ── Detection Events (Event-Driven) ──────────────────────────────────────
 
 @router.get("/{task_id}/detection-events")
 def get_detection_events(
@@ -1053,7 +1087,12 @@ def get_detection_events(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Enter/leave lifecycle events instead of per-frame records; far less data at high FPS"""
+    """
+    Get event-driven detection records
+
+    Returns Enter/Leave events instead of per-frame records.
+    Ideal for high-FPS scenarios, reducing data volume by 90%+
+    """
     task = session.get(Task, task_id)
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -1114,7 +1153,15 @@ def get_detection_events_summary(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Per-class target count, average duration and average confidence from leave events"""
+    """
+    Get the event statistics summary for a task
+
+    Returns:
+    - Total number of objects
+    - Object count per class
+    - Average duration
+    - Average confidence
+    """
     task = session.get(Task, task_id)
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -1153,7 +1200,7 @@ def get_detection_events_summary(
     }
 
 
-# Download
+# ── Download ZIP ──────────────────────────────────────────────────────────────
 
 @router.get("/{task_id}/download")
 async def download_all(
@@ -1172,11 +1219,13 @@ async def download_all(
     if not result_dir.exists():
         raise HTTPException(status_code=404, detail="Results directory not found")
 
+    # Create temporary zip file
     import tempfile
     import re
     temp_dir = Path(tempfile.gettempdir()) / "fire_det_zips"
     temp_dir.mkdir(parents=True, exist_ok=True)
     
+    # Sanitize task name for filename
     safe_name = re.sub(r'[^\w\-_\. ]', '_', task.name)
     zip_base = temp_dir / f"{safe_name}_{task_id[:8]}"
     zip_path_str = shutil.make_archive(str(zip_base), "zip", root_dir=str(result_dir))
@@ -1195,8 +1244,10 @@ async def download_all(
     )
 
 
-# Historical video
-# HLS files are written by DirectHLSWriter and served from /storage/{task_id}; no proxy route needed
+# ── Historical Video API ───────────────────────────────────────────────────
+# In the new architecture, HLS video streams are produced directly by DirectHLSWriter (ffmpeg -c:v copy)
+# The frontend accesses the static files directly via /storage/{task_id}/stream_rgb.m3u8
+# No FastAPI proxy route forwarding is needed anymore
 
 @router.get("/{task_id}/vod-stream", response_class=PlainTextResponse)
 def get_vod_snapshot(
@@ -1204,7 +1255,7 @@ def get_vod_snapshot(
     channel: str = Query("rgb"), 
     end_time: float = Query(..., description="Relative time at the freeze frame (seconds)")
 ):
-    """Frozen-frame playlist with ENDLIST for the frontend's history mode"""
+    """When the frontend switches to history mode, fetch the frozen-frame M3U8 file with an ENDLIST"""
     try:
         m3u8_content = storage_manager.generate_vod_snapshot(task_id, channel, end_time)
         return m3u8_content
@@ -1221,7 +1272,10 @@ def get_task_videos(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Recorded video segments, used by the frontend progress bar"""
+    """
+    Get all recorded video segments for a task.
+    Enables seeking in the frontend progress bar.
+    """
     task = session.get(Task, task_id)
     if not task or task.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -1230,7 +1284,7 @@ def get_task_videos(
     return {"segments": segments}
 
 
-# Playback logging
+# ── Playback Debug Logging ────────────────────────────────────────────────
 class PlaybackLogRequest(BaseModel):
     event_type: str
     timestamp: float
@@ -1242,7 +1296,10 @@ async def log_playback_event(
     body: PlaybackLogRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Append frontend playback events to the playback log for troubleshooting"""
+    """
+    Dedicated endpoint for frontend to report playback issues/events.
+    Writes to a specific file in the backend for troubleshooting.
+    """
     config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     
     log_entry = {
@@ -1260,7 +1317,7 @@ async def log_playback_event(
     return {"status": "ok"}
 
 
-# Frontend logging
+# ── Frontend Batch Logging ─────────────────────────────────────────────────
 class FrontendLogEntry(BaseModel):
     timestamp: str
     level: str
@@ -1304,7 +1361,7 @@ async def log_diag(
     request: Request,
     body: DiagLogRequest,
 ):
-    """Write frontend diagnostic logs to diag.log"""
+    """Receive frontend diagnostic logs and write them to the diag.log file"""
     config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = config.LOGS_DIR / "diag.log"
     user_id = _extract_user_id_from_token(request)
@@ -1330,7 +1387,9 @@ async def log_frontend_batch(
     request: Request,
     body: BatchLogRequest,
 ):
-    """Write batched frontend logs to frontend.log"""
+    """
+    Receive batched frontend logs and write them to the dedicated frontend.log file
+    """
     config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = config.LOGS_DIR / "frontend.log"
     user_id = _extract_user_id_from_token(request)
@@ -1353,12 +1412,12 @@ async def log_frontend_batch(
     return {"status": "ok", "received": len(body.logs)}
 
 
-# GPU status
+# ── GPU Status Check ─────────────────────────────────────────────────────────
 @router.get("/gpu/status")
 async def gpu_status(
     current_user: User = Depends(get_current_user),
 ):
-    """Check whether this host can run GPU inference"""
+    """Check whether the GPU deployment environment meets the requirements for GPU inference"""
     checks: dict = {}
     reason_parts: list[str] = []
     
@@ -1372,7 +1431,7 @@ async def gpu_status(
         checks["onnx_gpu"] = False
         reason_parts.append(f"Failed to import onnxruntime: {str(e)}")
     
-    # Use pynvml instead of torch to keep the dependency small
+    # 2. GPU hardware and VRAM check (using pynvml instead of torch to reduce dependency size)
     try:
         import pynvml
         pynvml.nvmlInit()
@@ -1394,7 +1453,7 @@ async def gpu_status(
         checks["cuda_available"] = False
         reason_parts.append(f"GPU hardware detection failed: {str(e)}")
     
-    # Require at least 512MB VRAM
+    # 3. VRAM sufficiency check (at least 512MB required)
     checks["vram_sufficient"] = checks.get("vram_mb", 0) >= 512
     if not checks["vram_sufficient"]:
         reason_parts.append(f"Insufficient VRAM (current: {checks.get('vram_mb', 0)}MB, required: 512MB)")
@@ -1412,11 +1471,27 @@ async def gpu_status(
     }
 
 
+@router.get("/services/status")
+def services_status(current_user: User = Depends(get_current_user)):
+    """Probe optional local services over HTTP (works without Redis)."""
+    from app.config import config
+    from app.services.service_probe import probe_mediamtx, probe_simulator
+
+    simulator = probe_simulator(timeout=0.5)
+    api_port = (
+        simulator["mediamtx_api_port"] if simulator else config.MEDIAMTX_API_PORT
+    )
+    return {
+        "simulator": simulator,
+        "mediamtx": {"api_port": api_port, "reachable": probe_mediamtx(api_port, timeout=0.5)},
+    }
+
+
 @router.get("/registry/status")
 async def registry_status(
     current_user: User = Depends(get_current_user),
 ):
-    """Registered services and config entries"""
+    """View config registry status: registered services and config entries"""
     from app.services.registry import registry
     return {
         "services": registry.list_services(),

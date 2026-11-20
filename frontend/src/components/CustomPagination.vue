@@ -1,6 +1,7 @@
 <template>
   <div class="custom-pagination-container">
     <ul class="custom-pagination">
+      <!-- 上一页 -->
       <li 
         class="pagination-item pagination-prev" 
         :class="{ 'pagination-disabled': current <= 1 }"
@@ -9,10 +10,12 @@
         <LeftOutlined />
       </li>
 
+      <!-- 左侧省略号 -->
       <li v-if="paginationWindow.start > 1" class="pagination-ellipsis">
         <span>...</span>
       </li>
 
+      <!-- 页码列表 (严格限制最多4个) -->
       <li 
         v-for="p in visiblePages" 
         :key="p"
@@ -23,10 +26,12 @@
         <span>{{ p }}</span>
       </li>
 
+      <!-- 右侧省略号 -->
       <li v-if="paginationWindow.end < totalPages" class="pagination-ellipsis">
         <span>...</span>
       </li>
 
+      <!-- 下一页 -->
       <li 
         class="pagination-item pagination-next" 
         :class="{ 'pagination-disabled': current >= totalPages }"
@@ -35,10 +40,12 @@
         <RightOutlined />
       </li>
 
+      <!-- 快速跳转 -->
       <li class="pagination-options">
         <div class="pagination-options-quick-jumper">
-          Go to
+          跳至
           <input type="text" v-model="jumpInput" @keydown.enter="handleJump" />
+          页
         </div>
       </li>
     </ul>
@@ -60,11 +67,12 @@ const emit = defineEmits(['update:current', 'change'])
 const totalPages = computed(() => Math.ceil(props.total / props.pageSize) || 1)
 const jumpInput = ref('')
 
+// 确保输入框显示当前页码（可选，或者保持为空）
 watch(() => props.current, () => {
   jumpInput.value = ''
 })
 
-// 4-page sliding window
+// 滑动窗口逻辑：计算 4 页长度的“可见窗口”
 const paginationWindow = computed(() => {
   const total = totalPages.value
   const current = props.current
@@ -73,9 +81,11 @@ const paginationWindow = computed(() => {
     return { start: 1, end: total }
   }
   
+  // 按照您的规则：以当前页为中心偏移（左1右2）
   let start = current - 1
   let end = current + 2
   
+  // 边界修正
   if (start < 1) {
     start = 1
     end = 4
@@ -88,6 +98,7 @@ const paginationWindow = computed(() => {
   return { start, end }
 })
 
+// 最终渲染的数字页码数组
 const visiblePages = computed(() => {
   const { start, end } = paginationWindow.value
   const pages = []
@@ -217,7 +228,7 @@ const handleJump = (e: any) => {
   border-color: var(--primary-blue);
 }
 
-/* Variable fallbacks */
+/* 适配暗色模式变量，如果项目中未定义则使用备选值 */
 :root {
   --primary-blue: #1677ff;
   --border-color: #d9d9d9;
@@ -226,7 +237,7 @@ const handleJump = (e: any) => {
   --bg-card: #ffffff;
 }
 
-/* Dark theme */
+/* 假设项目中已有变量 */
 [data-theme='dark'] .pagination-item {
   background-color: transparent;
 }

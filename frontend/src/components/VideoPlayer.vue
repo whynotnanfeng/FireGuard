@@ -1,10 +1,10 @@
 <template>
-  <div class="video-player-container" role="region" aria-label="Video Player">
+  <div class="video-player-container" role="region" aria-label="视频播放器">
     <div v-if="showOverlay" class="overlay">
       <template v-if="streamState === 'exception'">
         <div class="state-icon exception-icon">&#9888;</div>
-        <div class="state-label">{{ errorMsg || 'Connection Lost' }}</div>
-        <div class="state-sub">{{ errorMsg ? 'Check the environment configuration as prompted' : 'Check your network or view the recordings' }}</div>
+        <div class="state-label">{{ errorMsg || '连接中断' }}</div>
+        <div class="state-sub">{{ errorMsg ? '请根据提示检查环境配置' : '请检查网络或查看历史录像' }}</div>
       </template>
     </div>
 
@@ -37,49 +37,51 @@
         @error="onWebRTCError"
       />
 
-      <!-- Detection boxes are burned into the stream server-side; no canvas overlay here. -->
+      <!-- V4.6: 全模式使用内嵌方案，检测框由 AnnotatedHLSWriter 嵌入 HLS 视频流，前端无 Canvas -->
 
+      <!-- 【P2 修复】：检测数据过期提示 -->
       <div v-if="isDetectionStale && streamState === 'running'" class="stale-detection-badge">
         <span class="stale-dot"></span>
-        <span class="stale-text">Detection Recovering</span>
+        <span class="stale-text">检测恢复中</span>
       </div>
 
+      <!-- Video Loading Overlay -->
       <div v-if="showVideoOverlay" class="video-overlay-inner">
         <template v-if="streamState === 'connecting'">
           <div class="state-icon connecting-pulse"></div>
-          <div class="state-label">Connecting to video service...</div>
+          <div class="state-label">正在连接视频服务...</div>
         </template>
         <template v-else-if="streamState === 'loading' || streamState === 'model_loading'">
           <div class="state-icon loading-bar-wrap">
             <div class="loading-bar"></div>
           </div>
-          <div class="state-label">Preparing video feed...</div>
+          <div class="state-label">正在准备监控画面...</div>
         </template>
         <template v-else-if="streamState === 'retry'">
           <div class="state-icon retry-spin"></div>
-          <div class="state-label">Video source unstable, retrying ({{ retryAttempt }}/{{ retryMax }})</div>
+          <div class="state-label">视频源连接波动，正在重试 ({{ retryAttempt }}/{{ retryMax }})</div>
         </template>
         <template v-else-if="streamState === 'buffering'">
           <div class="state-icon loading-bar-wrap">
             <div class="loading-bar"></div>
           </div>
-          <div class="state-label">Loading video, please wait...</div>
+          <div class="state-label">画面加载中，请稍候...</div>
         </template>
         <template v-else-if="streamState === 'running' && !isVideoActuallyPlaying">
           <div class="state-icon loading-bar-wrap">
             <div class="loading-bar"></div>
           </div>
-          <div class="state-label">Loading video, please wait...</div>
+          <div class="state-label">画面加载中，请稍候...</div>
         </template>
         <template v-else-if="streamState === 'recovering'">
           <div class="state-icon connecting-pulse"></div>
-          <div class="state-label">Network unstable, reconnecting...</div>
+          <div class="state-label">网络不稳定，尝试重连中...</div>
         </template>
       </div>
 
       <div class="controls" v-if="canControl">
         <div class="mode-tag" :class="{ 'is-live': playMode !== 'history' }">
-          {{ playMode === 'history' ? 'Playback' : 'Live' }}
+          {{ playMode === 'history' ? '历史回放' : '实时监控' }}
         </div>
 
         <a-divider type="vertical" border-color="rgba(255,255,255,0.2)" />
@@ -91,7 +93,7 @@
         <a-divider type="vertical" border-color="rgba(255,255,255,0.2)" />
 
         <div class="controls-action-group">
-          <a-tooltip :title="isActuallyPlaying ? 'Pause' : 'Play'">
+          <a-tooltip :title="isActuallyPlaying ? '暂停' : '播放'">
             <a-button
               type="primary"
               shape="circle"
@@ -105,7 +107,7 @@
             </a-button>
           </a-tooltip>
 
-          <a-tooltip title="Back to Live">
+          <a-tooltip title="返回实时监控">
             <a-button
               v-show="playMode === 'history'"
               shape="circle"
@@ -117,7 +119,7 @@
             </a-button>
           </a-tooltip>
 
-          <a-tooltip :title="currentChannel === 'annotated' ? 'Switch to IR annotated stream' : 'Switch to RGB annotated stream'">
+          <a-tooltip :title="currentChannel === 'annotated' ? '切换到IR标注流' : '切换到RGB标注流'">
             <a-button
               v-show="isDualStream"
               shape="circle"
@@ -151,7 +153,7 @@
           :max="100"
           :tip-formatter="tipFormatter"
           @change="handleGlobalSeek"
-          @afterChange="isUserSeeking = false"
+          @afterChange="handleSeekAfterChange"
         />
       </div>
     </div>
@@ -161,6 +163,10 @@
         :task-id="taskId"
         :events="detectionEvents"
         :active-tracks="activeTracks"
+        :total="eventTotal"
+        v-model:filter="eventFilter"
+        v-model:page="eventPage"
+        v-model:page-size="eventPageSize"
       />
     </div>
   </div>
@@ -171,10 +177,16 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import Hls from 'hls.js'
 import { useTaskStore } from '@/stores/task'
 import { tasksApi, type DetectionRecord } from '@/api/tasks'
+import { authApi } from '@/api/auth'
 import axios from 'axios'
 import { terminatingTasks } from '@/api/request'
 import { logger } from '@/utils/logger'
 import { diagLogger } from '@/utils/diagLogger'
+import { useDetectionFeed } from '@/composables/useDetectionFeed'
+import { useMediaClock } from '@/composables/useMediaClock'
+import { bindHlsErrorHandler, createHlsForMedia, destroyHls } from '@/composables/useHlsPlayer'
+import { useDetectionBuffer } from '@/composables/useDetectionBuffer'
+import { useLiveDrift } from '@/composables/useLiveDrift'
 import WebRTCPlayer from '@/components/WebRTCPlayer.vue'
 import DetectionEventsPanel from '@/components/DetectionEventsPanel.vue'
 import {
@@ -193,7 +205,7 @@ const props = defineProps<{
   showRecordsPanel?: boolean
 }>()
 
-const emit = defineEmits(['close', 'status-change', 'time-update', 'playback-absolute-time'])
+const emit = defineEmits(['close', 'status-change', 'time-update', 'playback-absolute-time', 'play-mode-change'])
 
 const videoPlayerRef = ref<HTMLVideoElement | null>(null)
 const webrtcPlayerRef = ref<InstanceType<typeof WebRTCPlayer> | null>(null)
@@ -224,13 +236,16 @@ let lastRecoveredTime = 0
 const RECOVERED_DEBOUNCE_MS = 3000
 
 const playMode = ref<'live' | 'history'>('live')
+// 历史模式下"当前快照末端"（可播放的最大位置）。进入历史时冻结，
+// 需要拖到更新的录像时由 refreshSnapshotAndSeek() 扩大。
 const frozenDuration = ref(0)
 const frozenRealTime = ref(0)
 let isSwitchingStream = false
-let pendingSeekSeconds: number | undefined = undefined
+let pendingHlsSeek: number | undefined = undefined
 
 let hls: Hls | null = null;
-const isVideoActuallyPlaying = ref(false);
+const isVideoActuallyPlaying = ref(false); 
+// V4.6: 全模式内嵌方案 — AnnotatedHLSWriter 将检测框嵌入 HLS，前端无 Canvas。
 
 const showRecordsPanel = computed(() => {
   if (props.showRecordsPanel !== undefined) return props.showRecordsPanel
@@ -238,6 +253,11 @@ const showRecordsPanel = computed(() => {
 })
 
 const isVideoPaused = ref(false);
+// 用户主动暂停（区别于切流/换源时被内部 pause() 打断）。
+// 只有它为 true 时才阻止自动续播，避免"暂停后画面每隔几秒又动了"。
+const userPaused = ref(false);
+// 暂停时冻结的画面位置：实时模式下滑块停在这里，总时长继续增长。
+const pausedAtSeconds = ref<number | null>(null);
 const isVideoReady = ref(false);
 const lastConfirmedPlayingTime = ref(0);
 
@@ -274,34 +294,70 @@ const showVideoOverlay = computed(() => {
 });
 
 
-function debounce(fn: Function, delay: number) {
+// 防抖工具函数（带 cancel：返回实时时必须取消待执行的跳转，
+// 否则 400ms 后那次迟到的 seek 会把画面又拽回历史位置）
+type Debounced<F extends (...args: any[]) => any> = F & { cancel: () => void }
+
+function debounce<F extends (...args: any[]) => any>(fn: F, delay: number): Debounced<F> {
   let timer: any = null;
-  return function(...args: any[]) {
+  const wrapped = ((...args: any[]) => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
-      fn.apply(null, args);
+      timer = null;
+      fn(...args);
     }, delay);
+  }) as Debounced<F>;
+  wrapped.cancel = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
   };
+  return wrapped;
 }
 
+// 从实时切历史时，用户点击的位置要立刻反映在滑块上。
+// 存秒数而不是百分比：历史模式下总时长（已录制时长）还在增长，
+// 按百分比回算会让滑块慢慢漂移，观感像“先跳一下再回去”。
+const pendingSeekSeconds = ref<number | null>(null)
+// 最近一次点击/拖拽的目标秒数，松手后用它决定是否需要扩大历史快照。
+let lastSeekTarget: number | null = null
+
+// 时间轴右端的“总时长”：实时是会话时长，历史是**当前已录制时长**。
+// 任务仍在录像时会继续增长，暂停位置的比例因此会相对变化，
+// 而不是被进入历史那一刻的数值永久冻结。
+const timelineMax = computed(() => {
+  if (playMode.value === 'live') return totalDuration.value
+  return Math.max(totalDuration.value, frozenDuration.value)
+})
+
 const sliderValue = computed(() => {
-  if (playMode.value === 'live') return 100;
-  const max = frozenDuration.value || totalDuration.value;
-  return max > 0 ? (currentGlobalTime.value / max) * 100 : 0;
+  if (pendingSeekSeconds.value !== null && timelineMax.value > 0) {
+    return Math.min(100, (pendingSeekSeconds.value / timelineMax.value) * 100)
+  }
+  if (playMode.value === 'live') {
+    // 用户主动暂停时停在暂停位置；总时长继续增长，比例会自然从 1/1 变成 1/3、1/4。
+    if (userPaused.value && pausedAtSeconds.value !== null && totalDuration.value > 0) {
+      return Math.min(100, (pausedAtSeconds.value / totalDuration.value) * 100)
+    }
+    return 100;
+  }
+  const max = timelineMax.value
+  return max > 0 ? Math.min(100, (currentGlobalTime.value / max) * 100) : 0;
 });
 
 const displayCurrentTimeStr = computed(() => {
   if (playMode.value === 'live') {
+    if (userPaused.value && pausedAtSeconds.value !== null) {
+      return formatDuration(pausedAtSeconds.value)
+    }
     return formatDuration(totalDuration.value); 
   }
   return formatDuration(currentGlobalTime.value); 
 });
 
 const displayMaxTimeStr = computed(() => {
-  if (playMode.value === 'live') {
-    return formatDuration(totalDuration.value);
-  }
-  return formatDuration(frozenDuration.value || totalDuration.value); 
+  return formatDuration(timelineMax.value);
 });
 
 const currentGlobalAbsTime = ref<number>(0); 
@@ -311,52 +367,47 @@ const firstSessionStartTime = ref<number | null>(null);
 const sessionStartTime = ref<number>(0); 
 const sessionMap = ref<Array<{ index: number; start_offset_sec: number; start_abs_time_ms: number }>>([]);
 
-function offsetToAbsTime(offsetSec: number): number {
-  if (sessionMap.value.length === 0) {
-    return (firstSessionStartTime.value || 0) + offsetSec * 1000;
-  }
-  let matched = sessionMap.value[0];
-  for (let i = sessionMap.value.length - 1; i >= 0; i--) {
-    if (offsetSec >= sessionMap.value[i].start_offset_sec) {
-      matched = sessionMap.value[i];
-      break;
-    }
-  }
-  const offsetWithinSession = offsetSec - matched.start_offset_sec;
-  return matched.start_abs_time_ms + offsetWithinSession * 1000;
-}
+let clockOffset = 0
 
-let lastVideoAbsTime = 0
-let lastVideoAbsTimeTs = 0
-let cachedBufferDelayMs = 6000
-const HLS_FIXED_LATENCY_MS = 3000
+const mediaClock = useMediaClock({
+  getVideo: () => videoPlayerRef.value,
+  getHls: () => hls,
+  getPlaybackMode: () => playbackMode.value,
+  getPlayMode: () => playMode.value,
+  getClockOffset: () => clockOffset,
+  getWebRtcLatencyMs: () => webrtcLatencyMs.value,
+  isSwitching: () => isSwitchingStream,
+  getFrozenRealTime: () => frozenRealTime.value,
+  getSessionStartTime: () => sessionStartTime.value,
+  getFirstSessionStartTime: () => firstSessionStartTime.value,
+  getSessionMap: () => sessionMap.value,
+})
+const { offsetToAbsTime, getVideoAbsTime, cachedBufferDelay, lastAbsTimeSource, reset: resetMediaClock } = mediaClock
 
-// Player buffer jitter calibration.
+// 【前端自动校准】：微调播放器缓冲波动
 let timeCalibrationMs = 0
 let calibrationInitialized = false
 let calibrationSampleCount = 0
 let calibrationLastResetTime = 0
 
-// EWMA calibration with outlier filtering.
+// 【NTP 式动态校准 - 增强】：EWMA + 异常值过滤
 const calibrationHistory: number[] = []
 const CALIBRATION_HISTORY_MAX = 100
-const CALIBRATION_OUTLIER_STD_THRESHOLD = 3  // reject samples beyond 3 std devs
+const CALIBRATION_OUTLIER_STD_THRESHOLD = 3  // 3 倍标准差过滤
 
-// Diagnostics only; not used in time computation.
+// 【NTP 偏移量监控】：仅用于诊断日志，不参与时间计算
 let ntpOffsetMs = 0
 let ntpSynced = false
 
-// Tolerances for clock skew and long-session drift.
+// 【校准参数】— V4.3 放宽范围，适应 WSL2 时钟偏差和长会话偏移
 const CALIBRATION_EWMA_ALPHA = 0.1
-const CALIBRATION_SYNC_WINDOW_MS = 8000     // match window
-const CALIBRATION_CLAMP_MS = 15000           // clamp samples to ±15s
-const CALIBRATION_MAX_RATE_MS = 200          // max drift rate
-const CALIBRATION_MIN_REASONABLE = -10000    // lower bound
-const CALIBRATION_MAX_REASONABLE = 10000     // upper bound
+const CALIBRATION_SYNC_WINDOW_MS = 8000     // 匹配窗口 8s（原 5s），应对大偏移
+const CALIBRATION_CLAMP_MS = 15000           // 样本 clamp ±15s（原 5s），允许收集宽范围样本
+const CALIBRATION_MAX_RATE_MS = 200          // 允许更大漂移速率（原 50）
+const CALIBRATION_MIN_REASONABLE = -10000    // 校准下限 -10s（原 -3s）
+const CALIBRATION_MAX_REASONABLE = 10000     // 校准上限 +10s（原 3s）
 const CALIBRATION_MIN_SAMPLES = 3
 const CALIBRATION_RESET_COOLDOWN = 30000
-const FIXED_OFFSET_MS = 100
-const EXTRAPOLATION_MAX_MS = 5000
 const MAX_RECORDS_PER_SECOND = 30
 const FORCE_RELEASE_THRESHOLD_MS = 5000
 let recordsReleasedThisSecond = 0
@@ -364,9 +415,13 @@ let recordsReleaseSecondStart = 0
 let lastRecordsReleaseDiag = 0
 let lastEmittedAbsoluteTime = 0
 
+/**
+ * NTP 式异常值过滤
+ * 过滤掉超过 3 倍标准差的样本，避免循环点突变影响校准
+ */
 function isOutlier(sample: number): boolean {
   if (calibrationHistory.length < 10) {
-    return false;  // not enough samples yet
+    return false;  // 样本不足，不过滤
   }
   const mean = calibrationHistory.reduce((a, b) => a + b, 0) / calibrationHistory.length;
   const variance = calibrationHistory.reduce((sum, v) => sum + (v - mean) ** 2, 0) / calibrationHistory.length;
@@ -374,125 +429,14 @@ function isOutlier(sample: number): boolean {
   return Math.abs(sample - mean) > CALIBRATION_OUTLIER_STD_THRESHOLD * std;
 }
 
+/**
+ * 添加校准样本到历史记录
+ */
 function addCalibrationSample(sample: number) {
   calibrationHistory.push(sample);
   if (calibrationHistory.length > CALIBRATION_HISTORY_MAX) {
     calibrationHistory.shift();
   }
-}
-
-let _getVideoAbsTimeLogCounter = 0;
-let _lastAbsTimeSource = '';
-
-function getVideoAbsTime(video: HTMLVideoElement | null): number {
-  if (isSwitchingStream && frozenRealTime.value) {
-    return frozenRealTime.value;
-  }
-
-  if (playbackMode.value === 'webrtc' && playMode.value === 'live') {
-    return Date.now() + clockOffset - FIXED_OFFSET_MS - webrtcLatencyMs.value;
-  }
-
-  // Prefer fragment programDateTime: each TS fragment carries an absolute timestamp from the
-  // backend FFmpeg clock, more accurate than deriving time from sessionStartTime.
-  const currentTime = video ? video.currentTime : 0;
-  const currentLvl = hls?.currentLevel;
-  const levelIdx = currentLvl !== undefined && currentLvl >= 0 ? currentLvl : 0;
-  const details = hls?.levels?.[levelIdx]?.details;
-
-  if (details) {
-    const fragments = details.fragments || [];
-    const currentFrag = fragments.find(
-      (f: any) => currentTime >= f.start - 0.05 && currentTime < f.start + f.duration + 0.05
-    );
-    if (currentFrag?.programDateTime) {
-      const pdtMs = typeof currentFrag.programDateTime === 'number'
-        ? currentFrag.programDateTime
-        : new Date(currentFrag.programDateTime).getTime();
-      const t = pdtMs + (currentTime - currentFrag.start) * 1000;
-      lastVideoAbsTime = t;
-      lastVideoAbsTimeTs = Date.now();
-      cachedBufferDelayMs = Date.now() + clockOffset - t;
-      _lastAbsTimeSource = 'pdt';
-      return t;
-    }
-
-    // currentTime is before the first fragment (initial load)
-    if (fragments.length > 0) {
-      const firstFrag = fragments[0];
-      if (currentTime < firstFrag.start && firstFrag.programDateTime) {
-        const pdtMs = typeof firstFrag.programDateTime === 'number'
-          ? firstFrag.programDateTime
-          : new Date(firstFrag.programDateTime).getTime();
-        const t = pdtMs - (firstFrag.start - currentTime) * 1000;
-        lastVideoAbsTime = t;
-        lastVideoAbsTimeTs = Date.now();
-        cachedBufferDelayMs = Date.now() + clockOffset - t;
-        _lastAbsTimeSource = 'pdt_approx_past';
-        return t;
-      }
-    }
-
-    // currentTime is past the last fragment (live edge)
-    if (fragments.length > 0) {
-      const lastFrag = fragments[fragments.length - 1];
-      if (currentTime >= lastFrag.start + lastFrag.duration && lastFrag.programDateTime) {
-        const pdtMs = typeof lastFrag.programDateTime === 'number'
-          ? lastFrag.programDateTime
-          : new Date(lastFrag.programDateTime).getTime();
-        const t = pdtMs + (currentTime - lastFrag.start) * 1000;
-        lastVideoAbsTime = t;
-        lastVideoAbsTimeTs = Date.now();
-        cachedBufferDelayMs = Date.now() + clockOffset - t;
-        _lastAbsTimeSource = 'pdt_approx_future';
-        return t;
-      }
-    }
-  }
-
-  if (hls?.playingDate) {
-    const t = hls.playingDate.getTime();
-    lastVideoAbsTime = t;
-    lastVideoAbsTimeTs = Date.now();
-    cachedBufferDelayMs = Date.now() + clockOffset - t;
-    _lastAbsTimeSource = 'playingDate';
-    return t;
-  }
-
-  // Fallback when programDateTime is unavailable
-  if (firstSessionStartTime.value && sessionStartTime.value > 0) {
-    const absTime = sessionStartTime.value + currentTime * 1000;
-    lastVideoAbsTime = absTime;
-    lastVideoAbsTimeTs = Date.now();
-    _lastAbsTimeSource = 'relative';
-    return absTime;
-  }
-  if (firstSessionStartTime.value || sessionMap.value.length > 0) {
-    const absTime = offsetToAbsTime(currentTime);
-    _lastAbsTimeSource = 'session';
-    return absTime - HLS_FIXED_LATENCY_MS;
-  }
-  if (lastVideoAbsTime > 0 && (Date.now() - lastVideoAbsTimeTs) < EXTRAPOLATION_MAX_MS) {
-    const t = lastVideoAbsTime + (Date.now() - lastVideoAbsTimeTs);
-    if (_lastAbsTimeSource !== 'extrapolate') {
-      diagLogger.log('DIAG-ABSTIME', JSON.stringify({ source: 'extrapolate_fallback', t, prevSource: _lastAbsTimeSource }));
-    }
-    _lastAbsTimeSource = 'extrapolate';
-    return t;
-  }
-
-  // Estimate latency from hls.latency
-  let currentDelay = cachedBufferDelayMs;
-  if (playbackMode.value === 'hls' && hls && hls.latency >= 0 && hls.latency < 60) {
-    currentDelay = hls.latency * 1000;
-    cachedBufferDelayMs = currentDelay;
-  }
-  const t = Date.now() + clockOffset - currentDelay;
-  if (_lastAbsTimeSource !== 'final') {
-    diagLogger.log('DIAG-ABSTIME', JSON.stringify({ source: 'final_fallback', t, currentDelay, prevSource: _lastAbsTimeSource }));
-  }
-  _lastAbsTimeSource = 'final';
-  return t;
 }
 
 const currentGlobalTime = ref(0)
@@ -518,12 +462,17 @@ function startRunningSecondsCounter(baseSeconds: number) {
   runningSecondsStartTime = Date.now()
   totalDuration.value = baseSeconds
   runningSecondsTimer = window.setInterval(() => {
-    // Total session duration; independent of playMode
+    // totalDuration 代表已录制总时长，不受 playMode 影响，在任何模式下都持续递增；
+    // 历史模式靠它让"当前播放位置"的比例随时间相对变化。
     const elapsed = (Date.now() - runningSecondsStartTime) / 1000
     totalDuration.value = runningSecondsBase + elapsed
     emit('time-update', totalDuration.value)
-    if (videoPlayerRef.value && !isUserSeeking.value && !isSwitchingStream) {
-      currentGlobalTime.value = videoPlayerRef.value.currentTime
+    // 实时模式同步左侧时间；历史模式的播放位置由 onTimeUpdate 维护，
+    // 这里再写会把历史位置覆盖成直播边缘。
+    if (playMode.value === 'live' && videoPlayerRef.value && !isUserSeeking.value && !isSwitchingStream) {
+      currentGlobalTime.value = userPaused.value && pausedAtSeconds.value !== null
+        ? pausedAtSeconds.value
+        : videoPlayerRef.value.currentTime
     }
   }, 200)
 }
@@ -533,6 +482,13 @@ function stopRunningSecondsCounter() {
     clearInterval(runningSecondsTimer)
     runningSecondsTimer = null
   }
+}
+
+// 任务停止/异常：录像不再增长，时间轴右端改用磁盘上的真实总时长收尾。
+function freezeRecordingClock() {
+  if (!runningSecondsTimer) return
+  stopRunningSecondsCounter()
+  void loadHistory()
 }
 
 function startLiveTimeCounter() {
@@ -550,27 +506,44 @@ function stopLiveTimeCounter() {
   }
 }
 
-// Dual-channel (RGB / IR) source.
-const currentChannel = ref<'annotated' | 'rgb' | 'ir' | 'ir_annotated'>('annotated')
+// Dual-channel support
+const currentChannel = ref<'annotated' | 'rgb' | 'ir' | 'ir_annotated'>('annotated')  // V5.1: 服务端渲染标注流
 const currentTask = computed(() => taskStore.tasks.find(t => t.id === props.taskId))
 const isDualStream = computed(() => {
   return currentTask.value?.input_types?.includes('ir') || false
 })
 
-const records = ref<DetectionRecord[]>([])
 const pendingRecords = ref<DetectionRecord[]>([])
-const loadingRecords = ref(false)
 const loadingHistory = ref(false)
 const currentPage = ref(1)
 const pageSize = 20
 let recordsInterval: number | null = null
 
-// Event-driven detection records.
-const detectionEvents = ref<any[]>([])
-const activeTracks = ref(0)
-let eventsPollingTimer: number | null = null
+// 检测记录/事件轮询已抽离为 composable，播放器只负责播放与时间轴。
+const {
+  records,
+  loadingRecords,
+  detectionEvents,
+  activeTracks,
+  eventFilter,
+  eventPage,
+  eventPageSize,
+  eventTotal,
+  refreshRecords,
+  refreshDetectionEvents,
+  startEventsPolling,
+  stopEventsPolling,
+} = useDetectionFeed(() => props.taskId)
+
 let clockCalibrationInterval: number | null = null
-let bufferCleanupTimer: number | null = null
+const { seekToLiveAndPlay, startLiveDriftCorrection, stopLiveDriftCorrection } = useLiveDrift({
+  videoRef: videoPlayerRef,
+  getHls: () => hls,
+  playMode,
+  isVideoPaused,
+  isUserSeeking,
+})
+let bufferCleanupTimer: number | null = null  // 【新增】独立缓存清理定时器
 
 const currentDetectionConfig = ref<any>(null)
 
@@ -578,14 +551,13 @@ let resizeObserver: ResizeObserver | null = null
 let lastDriftLog = 0
 let lastRenderDiagLog = 0
 let lastDimWarnLog = 0
-let clockOffset = 0
 let isDetectionStale = ref(false)
 let lastStaleLog = 0
 let lastDetectionMessageTime = Date.now()
 
-// Clear lastValidRecord when no new box arrives.
+// 【P0-4 诊断日志】：lastValidRecord 超时清除机制
 let lastValidRecordUpdateTime = 0
-const LAST_VALID_RECORD_TIMEOUT_MS = 5000  // no new box for 5s
+const LAST_VALID_RECORD_TIMEOUT_MS = 5000  // 5 秒无新检测框则清除
 
 const sendDebugLog = (event_type: string, details: any = {}) => {
   if (!props.taskId) return
@@ -650,6 +622,11 @@ function onVideoPlaying() {
     streamState.value = 'running';
   }
   isVideoPaused.value = false;
+  userPaused.value = false;
+  pausedAtSeconds.value = null;
+  if (playMode.value === 'live') {
+    startLiveDriftCorrection();
+  }
   stopLiveTimeCounter();
 
   setTimeout(() => {
@@ -679,15 +656,22 @@ function onVideoSeeked() {
 function onVideoPause() {
   isVideoActuallyPlaying.value = false;
   isVideoPaused.value = true;
+  // 只有用户按暂停才冻结位置；换源/切历史时我们也调 pause()，
+  // 那不是用户意图，位置由后续 seek 决定。
+  if (userPaused.value) {
+    pausedAtSeconds.value = videoPlayerRef.value?.currentTime ?? null;
+  }
+  // 暂停期间禁止直播追帧，否则画面会被漂移纠正悄悄改写。
+  stopLiveDriftCorrection();
   const activeStates: StreamState[] = ['running', 'buffering', 'recovering'];
-  if (playMode.value === 'live' && activeStates.includes(streamState.value)) {
+  if (userPaused.value && playMode.value === 'live' && activeStates.includes(streamState.value)) {
     startLiveTimeCounter();
   }
 }
 
 function onVideoWaiting() {
   isVideoActuallyPlaying.value = false;
-  // Buffering no longer overwrites 'loading'
+  // 改造：视频缓冲用 'buffering' 状态，不再污染 'loading'
   if (streamState.value === 'running') {
     streamState.value = 'buffering';
   }
@@ -698,9 +682,9 @@ function onVideoStalled() {
   sendDebugLog('VIDEO_STALLED', { msg: 'Network stalled, download stopped' })
 }
 
-// Detection buffer fed by the WebSocket or the history API.
-const detectionBuffer = ref<Array<{ timestamp: number; timestamp_ms?: number; wall_clock?: number; boxes: any[]; is_history?: boolean }>>([])
-const lastValidRecord = ref<{ timestamp: number; boxes: any[] } | null>(null)
+// ========== Phase 3: 检测数据缓冲池 (Glass Overlay) ==========
+// 本地数据缓冲池由 composable 管理（时间窗口 + 容量双策略清理）
+const { detectionBuffer, lastValidRecord, pruneDetectionBuffer } = useDetectionBuffer(playMode, () => clockOffset)
 
 let hasFirstFrameRendered = false
 let pendingUnifiedReadyTimeout: number | null = null
@@ -733,115 +717,7 @@ function checkUnifiedReady() {
   }
 }
 
-function seekToLiveAndPlay() {
-  if (!videoPlayerRef.value || !hls) return;
-  videoPlayerRef.value.play().catch(() => {});
-}
-
-// Prune by time window and capacity; start early at 80% to avoid frame hitches.
-let pruneLogCounter = 0
 let diagWsLogCounter = 0
-
-// History keeps a larger buffer than live.
-const CACHE_TIME_WINDOW_LIVE_MS = 15000
-const CACHE_TIME_WINDOW_HISTORY_MS = 60000
-const CACHE_MAX_CAPACITY_LIVE = 500
-const CACHE_MAX_CAPACITY_HISTORY = 1200
-const CACHE_HARD_LIMIT_LIVE = 800
-const CACHE_HARD_LIMIT_HISTORY = 1500
-const CACHE_EARLY_CLEANUP_THRESHOLD_LIVE = 400
-const CACHE_EARLY_CLEANUP_THRESHOLD_HISTORY = 960
-
-function pruneDetectionBuffer() {
-  const isHistoryMode = playMode.value === 'history'
-  
-  const timeWindowMs = isHistoryMode ? CACHE_TIME_WINDOW_HISTORY_MS : CACHE_TIME_WINDOW_LIVE_MS
-  const maxCapacity = isHistoryMode ? CACHE_MAX_CAPACITY_HISTORY : CACHE_MAX_CAPACITY_LIVE
-  const hardLimit = isHistoryMode ? CACHE_HARD_LIMIT_HISTORY : CACHE_HARD_LIMIT_LIVE
-  const earlyCleanupThreshold = isHistoryMode ? CACHE_EARLY_CLEANUP_THRESHOLD_HISTORY : CACHE_EARLY_CLEANUP_THRESHOLD_LIVE
-  
-  if (detectionBuffer.value.length > hardLimit) {
-    detectionBuffer.value = detectionBuffer.value.slice(-hardLimit)
-    pruneLogCounter++
-    if (pruneLogCounter % 20 === 0) {
-      diagLogger.log('DIAG-PRUNE-HARD', JSON.stringify({
-        event: 'hard_limit_cleanup',
-        mode: isHistoryMode ? 'history' : 'live',
-        beforeSize: detectionBuffer.value.length + (detectionBuffer.value.length - hardLimit),
-        afterSize: detectionBuffer.value.length,
-        hardLimit,
-      }))
-    }
-  }
-  
-  if (detectionBuffer.value.length > 2) {
-    const newestTs = detectionBuffer.value[detectionBuffer.value.length - 1]?.timestamp || 0
-    
-    // Drop records older than the time window
-    const timeCutoff = newestTs - timeWindowMs
-    
-    // Above 80% usage, halve the time window
-    let effectiveCutoff = timeCutoff
-    if (detectionBuffer.value.length > earlyCleanupThreshold) {
-      effectiveCutoff = newestTs - (timeWindowMs / 2)
-      pruneLogCounter++
-      if (pruneLogCounter % 30 === 0) {
-        diagLogger.log('DIAG-PRUNE-EARLY', JSON.stringify({
-          event: 'early_cleanup',
-          mode: isHistoryMode ? 'history' : 'live',
-          bufferSize: detectionBuffer.value.length,
-          threshold: earlyCleanupThreshold,
-          timeWindowMs: timeWindowMs / 2,
-        }))
-      }
-    }
-    
-    pruneLogCounter++
-    if (pruneLogCounter % 100 === 0) {
-      diagLogger.log('DIAG-PRUNE', JSON.stringify({
-        mode: isHistoryMode ? 'history' : 'live',
-        newestTs,
-        timeCutoff,
-        effectiveCutoff,
-        bufferSize: detectionBuffer.value.length,
-        firstTs: detectionBuffer.value[0]?.timestamp,
-        clockOffset,
-      }))
-    }
-    
-    // Live keeps only non-history records; history keeps both
-    while (detectionBuffer.value.length > 2) {
-      const first = detectionBuffer.value[0]
-      if (first.timestamp < effectiveCutoff) {
-        if (!isHistoryMode && !first.is_history) {
-          detectionBuffer.value.shift()
-        } else if (isHistoryMode) {
-          detectionBuffer.value.shift()
-        } else {
-          break
-        }
-      } else {
-        break
-      }
-    }
-    
-    // Force-trim if records still exceed the cap after the time-window pass
-    if (detectionBuffer.value.length > maxCapacity) {
-      const excess = detectionBuffer.value.length - maxCapacity
-      detectionBuffer.value = detectionBuffer.value.slice(excess)
-      if (pruneLogCounter % 30 === 0) {
-        diagLogger.log('DIAG-PRUNE-CAPACITY', JSON.stringify({
-          event: 'capacity_cleanup',
-          mode: isHistoryMode ? 'history' : 'live',
-          beforeSize: detectionBuffer.value.length + excess,
-          afterSize: detectionBuffer.value.length,
-          removed: excess,
-          maxCapacity,
-        }))
-      }
-    }
-  }
-}
 
 const lastDetections = ref<any[]>([])
 
@@ -852,7 +728,7 @@ const showOverlay = computed(() => {
 });
 
 const shouldShowTimeline = computed(() =>
-  ['running', 'connecting', 'retry', 'loading', 'recovering', 'paused_end'].includes(streamState.value)
+  ['running', 'connecting', 'retry', 'loading', 'recovering', 'buffering', 'model_loading', 'paused_end'].includes(streamState.value)
 )
 
 const canControl = computed(() => {
@@ -860,7 +736,7 @@ const canControl = computed(() => {
 })
 
 const isActuallyPlaying = computed(() => {
-  // Drive the button from play/pause, not buffering
+  // UI 按钮状态应直接反映视频底层的暂停/播放状态
   return !isVideoPaused.value;
 })
 
@@ -879,15 +755,19 @@ onMounted(async () => {
   sendDebugLog('COMPONENT_MOUNTED')
 
   try {
-    const task = await tasksApi.get(props.taskId)
+    // 任务详情与快照并行请求：串行等待会让播放器在首帧前多顿一个 RTT。
+    const [task, snapshot] = await Promise.all([
+      tasksApi.get(props.taskId),
+      tasksApi.getSnapshot(props.taskId),
+    ])
+    // 1. 任务详情 (配置信息)
     if (task && task.detection_config) {
       currentDetectionConfig.value = typeof task.detection_config === 'string'
         ? JSON.parse(task.detection_config)
         : task.detection_config
     }
 
-    // Restore state from a snapshot on mount.
-    const snapshot = await tasksApi.getSnapshot(props.taskId)
+    // 2. [核心新逻辑] 获取快照 (Hot Start)
     if (snapshot) {
       if (snapshot.task) {
         const idx = taskStore.tasks.findIndex(t => t.id === props.taskId)
@@ -900,19 +780,20 @@ onMounted(async () => {
       const hlsReady = snapshot.hls_ready || false
       const hasHistory = snapshot.has_history || false
 
-      // Running tasks always use live mode; history is only for terminal states
+      // 【P2-2 修复 v2】：核心原则 - taskStatus=running 时永远走实时模式
+      // 仅非 running 状态才考虑历史回放
       const isTaskRunning = taskStatus === 'running' || taskStatus === 'initializing'
       const isTerminalStatus = ['pending', 'failed', 'exception'].includes(taskStatus)
 
       if (isTaskRunning) {
-        // Live mode
+        // ===== 实时模式（任务运行中）=====
         records.value = snapshot.recent_records || []
 
         if (snapshot.server_time) {
           clockOffset = snapshot.server_time - Date.now()
         }
         
-        // Backend NTP offset
+        // 【三层混合校准 - 第一层】：读取后端 NTP 偏移量
         if (snapshot.ntp_offset_ms !== undefined) {
           ntpOffsetMs = snapshot.ntp_offset_ms
           ntpSynced = snapshot.ntp_synced || false
@@ -937,7 +818,7 @@ onMounted(async () => {
         }
 
         if (hlsReady) {
-          // Seed the buffer from recent detections
+          // HLS 就绪：加载实时检测框
           if (snapshot.recent_detections?.length > 0) {
             const allBoxes: any[] = [];
             const cutoffTime = Date.now() + clockOffset - 30000
@@ -985,11 +866,11 @@ onMounted(async () => {
             streamState.value = 'model_loading'
           }
         } else {
-          // Wait for the WebSocket to report running
+          // HLS 未就绪（初始化中/模型加载中）：等待 WebSocket 推送 running 状态
           streamState.value = taskStatus === 'initializing' ? 'connecting' : 'model_loading'
         }
       } else if (isTerminalStatus && hasHistory) {
-        // History mode
+        // ===== 历史回放模式（任务已终止且有历史数据）=====
         skipPlayModeWatchInit = true;
         playMode.value = 'history'
         streamState.value = 'loading'
@@ -998,38 +879,42 @@ onMounted(async () => {
 
         await loadHistory()
 
-        // loadHistory may return no segments; fall back to snapshot timing
+        // V4.4: 即使 firstSessionStartTime 未设置，也加载历史检测框
+        // loadHistory() 可能无 segments，此时用 snapshot 中的时间信息作为 fallback
         const startMs = firstSessionStartTime.value
           || (snapshot.task?.session_start_time ? new Date(snapshot.task.session_start_time).getTime() : null)
           || (Date.now() - (snapshot.task?.cumulative_running_seconds || 0) * 1000)
         const endMs = Date.now()
         await loadHistoricalBoxes(startMs, endMs)
 
+        // V4.9: 历史模式也需要加载检测事件（右侧面板）
         refreshDetectionEvents()
 
         if (totalDuration.value > 0 || frozenDuration.value > 0) {
           initHls()
         } else {
           streamState.value = 'exception'
-          errorMsg.value = 'No historical video data available'
+          errorMsg.value = '历史视频数据不可用'
         }
       } else if (isTerminalStatus) {
-        // Terminal state without history
+        // ===== 任务已终止但无历史数据 =====
         records.value = snapshot.recent_records || []
         detectionBuffer.value = []
         streamState.value = 'exception'
-        errorMsg.value = 'Task has ended, no historical video data'
+        errorMsg.value = '任务已结束，暂无历史视频数据'
       } else {
-        // Unknown state
+        // ===== 其他未知状态 =====
         records.value = snapshot.recent_records || []
         detectionBuffer.value = []
         streamState.value = 'exception'
-        errorMsg.value = 'No video data available'
+        errorMsg.value = '暂无可用视频数据'
       }
     }
 
+    // 3. 【P2-3 修复】：仅在任务运行中且非历史模式时建立 WebSocket 连接
     if (snapshot?.task?.status === 'running' && playMode.value !== 'history') {
       connect()
+      // V4.0: fallback — 确保 totalDuration 计数器在 WebSocket 连接后启动
       if (!runningSecondsTimer) {
         const taskData = snapshot.task
         const baseSeconds = taskData?.cumulative_running_seconds || 0
@@ -1043,25 +928,29 @@ onMounted(async () => {
       }
     }
     
-    // Start renderLoop when detections arrive before the video
+    // [V3 修复]：如果有检测数据但 renderLoop 未启动，立即启动渲染循环
+    // 防止视频缓冲期间检测框不显示
     if (detectionBuffer.value.length > 0 && !rafId) {
       renderLoop();
     }
     
   } catch (e) {
     logger.error('system', 'Failed to perform Hot Start', { error: String(e) })
-    // Fall back to a direct connection
+    // 回退：尝试直接连接
     if (playMode.value !== 'history') {
       connect()
     }
   }
 
   if (videoPlayerRef.value) {
-    resizeObserver = new ResizeObserver(() => {})
+    resizeObserver = new ResizeObserver(() => {
+      // V4.6: Canvas 已移除，ResizeObserver 无需同步显示尺寸
+    })
     resizeObserver.observe(videoPlayerRef.value)
   }
   
-  // Cleanup runs even when renderLoop has stopped
+  // 【新增】启动独立缓存清理定时器兜底
+  // 每 5 秒执行一次，确保即使 renderLoop 停止也能清理缓存
   if (bufferCleanupTimer) clearInterval(bufferCleanupTimer)
   bufferCleanupTimer = window.setInterval(() => {
     pruneDetectionBuffer()
@@ -1124,16 +1013,20 @@ onUnmounted(() => {
       clockCalibrationInterval = null
     }
     
+    // 【新增】清理独立缓存清理定时器
     if (bufferCleanupTimer) {
       clearInterval(bufferCleanupTimer)
       bufferCleanupTimer = null
     }
 
+    // V3.0: 停止事件轮询
     stopEventsPolling()
 
     cancelStaleReconnect();
     stopLiveTimeCounter();
     stopRunningSecondsCounter();
+    debouncedSeek.cancel();
+    switchSeq++;
   } catch (e) {
     logger.error('system', 'Component unmount failure', { error: String(e) })
   }
@@ -1142,7 +1035,9 @@ onUnmounted(() => {
 let skipPlayModeWatchInit = false
 
 watch(playMode, (newMode) => {
+  emit('play-mode-change', newMode)
   if (newMode === 'history') {
+    stopLiveDriftCorrection()
     tasksApi.getDetectionRecords(props.taskId, { limit: 1000 }).then(res => {
       records.value = res.records || []
     }).catch(e => logger.warn('api', 'Failed to load detection records', { error: String(e) }))
@@ -1151,6 +1046,8 @@ watch(playMode, (newMode) => {
       loadHistory()
     }
     skipPlayModeWatchInit = false
+  } else {
+    startLiveDriftCorrection()
   }
 }, { immediate: false })
 
@@ -1159,6 +1056,22 @@ watch(() => props.taskId, (newId) => {
     forceDisconnect()
     isFrozen.value = false
     playMode.value = 'live'
+    // 切换任务必须清掉上一任务的记录，否则右侧面板会显示别的任务的数据。
+    records.value = []
+    detectionEvents.value = []
+    activeTracks.value = 0
+    eventPage.value = 1
+    detectionBuffer.value = []
+    lastValidRecord.value = null
+    pendingRecords.value = []
+    pendingSeekSeconds.value = null
+    pendingHlsSeek = undefined
+    lastSeekTarget = null
+    userPaused.value = false
+    pausedAtSeconds.value = null
+    frozenDuration.value = 0
+    debouncedSeek.cancel()
+    switchSeq++
     destroyPlayer()
     connect()
     loadHistory()
@@ -1167,7 +1080,8 @@ watch(() => props.taskId, (newId) => {
 })
 
 watch(() => currentTask.value?.status, (status) => {
-  // Reconnect when the task starts again and the stream is not active
+  // V5.3: 扩展重连条件，增加 WebSocket 断开连接的判断
+  // 当任务重新运行时，如果 streamState 不在 running 状态或 WebSocket 未连接，则重连
   const shouldReconnect = status === 'running' && (
     streamState.value === 'paused_end' ||
     streamState.value === 'exception' ||
@@ -1179,14 +1093,22 @@ watch(() => currentTask.value?.status, (status) => {
     detectionBuffer.value = [];
     lastValidRecord.value = null;
     pendingRecords.value = [];
-    // Keep records.value so history survives resume
+    // 任务重新执行后回到实时：历史快照与暂停态都要清掉，否则滑块会留在旧位置。
+    playMode.value = 'live'
+    frozenDuration.value = 0
+    pendingSeekSeconds.value = null
+    lastSeekTarget = null
+    userPaused.value = false
+    pausedAtSeconds.value = null
+    debouncedSeek.cancel()
+    switchSeq++
+    // 不清空 records.value — 续存模式下保留历史记录
     connect()
     initPlayer()
   }
 })
 
-function connect() {
-  const token = localStorage.getItem('token')
+async function connect() {
   isActive = true
 
   if (streamState.value !== 'running') {
@@ -1197,24 +1119,35 @@ function connect() {
   wsReconnectCount.value = 0
   pendingRecords.value = []
 
-  // Fail instead of hanging on a gray mask if connecting stalls
+  // If we stay in 'connecting' for too long (e.g. 15s), show an error instead of hanging with a gray mask
   if (connectionTimeout) clearTimeout(connectionTimeout)
   connectionTimeout = setTimeout(() => {
     if (streamState.value === 'connecting' && isActive) {
       logger.warn('websocket', 'Initial connection timed out', { taskId: props.taskId })
       streamState.value = 'exception'
-      errorMsg.value = 'Timed out connecting to the inference engine. Try refreshing the page or re-running the task'
+      errorMsg.value = '连接推理引擎超时，请尝试刷新页面或重新执行任务'
     }
   }, 15000)
 
     logger.info('websocket', 'Attempting to connect', { taskId: props.taskId, url: `${props.wsUrl}/${props.taskId}` });
-    ws = new WebSocket(`${props.wsUrl}/${props.taskId}?token=${token}`)
+    // 短期票据替代长期 JWT：票据只用于本次握手，过期后重连会重新申请。
+    let ticket = ''
+    try {
+      ticket = (await authApi.wsTicket()).ticket
+    } catch (e) {
+      logger.error('websocket', 'Failed to obtain ws ticket', { taskId: props.taskId })
+      if (isActive) setTimeout(() => { if (isActive) connect() }, 3000)
+      return
+    }
+    if (!isActive) return
+    ws = new WebSocket(`${props.wsUrl}/${props.taskId}?ticket=${encodeURIComponent(ticket)}`)
 
     ws.onopen = () => {
       logger.info('websocket', 'Connected', { taskId: props.taskId });
+      // V3.0: 启动事件驱动检测记录轮询
       startEventsPolling()
 
-      // Recalibrate clockOffset every 30s
+      // 【P4 修复】：启动 clockOffset 定期校准，每 30 秒校准一次
       if (clockCalibrationInterval) clearInterval(clockCalibrationInterval)
       clockCalibrationInterval = window.setInterval(async () => {
         if (!isActive || !ws || ws.readyState !== WebSocket.OPEN) {
@@ -1235,7 +1168,7 @@ function connect() {
             clockOffset = newOffset
           }
         } catch {
-          // ignore
+          // 静默忽略校准失败
         }
       }, 30000)
     }
@@ -1256,7 +1189,7 @@ function connect() {
       if (data.type === 'status') {
         if (data.status === 'deleted') {
           terminatingTasks.add(props.taskId)
-          message.warning('This task has been removed')
+          message.warning('当前任务已被移除')
           emit('close')
           return
         }
@@ -1264,16 +1197,20 @@ function connect() {
 
       switch (data.type) {
         case 'time_sync':
+          // 【P0-2 修复】：处理时间同步消息
           if (data.server_time_ms && data.video_pts_ms) {
             const t1 = Date.now();
             const serverTime = data.server_time_ms;
             const videoPts = data.video_pts_ms;
             
+            // 计算时钟偏移（简化版NTP算法）
             const newOffset = serverTime - t1;
-
+            
+            // 使用指数移动平均平滑偏移量
             const prevOffset = clockOffset;
             clockOffset = Math.round(prevOffset * 0.9 + newOffset * 0.1);
-
+            
+            // 记录诊断日志
             if (Math.abs(clockOffset - prevOffset) > 10) {
               diagLogger.log('DIAG-TIME-SYNC', JSON.stringify({
                 serverTime,
@@ -1349,7 +1286,7 @@ function connect() {
           break;
         case 'error':
           streamState.value = 'exception'
-          errorMsg.value = data.message || 'An unknown video connection error occurred'
+          errorMsg.value = data.message || '视频连接发生未知错误'
           break
         case 'snapshot':
           if (data.records) records.value = data.records
@@ -1358,13 +1295,13 @@ function connect() {
           diagLogger.log('DIAG-RE', JSON.stringify({ event: 'received', count: (data.records || []).length, playMode: playMode.value, recordsLen: records.value.length, pendingLen: pendingRecords.value.length }));
           const newRecords = data.records || (data.record ? [data.record] : []);
           if (newRecords.length > 0) {
-            // Attach timestamp_ms so live and history records share one clock
+            // 【双时间戳架构】：为每条记录添加 timestamp_ms 用于五位一体同步
             const sorted = [...newRecords].sort((a: any, b: any) => {
               const tsA = a.timestamp_ms || new Date(a.detected_at).getTime();
               const tsB = b.timestamp_ms || new Date(b.detected_at).getTime();
               return tsA - tsB;
             });
-            // Both modes go through the pending queue for absolute-time sync
+            // 无论 live 还是 history，统一将记录写入待释放队列进行绝对时间戳物理同步
             sorted.forEach((r: any) => {
               if (!r.timestamp_ms) {
                 r.timestamp_ms = new Date(r.detected_at).getTime();
@@ -1383,7 +1320,7 @@ function connect() {
             lastDetectionMessageTime = Date.now();
             
             if (playMode.value === 'history') {
-              // Keep live detections (flagged is_history) so the buffer never empties in history mode
+              // 历史模式下实时检测数据也进入 detectionBuffer（标记为 history），避免 buffer 清空后无数据
               items.forEach((item: any) => {
                 if (item && item.boxes) {
                   detectionBuffer.value.push({
@@ -1440,16 +1377,20 @@ function connect() {
           break
         case 'status':
           if (data.status === 'exception' || data.status === 'error') {
+            // 录像已经停止，时间轴右端不能再跟着墙钟长下去。
+            freezeRecordingClock()
             streamState.value = 'exception'
             errorMsg.value = data.message || ''
             emit('status-change', 'exception')
           } else if (data.status === 'pending') {
-            // Triggers reconnection after a task restart
+            // V5.3: 任务停止/暂停时转换到 paused_end 状态
+            // 这是任务重启后 WebSocket 重连的关键触发条件
+            freezeRecordingClock()
             streamState.value = 'paused_end'
             emit('status-change', 'pending')
           } else if (data.status === 'deleted') {
             terminatingTasks.add(props.taskId)
-            message.warning('This task has been removed')
+            message.warning('当前任务已被移除')
             emit('close')
           }
           break
@@ -1471,7 +1412,7 @@ function connect() {
       return
     }
 
-    // code 1006/1011: backend restarted, back off longer to avoid request pile-up
+    // [V3 修复]：检测后端重启（code 1006 = 异常关闭），延长重连间隔避免请求堆积
     const isBackendRestart = event.code === 1006 || event.code === 1011
 
     if (wsReconnectCount.value < WS_MAX_RECONNECT) {
@@ -1488,23 +1429,23 @@ function connect() {
     } else {
       if (isBackendRestart) {
         streamState.value = 'exception'
-        errorMsg.value = 'The backend service has restarted. Please refresh the page to reconnect'
+        errorMsg.value = '后端服务已重启，请刷新页面重新连接'
         emit('status-change', 'exception')
         return
       }
       tasksApi.get(props.taskId).then(task => {
         if (task.status === 'running') {
           streamState.value = 'exception'
-          errorMsg.value = 'The video stream connection is unstable. Check your network and refresh the page'
+          errorMsg.value = '视频流连接持续不稳定，请检查网络后刷新页面'
           emit('status-change', 'exception')
         } else {
           streamState.value = 'exception'
-          errorMsg.value = 'The video stream disconnected and the task has stopped'
+          errorMsg.value = '视频流连接已断开，且任务已停止'
           emit('status-change', 'exception')
         }
       }).catch(() => {
         streamState.value = 'exception'
-        errorMsg.value = 'The video stream disconnected and the backend status could not be synced'
+        errorMsg.value = '视频流连接已断开，且无法同步后台状态'
         emit('status-change', 'exception')
       })
     }
@@ -1533,7 +1474,7 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
 
   if (Hls.isSupported()) {
     if (hls && hls.media === videoPlayerRef.value) {
-      pendingSeekSeconds = seekToSeconds;
+      pendingHlsSeek = seekToSeconds;
       hls.loadSource(streamUrl);
       setTimeout(() => {
         if (isSwitchingStream) {
@@ -1541,31 +1482,13 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
           isSwitchingStream = false;
           lastValidRecord.value = null;
         }
+        pendingSeekSeconds.value = null;
       }, 1500);
     } else {
       destroyPlayer();
-      pendingSeekSeconds = seekToSeconds;
+      pendingHlsSeek = seekToSeconds;
 
-      hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: false,
-        backBufferLength: 10,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
-        liveSyncDurationCount: 5.5,
-        liveMaxLatencyDurationCount: 6.0,
-        highBufferWatchdogPeriod: 10,
-        manifestLoadingMaxRetry: 10,
-        manifestLoadingTimeOut: 5000,
-        manifestLoadingRetryDelay: 1000,
-        liveDurationInfinity: true,
-        startLevel: -1,
-        testBandwidth: false,
-        progressive: true,
-      });
-
-      hls.loadSource(streamUrl);
-      hls.attachMedia(videoPlayerRef.value);
+      hls = createHlsForMedia(videoPlayerRef.value, streamUrl);
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         sendDebugLog('HLS_MANIFEST_PARSED');
@@ -1574,7 +1497,7 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
         const taskStatus = currentTask.value?.status;
         
         if (playMode.value === 'live') {
-          // Require both status sources to agree before switching to history
+          // 仅当 taskStatus 和 currentTask.status 双重确认为终态时才切历史模式
           const terminalStatuses = ['pending', 'failed', 'exception'];
           const confirmedTerminal = taskStatus && terminalStatuses.includes(taskStatus)
             && currentTask.value?.status && terminalStatuses.includes(currentTask.value.status);
@@ -1583,7 +1506,7 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
             playMode.value = 'history';
             frozenDuration.value = hls?.levels[0]?.details?.totalduration || videoPlayerRef.value.duration;
             videoPlayerRef.value.currentTime = 0;
-            videoPlayerRef.value.play().catch(() => {});
+            if (!userPaused.value) videoPlayerRef.value.play().catch(() => {});
             loadHistory();
             fetchHistoricalRecords(0, frozenDuration.value);
           } else {
@@ -1594,8 +1517,8 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
         } else {
           streamState.value = 'running';
           
-          const effectiveSeek = pendingSeekSeconds;
-          pendingSeekSeconds = undefined;
+          const effectiveSeek = pendingHlsSeek;
+          pendingHlsSeek = undefined;
           
           if (effectiveSeek !== undefined && effectiveSeek > 0) {
             videoPlayerRef.value.pause();
@@ -1603,37 +1526,43 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
               if (!videoPlayerRef.value || !isActive) return;
               if (videoPlayerRef.value.duration && isFinite(videoPlayerRef.value.duration)) {
                 videoPlayerRef.value.currentTime = effectiveSeek;
-                videoPlayerRef.value.play().catch(() => {});
+                if (!userPaused.value) videoPlayerRef.value.play().catch(() => {});
                 hls?.off(Hls.Events.FRAG_LOADED, performSeek);
               }
             };
             if (videoPlayerRef.value.duration && isFinite(videoPlayerRef.value.duration)) {
               videoPlayerRef.value.currentTime = effectiveSeek;
-              videoPlayerRef.value.play().catch(() => {});
+              if (!userPaused.value) videoPlayerRef.value.play().catch(() => {});
             } else {
               hls?.on(Hls.Events.FRAG_LOADED, performSeek);
             }
-          } else {
+          } else if (!userPaused.value) {
             videoPlayerRef.value.play().catch(() => {});
           }
           lastValidRecord.value = null;
         }
         
         setTimeout(() => {
-          if (isActive && streamState.value === 'running' && !isVideoActuallyPlaying.value && videoPlayerRef.value) {
+          // 用户主动暂停的不能自动恢复；历史模式下也没有"直播边缘"可追，
+          // 之前的写法会把历史画面莫名拉回第 0 秒。
+          if (isActive && !userPaused.value && streamState.value === 'running' && !isVideoActuallyPlaying.value && videoPlayerRef.value) {
             const v = videoPlayerRef.value;
             if (v.readyState < 3) {
-              logger.warn('stream', 'First frame timeout, forcing seek to live edge');
-              const newPos = (hls?.liveSyncPosition || 0) - 1;
-              v.currentTime = Math.max(0, newPos);
+              if (playMode.value === 'live') {
+                logger.warn('stream', 'First frame timeout, forcing seek to live edge');
+                const newPos = (hls?.liveSyncPosition || 0) - 1;
+                v.currentTime = Math.max(0, newPos);
+              } else {
+                v.currentTime = Math.max(0, v.currentTime);
+              }
               v.play().catch(() => {});
             }
           }
-        }, 8000);  // 8s timeout: the backend HLS pipeline needs time for a cold start
+        }, 8000);  // 8s 超时：给予后端 HLS 管道充足的冷启动时间
 
         if (playMode.value === 'live') {
           setTimeout(() => {
-            if (isActive && hls?.liveSyncPosition && videoPlayerRef.value) {
+            if (isActive && !isVideoPaused.value && hls?.liveSyncPosition && videoPlayerRef.value) {
               const diff = hls.liveSyncPosition - videoPlayerRef.value.currentTime;
               if (diff > 5) {
                 logger.info('stream', 'Late seekToLive: correcting large drift', { diff: diff.toFixed(1) });
@@ -1650,6 +1579,7 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
           isSwitchingStream = false;
           lastValidRecord.value = null;
         }
+        pendingSeekSeconds.value = null;
       }, 1500);
 
       hls.on(Hls.Events.FRAG_CHANGED, (event, data) => {
@@ -1664,66 +1594,23 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
         }
       });
 
-      let manifest404RetryCount = 0;
-      const MAX_MANIFEST_404_RETRIES = 10;
-      
-      let frag404RetryCount = 0;
-      const MAX_FRAG_404_RETRIES = 10;
-
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        if (data.fatal) {
-          switch (data.type) {
-            case Hls.ErrorTypes.NETWORK_ERROR:
-              logger.warn('hls', 'Network error', { taskId: props.taskId, details: data.details });
-              if (data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR && data.response?.code === 404) {
-                manifest404RetryCount++;
-                if (manifest404RetryCount > MAX_MANIFEST_404_RETRIES) {
-                  logger.error('hls', 'Manifest 404 max retries exceeded', { taskId: props.taskId, retries: manifest404RetryCount });
-                  streamState.value = 'exception';
-                  errorMsg.value = 'Video stream initialization failed. Check the backend service or re-run the task';
-                  destroyPlayer();
-                  return;
-                }
-                logger.info('hls', `Manifest 404, retry ${manifest404RetryCount}/${MAX_MANIFEST_404_RETRIES} in 1s`, { taskId: props.taskId });
-                if (streamState.value !== 'loading' && streamState.value !== 'model_loading') {
-                  streamState.value = 'loading';
-                }
-                setTimeout(() => {
-                  if (isActive && hls) {
-                    hls.loadSource(streamUrl);
-                  }
-                }, 1000);
-              } else if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR && data.response?.code === 404) {
-                frag404RetryCount++;
-                if (frag404RetryCount > MAX_FRAG_404_RETRIES) {
-                  logger.error('hls', 'Fragment 404 max retries exceeded, stream is dead', { taskId: props.taskId });
-                  streamState.value = 'exception';
-                  errorMsg.value = 'The video stream was interrupted unexpectedly. Check the camera or video source';
-                  destroyPlayer();
-                  return;
-                }
-                logger.info('hls', `Fragment 404, retry ${frag404RetryCount}/${MAX_FRAG_404_RETRIES}`, { taskId: props.taskId });
-                if (streamState.value !== 'buffering') streamState.value = 'buffering';
-                setTimeout(() => {
-                  if (isActive && hls) hls.startLoad();
-                }, 1000);
-              } else {
-                hls?.startLoad();
-              }
-              break;
-            case Hls.ErrorTypes.MEDIA_ERROR:
-              logger.error('hls', 'Media error', { taskId: props.taskId, details: data.details });
-              hls?.recoverMediaError();
-              break;
-            default:
-              destroyPlayer();
-              break;
+      bindHlsErrorHandler(hls, streamUrl, {
+        taskId: props.taskId,
+        isActive: () => isActive,
+        onManifestRetry: () => {
+          if (streamState.value !== 'loading' && streamState.value !== 'model_loading') {
+            streamState.value = 'loading';
           }
-        } else {
-          if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) {
-            logger.debug('hls', 'Non-fatal fragment load error', { taskId: props.taskId });
-          }
-        }
+        },
+        onFragmentBuffering: () => {
+          if (streamState.value !== 'buffering') streamState.value = 'buffering';
+        },
+        onFatal: (message) => {
+          streamState.value = 'exception';
+          errorMsg.value = message;
+          destroyPlayer();
+        },
+        onDispose: () => destroyPlayer(),
       });
     }
   } else if (videoPlayerRef.value.canPlayType('application/vnd.apple.mpegurl')) {
@@ -1732,20 +1619,18 @@ async function initHls(seekToSeconds?: number, overrideUrl?: string) {
   }
 }
 
+// 保持对 initPlayer 的引用，防止外部调用失效（虽然通常是内部调用）
 const initPlayer = initHls;
 
 function destroyPlayer() {
-  if (hls) {
-    hls.destroy();
-    hls = null;
-  }
+  stopLiveDriftCorrection();
+  hls = destroyHls(hls);
   if (playbackMode.value === 'webrtc') {
     webrtcPlayerRef.value?.stopWebRTC();
   }
   isVideoActuallyPlaying.value = false;
   isDetectionStale.value = false;
-  lastVideoAbsTime = 0;
-  lastVideoAbsTimeTs = 0;
+  resetMediaClock();
   timeCalibrationMs = 0;
   calibrationInitialized = false;
   hasFirstFrameRendered = false;
@@ -1785,46 +1670,6 @@ function cancelStaleReconnect() {
   }
 }
 
-async function refreshRecords() {
-  loadingRecords.value = true
-  try {
-    const res = await tasksApi.getDetectionRecords(props.taskId, { limit: 100 })
-    records.value = res.records
-  } catch (e) {
-    logger.error('api', 'Failed to refresh records', { taskId: props.taskId, error: String(e) })
-  } finally {
-    loadingRecords.value = false
-  }
-}
-
-async function refreshDetectionEvents() {
-  try {
-    const [eventsRes, summaryRes] = await Promise.all([
-      tasksApi.getDetectionEvents(props.taskId, { limit: 100, order: 'desc' }),
-      tasksApi.getDetectionEventsSummary(props.taskId),
-    ])
-    detectionEvents.value = eventsRes.events
-    activeTracks.value = summaryRes.total_targets
-  } catch (e) {
-    diagLogger.warn('events-poll', `Failed to refresh detection events: ${e}`, { taskId: props.taskId })
-  }
-}
-
-function startEventsPolling() {
-  stopEventsPolling()
-  refreshDetectionEvents()
-  eventsPollingTimer = window.setInterval(() => {
-    refreshDetectionEvents()
-  }, 2000)
-}
-
-function stopEventsPolling() {
-  if (eventsPollingTimer) {
-    clearInterval(eventsPollingTimer)
-    eventsPollingTimer = null
-  }
-}
-
 async function loadHistory() {
   if (loadingHistory.value) return
   if (historyController) historyController.abort()
@@ -1833,32 +1678,30 @@ async function loadHistory() {
 
   try {
     const res = await tasksApi.getHistoryVideos(props.taskId, { signal: historyController.signal })
-    if (res.segments && res.segments.length > 0) {
-      const merged = res.segments[0]
-      const estimatedDuration = merged.duration || 0
-      if (playMode.value === 'history' && estimatedDuration > totalDuration.value) {
-        totalDuration.value = estimatedDuration
-      }
+    const totalDurationFromServer = Number(res.total_duration || 0)
+    if (playMode.value === 'history' && totalDurationFromServer > 0) {
+      // 历史模式使用服务端汇总时长；不再依赖 segments[0]（那只是单个分片）。
+      totalDuration.value = totalDurationFromServer
+    }
 
-      if (merged.first_session_start_time) {
-        firstSessionStartTime.value = new Date(merged.first_session_start_time).getTime();
-        sessionStartTime.value = firstSessionStartTime.value;
-      }
+    if (res.first_session_start_time) {
+      firstSessionStartTime.value = new Date(res.first_session_start_time).getTime();
+      sessionStartTime.value = firstSessionStartTime.value;
+    }
 
-      if (merged.session_map && merged.session_map.length > 0) {
-        sessionMap.value = merged.session_map;
-      }
+    if (res.session_map && res.session_map.length > 0) {
+      sessionMap.value = res.session_map;
+    }
 
-      if (playMode.value !== 'history' && records.value.length === 0) {
-        try {
-          const recordsRes = await tasksApi.getDetectionRecords(props.taskId, { limit: 1000 })
-          records.value = recordsRes.records || []
-        } catch (e) {
-          logger.warn('api', 'Detection records failed to load', { taskId: props.taskId, error: String(e) })
-        }
+    if (playMode.value !== 'history' && records.value.length === 0) {
+      try {
+        const recordsRes = await tasksApi.getDetectionRecords(props.taskId, { limit: 1000 })
+        records.value = recordsRes.records || []
+      } catch (e) {
+        logger.warn('api', 'Detection records failed to load', { taskId: props.taskId, error: String(e) })
       }
     }
-    sendDebugLog('LOAD_HISTORY_SUCCESS', { count: res.segments?.length })
+    sendDebugLog('LOAD_HISTORY_SUCCESS', { total: res.total, duration: totalDurationFromServer })
   } catch (e: any) {
     if (axios.isCancel(e) || e.name === 'AbortError' || e.message === 'canceled') return
     logger.error('api', 'History failed to load', { taskId: props.taskId, error: e.message })
@@ -1868,24 +1711,27 @@ async function loadHistory() {
   }
 }
 
-// Render loop: pull boxes from the buffer by video progress.
+// fetchTaskStartTime is deprecated as we use programDateTime
+
+// ========== Phase 3: 核心渲染引擎 (requestAnimationFrame) ==========
+// 放弃依赖 WebSocket 的触发，改为根据视频当前的物理进度主动去缓冲池里"捞"框
 function renderLoop() {
   if (!isActive) {
     return;
   }
 
-  // Resolve and emit absolute time before any early return, so webrtc/lagging/switching paths still report it
-  const videoElement = videoPlayerRef.value || null;
-  const currentVideoAbsTime = getVideoAbsTime(videoElement);
+  // 1. 优先获取最核心的物理绝对时间并对外广播以实现对齐，防止因 early returns (如 webrtc, lagging, switching) 漏发
+  const currentVideoAbsTime = getVideoAbsTime();
   const calibratedVideoTime = currentVideoAbsTime - timeCalibrationMs;
   const baseCalibratedTime = playbackMode.value === 'hls'
     ? currentVideoAbsTime
     : (calibrationInitialized
         ? calibratedVideoTime
-        : currentVideoAbsTime - (cachedBufferDelayMs > 0 ? cachedBufferDelayMs : 3000));
+        : currentVideoAbsTime - (cachedBufferDelay() > 0 ? cachedBufferDelay() : 3000));
 
-  // History mode compensates -2500ms for inference, network, and packaging lag. Live mode does not:
-  // HLS already lags 5-6s, and more compensation would leave pendingRecords unreleased.
+  // 历史模式下引入 -2500ms 的反向时间对齐补偿，校正 AI 推理、网络传输及分片打包带来的物理时滞
+  // 实时模式下不补偿：HLS 本身已有 5-6 秒延迟，再补偿会导致 effectiveTime 过度滞后于检测记录时间戳，
+  // 使得 pendingRecords 中的记录因 recordTime > effectiveCalibratedTime 而永远无法释放
   const compensationMs = playMode.value === 'history' ? -2500 : 0;
   const effectiveCalibratedTime = baseCalibratedTime + compensationMs;
 
@@ -1940,7 +1786,7 @@ function renderLoop() {
         }
       }
     } else if (detectionBuffer.value.length > 0) {
-      const degradedCalibMs = cachedBufferDelayMs > 0 ? cachedBufferDelayMs : 6000;
+      const degradedCalibMs = cachedBufferDelay() > 0 ? cachedBufferDelay() : 6000;
       const degradedVideoTime = currentVideoAbsTime - degradedCalibMs;
       const DEGRADED_SYNC_WINDOW_MS = 15000;
 
@@ -1998,9 +1844,10 @@ function renderLoop() {
   const isLagging = !isVideoActuallyPlaying.value && !isPaused && !isSwitchingStream;
 
   if (isLagging) {
-    // Clear stale boxes to avoid ghost boxes
+    // 【P0-4 修复】：lastValidRecord 超时清除机制，防止"幽灵检测框"
     const nowMs = Date.now()
     if (lastValidRecord.value && (nowMs - lastValidRecordUpdateTime) > LAST_VALID_RECORD_TIMEOUT_MS) {
+      // 超过 5 秒没有新检测框，清除幽灵框
       diagLogger.log('DIAG-GHOST-BOX', JSON.stringify({
         event: 'timeout_clear',
         age: nowMs - lastValidRecordUpdateTime,
@@ -2010,7 +1857,7 @@ function renderLoop() {
     }
     
     if (lastValidRecord.value && lastValidRecord.value.boxes.length > 0) {
-      // Boxes are already burned into the stream
+      // V4.6: 内嵌方案 — 检测框由 AnnotatedHLSWriter 嵌入 HLS 视频流，前端不做 Canvas 绘制
     } else if (detectionBuffer.value.length > 0 && playMode.value === 'live') {
       const lastBuf = detectionBuffer.value[detectionBuffer.value.length - 1];
       if (lastBuf && lastBuf.boxes.length > 0) {
@@ -2019,6 +1866,7 @@ function renderLoop() {
       }
     }
     
+    // 【P0-4 诊断日志】：卡顿态记录释放
     if (shouldUpdateRecords && pendingRecords.value.length > 0) {
       const now = Date.now()
       if (now - recordsReleaseSecondStart >= 1000) {
@@ -2071,6 +1919,7 @@ function renderLoop() {
     const MAX_RECORDS_PER_FRAME = 10;
     while (pendingRecords.value.length > 0 && movedCount < MAX_RECORDS_PER_FRAME && recordsReleasedThisSecond < MAX_RECORDS_PER_SECOND) {
       const first = pendingRecords.value[0];
+      // 【双时间戳架构】：使用 timestamp_ms 进行五位一体同步
       const recordTime = first.timestamp_ms || new Date(first.detected_at).getTime();
       if (recordTime <= effectiveCalibratedTime || (effectiveCalibratedTime - recordTime) > FORCE_RELEASE_THRESHOLD_MS) {
         const record = pendingRecords.value.shift();
@@ -2098,9 +1947,10 @@ function renderLoop() {
     }
   }
 
+  // 4. 【画面渲染区】：清空画布并画框。人为暂停时定格，但如果在拖拽进度条(currentTime变动)则强制重绘以保证流畅跟手。
   const lastRenderedTime = (window as any)._lastRenderedTime || 0;
   if (isPaused && !isUserSeeking.value && Math.abs(video.currentTime - lastRenderedTime) < 0.05) {
-    // Paused and not seeking: keep the last frame
+    // 暂停态且没有拖拽：直接跳过绘图更新，保留上一帧内容
     rafId = requestAnimationFrame(renderLoop);
     return;
   }
@@ -2120,6 +1970,7 @@ function renderLoop() {
       }
     }
     if (bestCalibAbsDiff < Infinity) {
+      // 【NTP 式动态校准】：异常值过滤
       if (isOutlier(bestCalibSample)) {
         if (calibrationSampleCount % 50 === 0) {
           diagLogger.log('DIAG-CALIB', JSON.stringify({
@@ -2171,7 +2022,7 @@ function renderLoop() {
 
   for (const record of detectionBuffer.value) {
     const recordTimestamp = record.timestamp_ms || record.timestamp;
-    // Only match past/current boxes to avoid leftover detections
+    // 【P0修复】：只匹配过去或当前的检测框，防止检测框残留
     const timeDiff = calibratedVideoTime - recordTimestamp;
     if (timeDiff >= 0 && timeDiff < CALIBRATION_SYNC_WINDOW_MS && timeDiff < minDiff) {
       minDiff = timeDiff;
@@ -2224,7 +2075,7 @@ function renderLoop() {
     cancelStaleReconnect();
   }
 
-  // Drift diagnostics, throttled to 3s
+  // 【诊断日志】：如果缓冲池有数据但没对上时间，记录漂移量（每 3 秒记录一次）
   if (!closestRecord && detectionBuffer.value.length > 0) {
     if (!lastDriftLog || Date.now() - lastDriftLog > 3000) {
       const first = detectionBuffer.value[0];
@@ -2241,13 +2092,14 @@ function renderLoop() {
         dataFirstAbs: first.timestamp,
         dataLastAbs: last.timestamp,
         calibrationMs: Math.round(timeCalibrationMs),
-        cachedBufferDelayMs: Math.round(cachedBufferDelayMs),
+        cachedBufferDelayMs: Math.round(cachedBufferDelay()),
         calibrated: calibrationInitialized
       }));
       lastDriftLog = Date.now();
     }
   }
 
+  // 4. 画框！
   if (Date.now() - lastRenderDiagLog > 5000) {
     const bufferTsRange = detectionBuffer.value.length > 0
       ? `[${detectionBuffer.value[0].timestamp}..${detectionBuffer.value[detectionBuffer.value.length - 1].timestamp}]`
@@ -2262,17 +2114,17 @@ function renderLoop() {
       isPaused: isVideoPaused.value,
       calibrated: calibrationInitialized,
       calibMs: Math.round(timeCalibrationMs),
-      cachedBufferDelayMs: Math.round(cachedBufferDelayMs),
+      cachedBufferDelayMs: Math.round(cachedBufferDelay()),
       videoTime: video.currentTime.toFixed(2),
       videoAbs: Math.round(currentVideoAbsTime),
-      effectiveTime: Math.round(calibrationInitialized ? currentVideoAbsTime - timeCalibrationMs : currentVideoAbsTime - (cachedBufferDelayMs > 0 ? cachedBufferDelayMs : 3000)),
+      effectiveTime: Math.round(calibrationInitialized ? currentVideoAbsTime - timeCalibrationMs : currentVideoAbsTime - (cachedBufferDelay() > 0 ? cachedBufferDelay() : 3000)),
       pendingRecords: pendingRecords.value.length,
       recordsCount: records.value.length,
       stale: isDetectionStale.value,
       timeSinceLastDetection: Math.round(Date.now() - lastDetectionMessageTime),
       videoResolution: `${video.videoWidth}x${video.videoHeight}`,
       taskResolution: `${currentTask.value?.resolution_width}x${currentTask.value?.resolution_height}`,
-      absTimeSource: _lastAbsTimeSource,
+      absTimeSource: lastAbsTimeSource(),
     }))
     lastRenderDiagLog = Date.now()
   }
@@ -2283,44 +2135,47 @@ function renderLoop() {
     lastValidRecord.value = null;
   }
 
+  // 保持高达 60FPS 的丝滑渲染循环
   rafId = requestAnimationFrame(renderLoop);
 }
 
+// V4.6: clearCanvas / drawBoxesOnCanvas 已移除 — 全模式使用内嵌方案，检测框由 AnnotatedHLSWriter 直接编码进 HLS 视频流
+
 function onTimeUpdate(e: Event) {
   const video = e.target as HTMLVideoElement;
-  
-  if (playMode.value === 'history' && frozenDuration.value > 0) {
-    if (video.currentTime >= frozenDuration.value - 0.2) {
-      video.pause();
-      return; 
-    }
-  }
 
-  if (playMode.value !== 'live') {
-    if (isNaN(video.duration) || !isFinite(video.duration)) {
-      const currentLevel = hls?.currentLevel ?? -1;
-      const levelDetails = (currentLevel >= 0) ? hls?.levels?.[currentLevel]?.details : null;
-      if (levelDetails) {
-        totalDuration.value = levelDetails.totalduration;
-      }
-    } else {
-      totalDuration.value = video.duration;
-    }
-  }
-
+  // 先同步播放位置再判断是否到末端：以前的顺序会让"已到末端"的
+  // 每次 timeupdate 都提前 return，左侧时间和滑块从此不再更新。
   if (!isUserSeeking.value && !isSwitchingStream) {
     currentGlobalTime.value = video.currentTime;
   }
 
-  // Fetch the next 30s slice as playback nears the loaded edge
+  // 历史模式播放到快照末端就停住，不越界播到未加载的区间。
+  if (playMode.value === 'history' && frozenDuration.value > 0) {
+    const cap = isFinite(video.duration) && video.duration > 0
+      ? Math.min(frozenDuration.value, video.duration)
+      : frozenDuration.value;
+    if (video.currentTime >= cap - 0.2) {
+      video.pause();
+      return;
+    }
+  }
+
+  // totalDuration 由运行时长计时器维护（已录制总时长），
+  // 这里不再用 video.duration 覆盖它——那会把时间轴右端锁死在快照长度。
+
+  // 【滑动窗口机制】：如果在历史模式下，且视频播放快到了我们当前数据的边缘
   if (playMode.value === 'history' && !isSwitchingStream) {
     const currentPhysicalTimeMs = offsetToAbsTime(video.currentTime);
     
+    // 如果当前播放时间距离我们抓取的数据边界不到 5 秒了，悄悄在后台拉取下一个 30 秒的切片
     if (historyLastFetchTime - currentPhysicalTimeMs < 5000) {
         loadHistoricalBoxes(historyLastFetchTime, historyLastFetchTime + 30000);
     }
   }
 }
+
+// ── V5.1: Canvas 已移除，检测框由服务端嵌入视频帧 ──
 
 function toggleChannel() {
   if (!hls || !videoPlayerRef.value) return;
@@ -2364,33 +2219,36 @@ function toggleChannel() {
     }
   }, 1500);
   
-  message.success(`Switched to ${currentChannel.value === 'ir_annotated' ? 'IR annotated stream' : 'RGB annotated stream'}`);
+  message.success(`已切换至 ${currentChannel.value === 'ir_annotated' ? 'IR标注流' : 'RGB标注流'}`);
   sendDebugLog('CHANNEL_SWAP', { channel: currentChannel.value, time: timeToRestore });
 }
 
 function handleSeekBarHover(e: MouseEvent) {
-  if (!seekbarWrapRef.value || totalDuration.value <= 0) return;
+  if (!seekbarWrapRef.value || timelineMax.value <= 0) return;
 
   const rect = seekbarWrapRef.value.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const percent = Math.max(0, Math.min(1, x / rect.width));
   
-  const hoverSeconds = percent * (frozenDuration.value || totalDuration.value);
+  // 核心修复：直接使用总时长百分比计算相对秒数
+  const hoverSeconds = percent * timelineMax.value;
 
   hoverX.value = x;
   showHoverTooltip.value = true;
   
-  // formatDuration takes seconds, not an epoch timestamp
+  // 必须使用 formatDuration (格式化秒数)，绝对不能传入 Epoch 时间戳！
   hoverTimeAbs.value = formatDuration(hoverSeconds); 
 }
 
 watch(records, () => {
+  // Handled by renderLoop
 }, { deep: true })
 
 async function fetchHistoricalRecords(startSec: number, endSec: number) {
   if (!props.taskId) return
   try {
-      const absStart = offsetToAbsTime(startSec);
+    // 核心修复：根据绝对起始时间，将相对秒数转换为绝对时间戳
+    const absStart = offsetToAbsTime(startSec);
     const absEnd = offsetToAbsTime(endSec);
 
     const res = await tasksApi.getDetectionRecords(props.taskId, {
@@ -2399,6 +2257,7 @@ async function fetchHistoricalRecords(startSec: number, endSec: number) {
       limit: 5000,
     })
 
+    // 将后端的历史数据转换为缓冲池格式
     const historicalData = (res.records || []).map((rec: DetectionRecord) => ({
       timestamp: new Date(rec.detected_at).getTime(),
       timestamp_ms: new Date(rec.detected_at).getTime(),
@@ -2413,6 +2272,7 @@ async function fetchHistoricalRecords(startSec: number, endSec: number) {
       is_history: true,
     }))
 
+    // 合并到缓冲池，去重（基于 timestamp）
     const existingTimestamps = new Set(detectionBuffer.value.map(d => d.timestamp))
     const newData = historicalData.filter((d: any) => !existingTimestamps.has(d.timestamp))
     detectionBuffer.value.push(...newData)
@@ -2424,6 +2284,7 @@ async function fetchHistoricalRecords(startSec: number, endSec: number) {
   }
 }
 
+// 历史滑动窗口边界标记
 let historyLastFetchTime = 0;
 
 async function loadHistoricalBoxes(startMs: number, endMs: number) {
@@ -2435,6 +2296,7 @@ async function loadHistoricalBoxes(startMs: number, endMs: number) {
     });
 
     if (res && res.length > 0) {
+      // 合并并去重（基于 timestamp）
       const existingTs = new Set(detectionBuffer.value.map(d => d.timestamp));
       const newData = res
         .filter((d: any) => !existingTs.has(d.timestamp))
@@ -2451,15 +2313,20 @@ async function loadHistoricalBoxes(startMs: number, endMs: number) {
   }
 }
 
+// 真正的流切换执行逻辑
 let liveDetectionCache: Array<{ timestamp: number; boxes: any[] }> = []
+// 每次跳转递增。异步流程（拉历史、重建播放器）返回后若序号已变，
+// 说明用户又点了别处或已返回实时，本次结果必须丢弃，否则会互相抢播放位置。
+let switchSeq = 0
 
 const executeStreamSwitch = async (targetSeconds: number) => {
+    const seq = ++switchSeq
     isSwitchingStream = true;
     isDetectionStale.value = false;
     cancelStaleReconnect();
     
     const targetPhysicalTimeMs = Math.floor(offsetToAbsTime(targetSeconds));
-    // Fallback chain keeps historyStartMs valid
+    // V4.4: 三层 fallback 确保 historyStartMs 始终有效
     const historyStartMs = firstSessionStartTime.value
       || (currentTask.value?.session_start_time ? new Date(currentTask.value.session_start_time).getTime() : null)
       || (targetPhysicalTimeMs - frozenDuration.value * 1000)
@@ -2470,15 +2337,17 @@ const executeStreamSwitch = async (targetSeconds: number) => {
         skipPlayModeWatchInit = true;
         playMode.value = 'history';
         
-        frozenDuration.value = totalDuration.value;
+        // 快照末端取点击那一刻的已录制时长；总时长本身继续增长（见 timelineMax），
+        // 因此暂停后"当前位置/总时长"的比例会随时间相对变化。
+        frozenDuration.value = Math.max(frozenDuration.value, totalDuration.value);
+        pendingSeekSeconds.value = null;
         frozenRealTime.value = offsetToAbsTime(targetSeconds);
+        userPaused.value = false;
 
-        // Keep live detections as the history baseline
+        // 保留切换时刻的实时检测数据作为历史数据基底，标记为 history
         detectionBuffer.value.forEach(d => d.is_history = true);
         lastValidRecord.value = null;
 
-        stopRunningSecondsCounter();
-        
         if (playbackMode.value === 'webrtc') {
           switchToHLS();
         }
@@ -2486,14 +2355,16 @@ const executeStreamSwitch = async (targetSeconds: number) => {
         if (videoPlayerRef.value) videoPlayerRef.value.pause();
         
         await loadHistoricalBoxes(historyStartMs, frozenRealTime.value);
+        if (seq !== switchSeq) return;
         
         await loadHistory();
+        if (seq !== switchSeq) return;
         
         initHls(targetSeconds);
     } else {
         if (videoPlayerRef.value) {
             videoPlayerRef.value.currentTime = targetSeconds;
-            videoPlayerRef.value.play().catch(()=>{});
+            if (!userPaused.value) videoPlayerRef.value.play().catch(()=>{});
         }
         
         detectionBuffer.value = [];
@@ -2502,27 +2373,90 @@ const executeStreamSwitch = async (targetSeconds: number) => {
     }
 };
 
-// 400ms debounce so dragging does not fire requests
+// 暴露给进度条的防抖处理器 (延迟 400ms，拖拽滑块期间不发请求)
 const debouncedSeek = debounce((targetSeconds: number) => {
     executeStreamSwitch(targetSeconds);
 }, 400);
 
+// 历史模式下目标超出当前快照末端时，重新读盘拉一条更长的播放列表。
+// 不做这件事的话，右端永远停在进入历史那一刻，用户拖不过去只能看到滑块回弹。
+async function refreshSnapshotAndSeek(targetSeconds: number) {
+  isSwitchingStream = true
+  const seq = ++switchSeq
+  try {
+    await loadHistory()
+    if (seq !== switchSeq) return
+    frozenDuration.value = Math.max(totalDuration.value, targetSeconds + 1)
+    await initHls(targetSeconds)
+  } finally {
+    window.setTimeout(() => {
+      if (seq === switchSeq) isSwitchingStream = false
+    }, 2000)
+  }
+}
+
+function releaseSeeking() {
+  if (seekReleaseTimer) {
+    clearTimeout(seekReleaseTimer)
+    seekReleaseTimer = null
+  }
+  isUserSeeking.value = false
+}
+
+// afterChange 在某些点击路径下不触发，卡住会让左侧时间再也不更新。
+// 每次 change 复位同一个定时器，避免拖拽期间堆一串待触发的回调。
+let seekReleaseTimer: number | null = null
+function scheduleSeekRelease() {
+  if (seekReleaseTimer) clearTimeout(seekReleaseTimer)
+  seekReleaseTimer = window.setTimeout(() => {
+    seekReleaseTimer = null
+    isUserSeeking.value = false
+  }, 2000)
+}
+
 function handleGlobalSeek(targetPercent: number) {
   if (!videoPlayerRef.value || isNaN(targetPercent)) return;
+
+  // 实时模式下点在最右端 = 本来就在直播边缘，不该切成历史再卡住。
+  if (playMode.value === 'live' && targetPercent >= 99.5) {
+    pendingSeekSeconds.value = null
+    lastSeekTarget = null
+    return
+  }
   
-  const targetSeconds = (targetPercent / 100) * (frozenDuration.value || totalDuration.value);
+  const max = timelineMax.value
+  const targetSeconds = (targetPercent / 100) * max;
   
   isUserSeeking.value = true; 
+  scheduleSeekRelease();
   currentGlobalTime.value = targetSeconds;
+  lastSeekTarget = targetSeconds;
   
   if (playMode.value === 'history') {
+    // 拖拽过程先限制在已有快照内，松手后再决定是否扩大快照重新加载。
+    const playable = frozenDuration.value > 0 ? Math.min(targetSeconds, frozenDuration.value - 0.2) : targetSeconds
     if (videoPlayerRef.value) {
-      videoPlayerRef.value.currentTime = targetSeconds;
+      videoPlayerRef.value.currentTime = playable;
     }
-    const targetMs = Math.floor(offsetToAbsTime(targetSeconds));
+    // 滑块跟着实际能播到的位置走，避免"点了右边却停在左边界"的割裂感
+    if (playable < targetSeconds) currentGlobalTime.value = playable;
+    const targetMs = Math.floor(offsetToAbsTime(playable));
     loadHistoricalBoxes(targetMs - 10000, targetMs + 60000);
   } else {
+    // 让滑块立即停在点击位置（存秒数，总时长变化时不漂移）。
+    pendingSeekSeconds.value = targetSeconds;
     debouncedSeek(targetSeconds);
+  }
+}
+
+function handleSeekAfterChange() {
+  releaseSeeking()
+  const target = lastSeekTarget
+  lastSeekTarget = null
+  if (target === null || playMode.value !== 'history') return
+  // 只有录像仍在增长时才值得重建快照；已停止的任务拖到末端也没有新内容。
+  if (runningSecondsTimer && frozenDuration.value > 0 && target > frozenDuration.value - 1) {
+    void refreshSnapshotAndSeek(target)
   }
 }
 
@@ -2534,16 +2468,19 @@ function handleUnifiedPlayPause() {
   if (!videoPlayerRef.value) return;
 
   if (videoPlayerRef.value.paused) {
-    // Jump to the live edge when resuming live playback
+    // 恢复播放
+    userPaused.value = false;
+    // 实时模式下取消暂停，跳转到最新直播进度
     if (playMode.value !== 'history' && hls) {
       if (hls.liveSyncPosition !== null) {
         videoPlayerRef.value.currentTime = Math.max(0, hls.liveSyncPosition);
       }
+      startLiveDriftCorrection();
     } else if (playMode.value === 'history' && videoPlayerRef.value.duration > 0 && videoPlayerRef.value.currentTime >= videoPlayerRef.value.duration - 0.5) {
       videoPlayerRef.value.currentTime = 0;
     }
     
-    // Reinit HLS if it was destroyed while paused
+    // 【关键修复】恢复播放时如果 HLS 已销毁，重新初始化
     if (!hls && streamState.value !== 'exception') {
       logger.info('playback', 'HLS instance missing, reinitializing before play', { taskId: props.taskId });
       initHls();
@@ -2551,23 +2488,34 @@ function handleUnifiedPlayPause() {
     
     videoPlayerRef.value.play().catch(e => {
       logger.error('playback', 'Playback failed', { taskId: props.taskId, error: String(e) });
-      message.error("Playback failed: the video stream may have disconnected");
+      message.error("播放失败: 视频流可能已断开");
+      // 播放失败时尝试重新连接
       if (streamState.value === 'running') {
         streamState.value = 'loading';
         setTimeout(() => initHls(), 1000);
       }
     });
+    // @playing 事件会同步更新 isVideoPaused.value = false
   } else {
+    // 暂停播放
+    userPaused.value = true;
     videoPlayerRef.value.pause();
+    // @pause 事件会同步更新 isVideoPaused.value = true
   }
 }
 
 function jumpToLive() {
   const task = currentTask.value;
   if (task && task.status !== 'running') {
-    message.warning("The task has stopped. Please run the task to connect a video source first!");
+    message.warning("任务已停止，请先执行任务连接视频源！");
     return;
   }
+
+  // 取消尚未执行的跳转并让在途的异步切换作废：
+  // 否则回到实时 400ms 后，那次迟到的 seek 会把画面又拽回历史位置。
+  debouncedSeek.cancel();
+  switchSeq++;
+  lastSeekTarget = null;
 
   isSwitchingStream = true;
   isDetectionStale.value = false;
@@ -2577,8 +2525,7 @@ function jumpToLive() {
   isUserSeeking.value = false;
   frozenDuration.value = 0;
   frozenRealTime.value = 0;
-  lastVideoAbsTime = 0;
-  lastVideoAbsTimeTs = 0;
+  resetMediaClock();
   hasFirstFrameRendered = false;
 
   detectionBuffer.value = [];
@@ -2586,6 +2533,11 @@ function jumpToLive() {
   lastValidRecord.value = null;
   pendingRecords.value = [];
   lastEmittedAbsoluteTime = 0;
+  pendingSeekSeconds.value = null;
+  pausedAtSeconds.value = null;
+  userPaused.value = false;
+  // 回到实时后立即刷新右侧事件，避免继续显示历史快照造成不同步。
+  refreshDetectionEvents();
   
   sendDebugLog('JUMP_TO_LIVE');
 
@@ -2614,18 +2566,20 @@ function jumpToLive() {
   }
 }
 
+// Deprecated methods removed
+
 function handleVideoEnded() {
   if (videoPlayerRef.value) {
     videoPlayerRef.value.pause();
   }
   isVideoPaused.value = true;
   streamState.value = 'paused_end'; 
-  message.info("Reached the end of the recorded history");
+  message.info("已播放至历史记录最末端");
   sendDebugLog('VIDEO_ENDED')
 }
 
 function tipFormatter(val: number) {
-  return formatDuration((val / 100) * (frozenDuration.value || totalDuration.value));
+  return formatDuration((val / 100) * timelineMax.value);
 }
 
 function formatDuration(seconds: number): string {
@@ -2641,8 +2595,9 @@ function forceDisconnect() {
   isActive = false
   wsReconnectCount.value = 0
   
-    stopEventsPolling()
-
+  // V3.0: 停止事件轮询
+  stopEventsPolling()
+  
   if (ws) {
     ws.onopen = null
     ws.onmessage = null
@@ -2665,9 +2620,9 @@ async function handleResumeTask() {
     await tasksApi.execute(props.taskId)
     connect()
     initPlayer()
-    message.success('Task restarted')
+    message.success('任务已重新启动')
   } catch (e) {
-    message.error('Failed to start')
+    message.error('启动失败')
   } finally {
     resuming.value = false
   }

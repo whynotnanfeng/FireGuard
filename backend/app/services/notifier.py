@@ -6,7 +6,7 @@ from fastapi import WebSocket
 logger = logging.getLogger(__name__)
 
 class Notifier:
-    """Broadcasts task status updates to connected WebSocket clients."""
+    """Global WebSocket notification manager for real-time task status updates."""
     
     def __init__(self):
         self._active_connections: Set[WebSocket] = set()
@@ -23,17 +23,17 @@ class Notifier:
             logger.info(f"Notification client disconnected. Remaining: {len(self._active_connections)}")
 
     async def broadcast_status(self, task_id: str, status: str, message: str = "", force: bool = False):
-        """Broadcast a status change, skipping identical consecutive states."""
+        """Broadcast status change to all connected clients (Filtered)."""
         if not self._active_connections:
             return
 
-        # Avoid re-sending a state that has not changed.
+        # V45: Global State Wall - Only broadcast if CONTENT truly changes
         state_key = f"{status}:{message}"
         if not force and self._last_states.get(task_id) == state_key:
             return
         
         self._last_states[task_id] = state_key
-        # Running updates arrive every second; log only on changes worth seeing.
+        # Refinement: log only for non-running states or forced updates, to avoid per-second log flooding
         if status != "running" or force:
             logger.info(f"[Notifier] Broadcasting update for {task_id}: {status} ({message})")
 

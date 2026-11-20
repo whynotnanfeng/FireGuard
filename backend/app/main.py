@@ -1,17 +1,26 @@
 import os
-# OpenCV log suppression must be set before importing cv2
+# Suppress OpenCV logging to stderr (must be set before importing cv2)
+# This setting must be at the very top of the entry file
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
-# Force RTSP over TCP; UDP packet loss causes garbled and dropped frames
+# Globally force OpenCV to pull streams over TCP, fixing garbled frames and dropped model frames caused by UDP packet loss
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|threads;1"
 
-import cv2  # noqa: E402
-# Decoding runs in worker processes; keep the main process single-threaded
+import cv2  # Ensure the environment variables are set before any later module imports cv2
+# Limit OpenCV thread count in the main process
 cv2.setNumThreads(1)
 import asyncio  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
+import mimetypes  # noqa: E402
 import time  # noqa: E402
+
+# Windows can map .js to text/plain through the registry. Browsers refuse to
+# execute ES module scripts with that MIME type, which shows up as a white page.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Path  # noqa: E402
 from fastapi.responses import PlainTextResponse  # noqa: E402
@@ -20,6 +29,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from jose import JWTError  # noqa: E402
 from starlette.responses import Response  # noqa: E402
+from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
 from starlette.types import Scope  # noqa: E402
 from starlette import requests as starlette_requests  # noqa: E402
 from slowapi import _rate_limit_exceeded_handler  # noqa: E402
@@ -76,11 +86,11 @@ from app.schemas.exceptions import (  # noqa: E402
     jwt_exception_handler,
 )
 
-# Initialize logging
+# Initialize Logging
 setup_logging()
 logger = logging.getLogger("app")
 
-# App
+# ── App ───────────────────────────────────────────────────────────────────────
 
 from contextlib import asynccontextmanager  # noqa: E402
 from app.services.media_gateway import media_gateway  # noqa: E402
@@ -89,11 +99,11 @@ from app.services.redis_server import redis_server  # noqa: E402
 from app.services.broker import broker  # noqa: E402
 from app.utils.clock_monitor import clock_monitor  # noqa: E402
 
-# Lifespan
+# ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Kill orphaned children left by a previous run (Windows hot reload)
+    # Clean up orphaned child processes left over from before startup (Windows hot-reload scenario)
     import psutil
     current_pid = os.getpid()
     try:
@@ -108,12 +118,18 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    await redis_server.start()
-    
-    # Open the bus connection; Redis mode also builds the connection pool
+    redis_ok = await redis_server.start()
+    if not redis_ok:
+        # Single-node install: stay in in-memory mode instead of retrying Redis.
+        if hasattr(broker, "disable_redis"):
+            broker.disable_redis("no Redis binary and nothing listening on 6379")
+        from app.services.registry import registry as _registry
+        _registry.disable("Redis unavailable")
+
+    # Initialize the bus connection (a connection pool is established in Redis mode)
     await broker.connect()
-    
-    # Registry: write default config and register the backend service
+
+    # Initialize the config registry: write default config + register the backend service
     from app.services.registry import registry
     registry.apply_mode_overrides(config.FIREGUARD_MODE)
     registry.register_service("backend", {
@@ -121,25 +137,25 @@ async def lifespan(app: FastAPI):
         "mode": config.FIREGUARD_MODE,
     })
     
-    # InMemoryBroker needs the loop reference for cross-thread publishing
+    # Inject the event loop into the in-memory bus (compatible with InMemoryBroker mode)
     if hasattr(broker, 'set_loop'):
         broker.set_loop(asyncio.get_running_loop())
 
-    # Workers are separate processes, so the GIL does not apply and the main process stays at NORMAL priority
+    # Inference workers are separate processes (not affected by the GIL), so the main process can stay at NORMAL priority
 
     create_db_and_tables()
     
     await media_server.start()
     
-    # SNTP clock offset monitor; it never touches the system clock
+    # Start the clock offset monitor (pure-Python SNTP, does not modify the system clock)
     clock_monitor.start()
     
     from app.services.task_runner import task_runner, stream_manager
 
-    # Remove fg_ dynamic paths left behind by an abnormal shutdown
+    # Clean up fg_ dynamic paths left behind by an abnormal shutdown
     media_gateway.clear_all_proxies()
 
-    # Global inference pool; starts with one worker and grows with task load
+    # Start the global inference process pool (initially 1 process, scaled up with task volume)
     stream_manager.start_inference_pool(worker_count=1)
     
     asyncio.create_task(task_runner.start())
@@ -161,10 +177,10 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Shutdown
+    # --- Shutdown ---
     logger.info("Fireguard Backend shutting down...")
 
-    # Stop streams first; MediaMTX must still be running to deregister paths cleanly
+    # 1. Stop all active streams first (MediaMTX must still be running to deregister paths cleanly)
     stream_manager.stop_all_streams()
 
     stream_manager.stop_inference_pool()
@@ -173,7 +189,7 @@ async def lifespan(app: FastAPI):
     media_gateway.clear_all_proxies()
     media_gateway.close()
 
-    # Stop the built-in MediaMTX only after all streams are released
+    # 4. Stop the built-in MediaMTX (all streams have been cleaned up by now)
     media_server.stop()
 
     clock_monitor.stop()
@@ -186,26 +202,26 @@ async def lifespan(app: FastAPI):
 
     redis_server.stop()
 
-# App
+# ── App ───────────────────────────────────────────────────────────────────────
 
 _is_production = config.FIREGUARD_MODE == "production"
 
 app = FastAPI(
     title="Intelligent Fire Monitoring System",
     description="FireGuard Intelligent Fire Monitoring System API",
-    version="2.9.0",
+    version="2.10.0",
     docs_url=None if _is_production else "/api/docs",
     redoc_url=None if _is_production else "/api/redoc",
     openapi_url=None if _is_production else "/api/openapi.json",
     lifespan=lifespan,
 )
 
-# Rate limiting
+# ── Rate Limiting ────────────────────────────────────────────────────────────
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS
+# ── CORS ──────────────────────────────────────────────────────────────────────
 
 app.add_middleware(
     CORSMiddleware,
@@ -219,21 +235,22 @@ app.add_middleware(
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(JWTError, jwt_exception_handler)
 
-# Routers
+# ── Routers ───────────────────────────────────────────────────────────────────
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(models.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")
 app.include_router(tasks.system_router, prefix="/api")
 
-# Static files for results
+# ── Static files for results ──────────────────────────────────────────────────
 
 config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/api/results", StaticFiles(directory=str(config.RESULTS_DIR)), name="results")
 
-# Live HLS: m3u8 is truncated so hls.js does not parse an ever-growing playlist
+# --- RT Storage Mounting ---
+# --- Live HLS endpoint: truncate m3u8 to avoid unbounded growth that degrades hls.js performance ---
 
-# In-memory m3u8 cache; TTL 1s, capped at 100 entries to bound memory
+# [Performance optimization]: in-memory cache for m3u8 content, TTL 1 second, max 100 entries to avoid memory leaks during long runs
 _m3u8_cache: dict[str, tuple[str, float]] = {}
 _M3U8_CACHE_TTL = 1.0
 _M3U8_CACHE_MAX = 100
@@ -244,10 +261,13 @@ async def live_m3u8(
     task_id: str = Path(...),
     limit: int = Query(30, ge=5, le=500, description="Keep the most recent N segments"),
 ):
-    """Truncated m3u8 with the most recent N segments; the full playlist stays available under /storage."""
+    """Return a truncated m3u8 (only the most recent N TS segments) for live stream playback.
+    The full m3u8 is still served from the /storage static path for historical playback.
+    """
     cache_key = f"{task_id}:{limit}"
     now = time.time()
 
+    # Check cache
     if cache_key in _m3u8_cache:
         cached_content, cached_time = _m3u8_cache[cache_key]
         if now - cached_time < _M3U8_CACHE_TTL:
@@ -263,7 +283,7 @@ async def live_m3u8(
 
     lines = content.splitlines()
     header: list[str] = []
-    segments: list[list[str]] = []  # Segment = optional DISCONTINUITY + EXTINF + PDT + ts line
+    segments: list[list[str]] = []  # each segment: optional DISCONTINUITY + EXTINF + PDT + ts line
     current_seg: list[str] = []
     pending_discont = False
 
@@ -291,7 +311,7 @@ async def live_m3u8(
         kept = segments[-limit:]
         result_lines: list[str] = []
         for line in header:
-            # Keep MEDIA-SEQUENCE aligned with the first segment after truncation
+            # Update MEDIA-SEQUENCE to match the first segment after truncation
             if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
                 try:
                     orig_seq = int(line.split(":", 1)[1])
@@ -300,7 +320,7 @@ async def live_m3u8(
                 skipped = len(segments) - limit
                 result_lines.append(f"#EXT-X-MEDIA-SEQUENCE:{orig_seq + skipped}")
             elif line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE:"):
-                # Inaccurate after truncation and unused by hls.js; drop it
+                # This tag is no longer accurate after truncation, skip it (hls.js does not need it)
                 continue
             else:
                 result_lines.append(line)
@@ -315,13 +335,14 @@ async def live_m3u8(
 
     return PlainTextResponse(result, media_type="application/vnd.apple.mpegurl")
 
-# DirectHLSWriter output is served statically: /storage/{task_id}/stream_rgb.m3u8
+# New architecture: m3u8/ts files produced by DirectHLSWriter are served directly by the static file server
+# Frontend access path: /storage/{task_id}/stream_rgb.m3u8
 config.VIDEO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/storage", NoCacheStaticFiles(directory=str(config.VIDEO_STORAGE_DIR)), name="storage")
 
 
 
-# WebSocket: notifications
+# ── WebSocket: Notifications ──────────────────────────────────────────────────
 
 @app.websocket("/ws/notifications")
 async def websocket_notifications(websocket: WebSocket, token: str = Query(...)):
@@ -335,7 +356,7 @@ async def websocket_notifications(websocket: WebSocket, token: str = Query(...))
     await notifier.connect(websocket)
     try:
         while True:
-            # Keepalive; client messages are ignored
+            # Keep connection alive, listen for nothing or pings
             await websocket.receive_text()
     except WebSocketDisconnect:
         notifier.disconnect(websocket)
@@ -343,7 +364,7 @@ async def websocket_notifications(websocket: WebSocket, token: str = Query(...))
         notifier.disconnect(websocket)
 
 
-# WebSocket: detection stream
+# ── WebSocket: Real-time Stream ───────────────────────────────────────────────
 
 @app.websocket("/ws/stream/{task_id}")
 async def websocket_stream(
@@ -351,7 +372,7 @@ async def websocket_stream(
     task_id: str,
     token: str = Query(...),
 ):
-    # Local imports keep module load light; place them before first use
+    # Import at the top of the function to avoid UnboundLocalError
     from app.database import engine
     from app.models.task import Task
     from sqlmodel import Session
@@ -359,7 +380,7 @@ async def websocket_stream(
     
     await websocket.accept()
 
-    # Authenticate and check task ownership
+    # Validate token and get user
     try:
         from app.dependencies import decode_token
         payload = decode_token(token)
@@ -429,7 +450,7 @@ async def websocket_stream(
     finally:
         receive_task.cancel()
         send_task.cancel()
-        # Drop queued messages so the queue can be released
+        # Drain queued messages to avoid residual memory
         try:
             while not q.empty():
                 q.get_nowait()
@@ -443,22 +464,35 @@ async def websocket_stream(
             pass
 
 
-# Health check
-
-@app.get("/")
-def read_root():
-    return {"message": "Fire Detection API is online. Visit /api/docs for documentation."}
+# ── Health check ──────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "Fire Detection API"}
 
 
-# WebRTC proxy
+# 1x1 transparent PNG used by the standalone startup splash. An <img> probe is
+# not subject to CORS, so it also works when the splash is opened via file://.
+_HEALTH_PIXEL = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\x00\x01"
+    b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+@app.get("/api/health/pixel")
+def health_pixel():
+    return Response(content=_HEALTH_PIXEL, media_type="image/png")
+
+
+# ── WebRTC Proxy ──────────────────────────────────────────────────────────────
 
 @app.post("/api/webrtc")
 async def webrtc_proxy(request: starlette_requests.Request, stream: str = Query(...)):
-    """Forward the client SDP offer to MediaMTX and return the SDP answer."""
+    """
+    Proxy frontend WebRTC signaling requests to MediaMTX.
+    The frontend sends an SDP offer, the backend forwards it to MediaMTX and returns the SDP answer.
+    """
     from fastapi.responses import Response as FastAPIResponse
 
     try:
@@ -495,3 +529,63 @@ async def webrtc_proxy(request: starlette_requests.Request, stream: str = Query(
             status_code=502,
             media_type="application/json",
         )
+
+
+# ── Frontend (single-port deployment) ─────────────────────────────────────────
+# A packaged install exposes one port: the backend serves the built SPA.
+# Must stay last, so every API/WebSocket route above wins the match.
+
+FRONTEND_DIST = (
+    config.RESOURCE_DIR / "frontend" / "dist"
+    if (config.RESOURCE_DIR / "frontend" / "dist").is_dir()
+    else config.BASE_DIR.parent / "frontend" / "dist"
+)
+
+
+class SPAStaticFiles(StaticFiles):
+    """Static files with history-mode fallback, excluding backend paths."""
+
+    # Missing API/WS/asset paths must 404, never fall back to index.html.
+    _NO_FALLBACK_PREFIXES = ("api", "ws", "storage", "assets")
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        # StaticFiles reports a miss either as a 404 response or as an
+        # HTTPException(404) depending on the Starlette version and html mode.
+        try:
+            response: Response | None = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            response = None
+
+        if response is not None and response.status_code != 404:
+            return response
+
+        # Starlette normalises on the host OS, so Windows yields backslashes.
+        normalized = path.replace("\\", "/").lstrip("/")
+        blocked = any(
+            normalized == prefix or normalized.startswith(prefix + "/")
+            for prefix in self._NO_FALLBACK_PREFIXES
+        )
+        if blocked:
+            return response if response is not None else Response(status_code=404)
+        # vue-router uses createWebHistory(), so deep links must return index.html
+        return await super().get_response("index.html", scope)
+
+
+if FRONTEND_DIST.is_dir():
+    app.mount("/", SPAStaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
+    logger.info(f"[Static] Serving frontend from {FRONTEND_DIST}")
+else:
+    logger.warning(
+        f"[Static] Frontend build not found at {FRONTEND_DIST}; "
+        "run 'npm run build' in frontend/ for single-port deployment."
+    )
+
+    @app.get("/", include_in_schema=False)
+    def _root_without_frontend():
+        return {
+            "message": "Fire Detection API is online.",
+            "frontend": "not built",
+            "api_docs": "/api/docs",
+        }

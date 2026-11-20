@@ -1,10 +1,10 @@
 <template>
   <div class="task-viewer">
     <div v-if="!result && !error" class="loading-state">
-      <a-spin tip="Loading task results..." />
+      <a-spin tip="加载任务结果..." />
     </div>
     <div v-else-if="error" class="loading-state">
-      <a-empty description="Results failed to load or have expired" />
+      <a-empty description="结果加载失败或已过期" />
     </div>
 
     <template v-else>
@@ -15,7 +15,7 @@
           <span class="status-dot" :class="taskStatus"></span>
         </div>
         <div class="titlebar-right">
-          <button class="titlebar-btn" title="Close" @click="$emit('close')">×</button>
+          <button class="titlebar-btn" title="关闭" @click="$emit('close')">×</button>
         </div>
       </div>
 
@@ -27,7 +27,7 @@
               <div v-else class="media-placeholder">
                 <div class="icon-placeholder">▢</div>
                 <span>{{ currentImageName }}</span>
-                <span class="placeholder-sub">16:9 annotation preview area</span>
+                <span class="placeholder-sub">16:9 标注结果预览区</span>
               </div>
               <div class="media-nav prev" v-if="imageCount > 1" @click="prevImage">‹</div>
               <div class="media-nav next" v-if="imageCount > 1" @click="nextImage">›</div>
@@ -41,8 +41,8 @@
               </div>
               <div class="media-controls-center"></div>
               <div class="media-controls-right">
-                <button class="ctrl-btn" title="Zoom in" @click="toggleZoom">⊕</button>
-                <button class="ctrl-btn" title="Download" @click="downloadFile">↓</button>
+                <button class="ctrl-btn" title="放大" @click="toggleZoom">⊕</button>
+                <button class="ctrl-btn" title="下载" @click="downloadFile">↓</button>
               </div>
             </div>
           </template>
@@ -53,7 +53,7 @@
               <div v-else class="media-placeholder">
                 <div class="icon-placeholder">▢</div>
                 <span>{{ currentImageName }}</span>
-                <span class="placeholder-sub">Video result preview area</span>
+                <span class="placeholder-sub">视频结果预览区</span>
               </div>
               <div class="media-nav prev" v-if="imageCount > 1" @click="prevImage">‹</div>
               <div class="media-nav next" v-if="imageCount > 1" @click="nextImage">›</div>
@@ -67,14 +67,14 @@
               </div>
               <div class="media-controls-center"></div>
               <div class="media-controls-right">
-                <button class="ctrl-btn" title="Download" @click="downloadFile">↓</button>
+                <button class="ctrl-btn" title="下载" @click="downloadFile">↓</button>
               </div>
             </div>
           </template>
 
           <template v-else-if="effectiveType === 'stream'">
             <div class="media-viewport stream-viewport">
-              <VideoPlayer v-if="taskId && wsUrl" :task-id="taskId" :ws-url="wsUrl" :show-records-panel="false" :key="'vp-' + taskId" @close="$emit('close')" @time-update="handleTimeUpdate" @playback-absolute-time="handlePlaybackAbsoluteTime" />
+              <VideoPlayer v-if="taskId && wsUrl" :task-id="taskId" :ws-url="wsUrl" :show-records-panel="false" :key="'vp-' + taskId" @close="$emit('close')" @time-update="handleTimeUpdate" @playback-absolute-time="handlePlaybackAbsoluteTime" @play-mode-change="handlePlayModeChange" />
             </div>
           </template>
         </div>
@@ -82,96 +82,54 @@
         <div class="info-panel">
           <div class="info-header">
             <div class="info-header-top">
-              <span class="info-file-name" :title="effectiveType === 'stream' ? 'Detection Records' : currentFileName">{{ effectiveType === 'stream' ? 'Detection Records' : currentFileName }}</span>
+              <span class="info-file-name" :title="effectiveType === 'stream' ? '目标检测记录' : currentFileName">{{ effectiveType === 'stream' ? '目标检测记录' : currentFileName }}</span>
               <span class="info-file-index" v-if="effectiveType === 'image' || effectiveType === 'video'">{{ currentImageIndex + 1 }} / {{ imageCount }}</span>
-              <span class="info-file-index" v-else-if="effectiveType === 'stream'">{{ (result?.status === 'running' || result?.status === 'initializing' || !result) ? 'Running' : 'Playback' }}</span>
+              <span class="info-file-index" v-else-if="effectiveType === 'stream'">{{ (result?.status === 'running' || result?.status === 'initializing' || !result) ? '运行中' : '视频回放' }}</span>
             </div>
             <div class="info-meta-row">
               <template v-if="effectiveType === 'stream'">
-                <span class="info-meta-item"><span class="label">Elapsed</span> <span class="value">{{ elapsedDisplay }}</span></span>
+                <span class="info-meta-item"><span class="label">已运行</span> <span class="value">{{ elapsedDisplay }}</span></span>
                 <span class="info-meta-item"><span class="label">FPS</span> <span class="value">{{ fpsDisplay }}</span></span>
               </template>
               <template v-else>
-                <span class="info-meta-item"><span class="label">Model</span> <span class="value">{{ modelName }}</span></span>
-                <span class="info-meta-item" v-if="effectiveType === 'video'"><span class="label">Input</span> <span class="value">RGB</span></span>
+                <span class="info-meta-item"><span class="label">模型</span> <span class="value">{{ modelName }}</span></span>
+                <span class="info-meta-item" v-if="effectiveType === 'video'"><span class="label">输入</span> <span class="value">RGB</span></span>
               </template>
             </div>
           </div>
 
-          <div class="info-content">
-            <template v-if="effectiveType === 'stream'">
-              <div class="info-section stream-records-section">
-                <table class="detection-table" v-if="mergedRecords.length > 0">
-                  <thead>
-                    <tr><th>Object</th><th>Appeared</th><th>Disappeared</th><th>Duration</th><th>Max Confidence</th><th>Status</th></tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="rec in pagedRecords" :key="rec.id || rec.track_id">
-                      <td>
-                        <span class="track-id">
-                          <span class="track-id-main">#{{ rec.track_id }}</span>
-                          <span class="track-label">{{ rec.label || rec.class_name }}</span>
-                        </span>
-                      </td>
-                      <td>
-                        <span class="time-cell">
-                          <span class="date-part">{{ fmtDate(rec.enter_time || rec.entered_at) }}</span>
-                          <span class="time-part">{{ fmtTime(rec.enter_time || rec.entered_at) }}</span>
-                        </span>
-                      </td>
-                      <td>
-                        <span class="time-cell" v-if="rec.leave_time || rec.left_at">
-                          <span class="date-part">{{ fmtDate(rec.leave_time || rec.left_at) }}</span>
-                          <span class="time-part">{{ fmtTime(rec.leave_time || rec.left_at) }}</span>
-                        </span>
-                        <span v-else>-</span>
-                      </td>
-                      <td class="duration-cell">{{ fmtDuration(rec.duration_ms || rec.duration_seconds || 0, (rec.status === 'active')) }}</td>
-                      <td class="confidence-cell">{{ fmtConfidence(rec.max_confidence || rec.confidence) }}</td>
-                      <td><span class="status-badge" :class="rec.status || (rec.left_at || rec.leave_time ? 'completed' : 'active')">{{ rec.status === 'active' || (!rec.left_at && !rec.leave_time) ? 'Active' : 'Ended' }}</span></td>
-                    </tr>
-                  </tbody>
-                </table>
-                <div class="table-pagination" v-if="totalPages > 1">
-                  <button class="page-btn" @click="recPage=Math.max(1,recPage-1)">‹</button>
-                  <button v-for="p in visiblePages" :key="p" class="page-btn" :class="{active:p===recPage}" @click="recPage=p">{{ p }}</button>
-                  <button class="page-btn" @click="recPage=Math.min(totalPages,recPage+1)">›</button>
-                </div>
-              </div>
-            </template>
+          <div class="info-content" :class="{ 'stream-mode': effectiveType === 'stream' }">
+            <DetectionEventsTable
+              v-if="effectiveType === 'stream'"
+              :events="pagedRecords"
+              :total="recTotal"
+              :filter="recFilter"
+              :page="recPage"
+              :page-size="recPageSize"
+              :active-count="summaryActive"
+              :total-count="summaryTotal"
+              :at-time="historyAtMs"
+              @update:filter="recFilter = $event"
+              @update:page="recPage = $event"
+              @update:page-size="onRecordPageSizeChange"
+            />
 
             <template v-else>
-              <div class="info-section">
-                <div class="section-header"><span class="section-title"><span class="icon">◈</span> Detection Overview</span></div>
-                <div class="stats-grid">
-                  <div class="stat-card"><div class="value">{{ currentBoxCount }}</div><div class="label">{{ (effectiveType === 'image' || effectiveType === 'video') ? 'Current Objects' : 'Current Frame Boxes' }}</div></div>
-                  <div class="stat-card success"><div class="value">{{ totalRecords }}</div><div class="label">{{ (effectiveType === 'image' || effectiveType === 'video') ? 'Total Objects' : 'Total Frame Boxes' }}</div></div>
-                </div>
-              </div>
-
-              <div class="info-section" v-if="Object.keys(currentCategoryCounts).length > 0">
-                <div class="section-header"><span class="section-title"><span class="icon">◈</span> Current {{ (effectiveType === 'image' || effectiveType === 'video') ? 'Object' : 'Frame' }} Categories</span><span class="section-badge">{{ Object.keys(currentCategoryCounts).length }} classes</span></div>
-                <div class="tag-cloud">
-                  <span v-for="(count, cls) in currentCategoryCounts" :key="cls" class="tag-item"><span class="tag-label">{{ cls }}</span><span class="tag-count">{{ count }}</span></span>
-                </div>
-              </div>
+              <ResultStatsPanel
+                :kind="effectiveType"
+                :current-box-count="currentBoxCount"
+                :total-records="totalRecords"
+                :current-category-counts="currentCategoryCounts"
+                :category-distribution="categoryDistribution"
+                :max-category-count="maxCategoryCount"
+              />
             </template>
 
-            <div class="info-section" v-if="effectiveType !== 'stream' && Object.keys(categoryDistribution).length > 0">
-              <div class="section-header"><span class="section-title"><span class="icon">◈</span> Overall Category Distribution</span></div>
-              <div class="category-list">
-                <div v-for="(count, cls) in categoryDistribution" :key="cls" class="category-item">
-                  <span class="category-name">{{ cls }}</span>
-                  <div class="category-bar-bg"><div class="category-bar" :style="{ width: (count / maxCategoryCount * 100) + '%' }"></div></div>
-                  <span class="category-count">{{ count }}</span>
-                </div>
-              </div>
-            </div>
           </div>
 
           <div class="info-footer" v-if="effectiveType !== 'stream'">
-            <button class="footer-btn" @click="downloadFile">↓ Current Result</button>
-            <button class="footer-btn primary" @click="downloadAll">↓ All ZIP</button>
+            <button class="footer-btn" @click="downloadFile">↓ 当前结果</button>
+            <button class="footer-btn primary" @click="downloadAll">↓ 全部 ZIP</button>
           </div>
         </div>
       </div>
@@ -183,6 +141,9 @@
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { tasksApi, type DetectionEvent } from '@/api/tasks'
 import VideoPlayer from '@/components/VideoPlayer.vue'
+import DetectionEventsTable from '@/components/DetectionEventsTable.vue'
+import ResultStatsPanel from '@/components/ResultStatsPanel.vue'
+import type { EventFilter } from '@/composables/useDetectionFeed'
 
 const props = defineProps<{ taskId: string; taskType?: string; wsUrl?: string }>()
 const emit = defineEmits<{ close: [] }>()
@@ -198,15 +159,42 @@ const videoCurrentTime = ref(0)
 const videoDuration = ref(0)
 const detectionRecords = ref<DetectionEvent[]>([])
 const recPage = ref(1)
-const pageSize = 10
+const recPageSize = ref(10)
+const recTotal = ref(0)
+const recFilter = ref<EventFilter>('active')
+const summaryActive = ref(0)
+const summaryTotal = ref(0)
 const streamRunningTime = ref(0)
 const currentPlaybackAbsoluteTime = ref<number>(0)
+// 播放器当前处于实时还是历史回放：只有历史回放才需要把右侧列表"倒回"到那一刻。
+const playerPlayMode = ref<'live' | 'history'>('live')
 
 function handlePlaybackAbsoluteTime(absTime: number) {
   currentPlaybackAbsoluteTime.value = absTime
 }
 
-// Naive Beijing-time strings need +08:00 to match the UTC timestamps carried by HLS
+function handlePlayModeChange(mode: 'live' | 'history') {
+  if (playerPlayMode.value === mode) return
+  playerPlayMode.value = mode
+  if (mode === 'history') {
+    // 切入历史瞬间播放器广播的绝对时间还停留在切换前的锚点，
+    // 等它按 frozenRealTime 重算一次再拉列表，避免先闪一帧实时数据。
+    recPage.value = 1
+    window.setTimeout(loadDetectionRecords, 600)
+    return
+  }
+  loadDetectionRecords()
+}
+
+// 历史回放的时间游标（按秒取整，避免逐帧刷新右侧表格）。
+// 给出后，右侧"活跃/结束"与时长都按这一刻还原，而不是任务结束后的最终状态。
+const historyAtMs = computed<number | undefined>(() => {
+  if (playerPlayMode.value !== 'history') return undefined
+  const t = currentPlaybackAbsoluteTime.value
+  return t > 0 ? Math.round(t / 1000) * 1000 : undefined
+})
+
+// 统一将不带时区后缀的北京时间 (naive) 强制追加时区偏移量，与 HLS 携带的 UTC 时间戳达成基准物理对齐
 const parseAbsoluteTime = (timeStr: string | null | undefined): number => {
   if (!timeStr) return 0
   let formatted = timeStr.trim().replace(' ', 'T')
@@ -217,10 +205,27 @@ const parseAbsoluteTime = (timeStr: string | null | undefined): number => {
 }
 
 onMounted(async () => {
+  await loadTask()
+})
+
+// 同一个组件实例切换任务时（例如父级不换 key），必须重新加载并清空旧任务记录。
+watch(() => props.taskId, (newId) => {
+  if (newId) loadTask()
+})
+
+async function loadTask() {
   error.value = false
+  detectionRecords.value = []
+  recPage.value = 1
+  recTotal.value = 0
+  currentImageIndex.value = 0
+  result.value = null
   if (props.taskType === 'stream') {
-    try {
-      const taskDetail = await tasksApi.get(props.taskId)
+    // 先挂载播放器，任务详情异步补全，避免打开弹窗时先白等一个请求。
+    result.value = { type: 'stream', status: 'running' }
+    loadDetectionRecords()
+    startAutoRefresh()
+    tasksApi.get(props.taskId).then((taskDetail) => {
       const actualFps = taskDetail.detection_config?.fps || taskDetail.detection_config?.frame_rate || '—'
       result.value = {
         type: 'stream',
@@ -228,16 +233,11 @@ onMounted(async () => {
         model_name: taskDetail.model_name,
         fps: actualFps,
         _session_start_time: taskDetail.session_start_time,
+        _recording_seconds: taskDetail.cumulative_running_seconds || 0,
         started_at: taskDetail.created_at,
         status: taskDetail.status
       }
-      loadDetectionRecords()
-      startAutoRefresh()
-    } catch (e) {
-      result.value = { type: 'stream', status: 'stopped' }
-      loadDetectionRecords()
-      startAutoRefresh()
-    }
+    }).catch(() => { /* 详情失败不影响播放，保留占位状态 */ })
     return
   }
   try {
@@ -248,14 +248,44 @@ onMounted(async () => {
   } catch (e) {
     error.value = true
   }
-})
+}
 
 async function loadDetectionRecords() {
   try {
-    const res = await tasksApi.getDetectionEvents(props.taskId, { limit: 200 })
-    const events = (res as any).events || (res as any).records || []
-    detectionRecords.value = events
+    const eventType = recFilter.value === 'active'
+      ? 'enter'
+      : recFilter.value === 'closed'
+        ? 'leave'
+        : undefined
+    const atTime = historyAtMs.value
+    const [res, summary] = await Promise.all([
+      tasksApi.getDetectionEvents(props.taskId, {
+        limit: recPageSize.value,
+        skip: (recPage.value - 1) * recPageSize.value,
+        order: 'desc',
+        event_type: eventType,
+        at_time: atTime,
+      }),
+      tasksApi.getDetectionEventsSummary(props.taskId, { at_time: atTime }),
+    ])
+    detectionRecords.value = res.events
+    recTotal.value = res.total
+    summaryActive.value = summary.active_targets
+    summaryTotal.value = summary.total_targets
   } catch { /* no-op */ }
+}
+
+watch(recFilter, () => {
+  recPage.value = 1
+  loadDetectionRecords()
+})
+watch([recPage, recPageSize], () => {
+  loadDetectionRecords()
+})
+
+function onRecordPageSizeChange(size: number) {
+  recPageSize.value = size
+  recPage.value = 1
 }
 
 let refreshTimer: number | null = null
@@ -278,40 +308,7 @@ onUnmounted(() => {
   stopAutoRefresh()
 })
 
-const mergedRecords = computed(() => {
-  const trackMap = new Map<number, any>()
-  const sourceRecords = (effectiveType.value === 'stream' && currentPlaybackAbsoluteTime.value > 0)
-    ? detectionRecords.value.filter((rec: any) => {
-        const enterTimeStr = rec.entered_at || rec.enter_time
-        if (!enterTimeStr) return true
-        const recordTime = parseAbsoluteTime(enterTimeStr)
-        return recordTime <= currentPlaybackAbsoluteTime.value
-      })
-    : detectionRecords.value
-
-  sourceRecords.forEach((rec: any) => {
-    const tid = rec.track_id ?? rec.id
-    if (!trackMap.has(tid)) {
-      trackMap.set(tid, { ...rec })
-    } else {
-      const existing = trackMap.get(tid)
-      if (rec.left_at || rec.leave_time || rec.status === 'completed') {
-        existing.left_at = rec.left_at || existing.left_at
-        existing.leave_time = rec.leave_time || existing.leave_time
-        existing.duration_ms = rec.duration_ms || existing.duration_ms
-        existing.max_confidence = Math.max(rec.max_confidence || 0, existing.max_confidence || 0)
-        existing.status = 'completed'
-      }
-    }
-  })
-  return Array.from(trackMap.values()).sort((a, b) => {
-    const aTime = a.entered_at || a.enter_time || ''
-    const bTime = b.entered_at || b.enter_time || ''
-    return bTime.localeCompare(aTime)
-  })
-})
-
-const taskName = computed(() => result.value?.task_name || result.value?.name || props.taskId?.slice(0, 8) || 'Task Result')
+const taskName = computed(() => result.value?.task_name || result.value?.name || props.taskId?.slice(0, 8) || '任务结果')
 const taskStatus = computed(() => {
   if (effectiveType.value === 'stream') return result.value?.status || 'running'
   return result.value?.status || 'completed'
@@ -334,8 +331,8 @@ const imageCount = computed(() => {
 const currentImageName = computed(() => result.value?.filenames?.[currentImageIndex.value] || '')
 const currentImageUrl = computed(() => result.value?.urls?.[currentImageIndex.value] || '')
 const currentFileName = computed(() => {
-  if (effectiveType.value === 'image' || effectiveType.value === 'video') return currentImageName.value || 'Annotation Result'
-  return result.value?.filename || result.value?.name || 'Result'
+  if (effectiveType.value === 'image' || effectiveType.value === 'video') return currentImageName.value || '标注结果'
+  return result.value?.filename || result.value?.name || '结果'
 })
 
 const currentImageDetections = computed(() => {
@@ -349,7 +346,7 @@ const currentBoxCount = computed(() => {
     const d = currentImageDetections.value
     return Array.isArray(d) ? d.length : 0
   }
-  return mergedRecords.value.filter(r => r.status === 'active' || (!r.left_at && !r.leave_time)).length
+  return summaryActive.value
 })
 const totalRecords = computed(() => {
   if (effectiveType.value === 'image' || effectiveType.value === 'video') {
@@ -357,14 +354,20 @@ const totalRecords = computed(() => {
     if (!dets) return 0
     return Object.values(dets).reduce((sum: number, arr: any) => sum + (Array.isArray(arr) ? arr.length : 0), 0)
   }
-  return mergedRecords.value.length
+  return summaryTotal.value
 })
-const completedCount = computed(() => mergedRecords.value.filter(r => r.left_at || r.leave_time || r.status === 'completed').length)
-const activeCount = computed(() => mergedRecords.value.filter(r => !r.left_at && !r.leave_time && r.status !== 'completed').length)
+const completedCount = computed(() => Math.max(0, summaryTotal.value - summaryActive.value))
+const activeCount = computed(() => summaryActive.value)
 const elapsedDisplay = computed(() => {
   if (effectiveType.value === 'stream') {
     if (streamRunningTime.value > 0) {
       return formatDuration(streamRunningTime.value)
+    }
+    // 已停止的任务：用累计录制时长，而不是"现在 - 会话起点"（会一直往上长）。
+    const status = result.value?.status
+    const recording = Number(result.value?._recording_seconds || 0)
+    if (recording > 0 && status !== 'running' && status !== 'initializing') {
+      return formatDuration(recording)
     }
     if (!result.value?._session_start_time && !result.value?.started_at) return '—'
     const start = new Date(result.value._session_start_time || result.value.started_at).getTime()
@@ -439,22 +442,7 @@ const categoryDistribution = computed(() => {
 })
 const maxCategoryCount = computed(() => Math.max(1, ...Object.values(categoryDistribution.value)))
 
-const totalPages = computed(() => Math.max(1, Math.ceil(mergedRecords.value.length / pageSize)))
-const pagedRecords = computed(() => {
-  const start = (recPage.value - 1) * pageSize
-  return mergedRecords.value.slice(start, start + pageSize)
-})
-
-const visiblePages = computed(() => {
-  const pages: number[] = []
-  const total = totalPages.value
-  const current = recPage.value
-  const delta = 2
-  for (let i = Math.max(1, current - delta); i <= Math.min(total, current + delta); i++) {
-    pages.push(i)
-  }
-  return pages
-})
+const pagedRecords = computed(() => detectionRecords.value)
 
 const detectionSegments = computed(() => {
   const recs = detectionRecords.value
@@ -510,8 +498,8 @@ async function downloadAll() {
   zipping.value = false
 }
 
-function pauseStream() { }
-function toggleFullscreen() { }
+function pauseStream() { /* pause stream */ }
+function toggleFullscreen() { /* fullscreen */ }
 
 function formatTime(seconds: number): string {
   if (!seconds || isNaN(seconds)) return '00:00'
@@ -537,37 +525,6 @@ function formatDuration(seconds: number, isActive = false): string {
   const d = Math.floor(secs / 86400)
   const h = Math.floor((secs % 86400) / 3600)
   return h > 0 ? `${d}d ${h}h${suffix}` : `${d}d${suffix}`
-}
-
-function fmtDate(dateStr: string | null | undefined): string {
-  if (!dateStr) return ''
-  const d = new Date(dateStr)
-  const year = d.getFullYear()
-  const month = (d.getMonth() + 1).toString().padStart(2, '0')
-  const day = d.getDate().toString().padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function fmtTime(dateStr: string | null | undefined): string {
-  if (!dateStr) return ''
-  const d = new Date(dateStr)
-  const h = d.getHours().toString().padStart(2, '0')
-  const m = d.getMinutes().toString().padStart(2, '0')
-  const s = d.getSeconds().toString().padStart(2, '0')
-  return `${h}:${m}:${s}`
-}
-
-function fmtDuration(msOrSec: number, isActive = false): string {
-  let seconds = msOrSec
-  if (msOrSec > 1000) {
-    seconds = msOrSec / 1000
-  }
-  return formatDuration(seconds, isActive)
-}
-
-function fmtConfidence(conf: number | null | undefined): string {
-  if (!conf) return '—'
-  return `${(conf * 100).toFixed(1)}%`
 }
 </script>
 
@@ -1037,137 +994,13 @@ function fmtConfidence(conf: number | null | undefined): string {
   flex-direction: column;
 }
 
+/* 流任务：列表区独立滚动，筛选/分页固定在面板上下两端。 */
+.info-content.stream-mode {
+  overflow: hidden;
+}
+
 .info-content::-webkit-scrollbar { width: 4px; }
 .info-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
-.info-section {
-  padding: 16px 18px;
-  border-bottom: 1px solid var(--border-light);
-}
-
-.info-section:last-child { border-bottom: none; }
-
-.section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.section-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-primary);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.section-title .icon {
-  width: 16px;
-  height: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  color: var(--primary);
-}
-
-.section-badge {
-  font-size: 10px;
-  padding: 2px 6px;
-  background: var(--primary-light);
-  color: var(--primary);
-  border-radius: 10px;
-  font-weight: 600;
-}
-
-.stats-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.stat-card {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-sm);
-  padding: 12px;
-  text-align: center;
-}
-
-.stat-card .value {
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--primary);
-  line-height: 1;
-  margin-bottom: 4px;
-}
-
-.stat-card .label { font-size: 11px; color: var(--text-muted); }
-.stat-card.success .value { color: var(--success); }
-.stat-card.warning .value { color: var(--warning); }
-
-.category-list { display: flex; flex-direction: column; gap: 8px; }
-
-.category-item { display: flex; align-items: center; gap: 10px; }
-
-.category-name {
-  width: 60px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.category-bar-bg {
-  flex: 1;
-  height: 6px;
-  background: var(--bg-hover);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-.category-bar {
-  height: 100%;
-  background: var(--primary);
-  border-radius: 3px;
-  transition: width 0.4s ease;
-}
-
-.category-count {
-  width: 28px;
-  font-size: 11px;
-  color: var(--text-muted);
-  text-align: right;
-  font-family: var(--font-mono);
-}
-
-.tag-cloud { display: flex; flex-wrap: wrap; gap: 6px; }
-
-.tag-item {
-  display: inline-flex;
-  align-items: center;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-light);
-  border-radius: 5px;
-  overflow: hidden;
-  font-size: 11px;
-}
-
-.tag-label {
-  padding: 3px 8px;
-  background: rgba(22, 119, 255, 0.08);
-  color: var(--primary);
-  font-weight: 600;
-}
-
-.tag-count {
-  padding: 3px 8px;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-}
 
 .info-footer {
   padding: 12px 18px;
@@ -1208,114 +1041,4 @@ function fmtConfidence(conf: number | null | undefined): string {
 }
 
 .footer-btn.primary:hover { background: var(--primary-hover); }
-
-.detection-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 11px;
-}
-
-.detection-table th {
-  text-align: left;
-  padding: 6px 8px;
-  background: var(--bg-secondary);
-  color: var(--text-muted);
-  font-weight: 600;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  border-bottom: 1px solid var(--border);
-}
-
-.detection-table td {
-  padding: 8px;
-  border-bottom: 1px solid var(--border-light);
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  vertical-align: middle;
-  white-space: nowrap;
-}
-
-.detection-table td:first-child {
-  white-space: normal;
-  font-family: var(--font-body);
-}
-
-.detection-table tbody tr { cursor: default; transition: background 0.15s; }
-.detection-table tbody tr:hover { background: var(--bg-hover); }
-
-.track-id {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  line-height: 1.3;
-}
-
-.track-id-main {
-  font-size: 13px;
-  color: var(--text-muted);
-}
-
-.track-label {
-  font-size: 11px;
-  color: var(--text-primary);
-}
-
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 600;
-  font-family: var(--font-body);
-}
-
-.status-badge.completed { background: var(--success-light); color: var(--success); }
-.status-badge.active { background: var(--primary-light); color: var(--primary); }
-
-.duration-cell { font-weight: 600; color: var(--text-primary); }
-.confidence-cell { font-weight: 600; color: var(--primary); }
-.time-cell {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  line-height: 1.3;
-}
-.time-cell .date-part {
-  color: var(--text-muted);
-  font-size: 10px;
-}
-.time-cell .time-part {
-  font-size: 12px;
-  color: var(--text-primary);
-}
-
-.table-pagination {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 10px 0 0;
-}
-
-.page-btn {
-  width: 24px;
-  height: 24px;
-  border: 1px solid var(--border);
-  background: var(--bg-card);
-  border-radius: 4px;
-  font-size: 11px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s;
-}
-
-.page-btn:hover { border-color: var(--primary); color: var(--primary); }
-.page-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
 </style>

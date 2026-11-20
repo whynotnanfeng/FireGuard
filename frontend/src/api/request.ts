@@ -6,14 +6,17 @@ const request = axios.create({
   timeout: 60000,
 })
 
-// Tasks being deleted whose requests must be blocked
+// ── V1.2.66: Global Circuit Breaker for Robust Cleanup ────────────────────────
 export const terminatingTasks = new Set<string>()
 
+// ── Request interceptor: attach JWT & implement Circuit Breaker ────────────────
 request.interceptors.request.use((config) => {
+  // 1. Circuit Breaker: Block requests to tasks that are being deleted
   if (config.url) {
     for (const taskId of terminatingTasks) {
       if (config.url.includes(`/tasks/${taskId}`)) {
         console.warn(`[CircuitBreaker] Blocking request to terminating task: ${taskId}`)
+        // Cancel the request immediately
         const controller = new AbortController()
         config.signal = controller.signal
         controller.abort('Task is terminating')
@@ -35,7 +38,7 @@ request.interceptors.response.use(
     const status = err.response?.status
     const detail = err.response?.data?.detail
 
-    // Avoid a redirect loop on the login page
+    // Avoid redirect loops when already on the login page
     if (status === 401) {
       localStorage.removeItem('token')
       const isLoginRequest = err.config?.url?.includes('/auth/login')
@@ -50,7 +53,7 @@ request.interceptors.response.use(
         ? detail
         : Array.isArray(detail)
         ? detail.map((e: any) => e.msg).join('; ')
-        : err.message || 'Request failed'
+        : err.message || '请求失败'
 
     // 409 and canceled errors are handled by the caller
     if (status !== 409 && !axios.isCancel(err) && err.message !== 'canceled') {

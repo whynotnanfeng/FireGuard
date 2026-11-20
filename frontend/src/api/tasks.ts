@@ -66,6 +66,8 @@ export interface DetectionEvent {
 
 export interface DetectionEventSummary {
   total_targets: number
+  active_targets: number
+  completed_targets: number
   class_stats: Record<string, {
     count: number
     avg_duration_ms: number
@@ -90,6 +92,14 @@ export interface VideoSegment {
   session_map: Array<{ index: number; start_offset_sec: number; start_abs_time_ms: number }>
 }
 
+export interface HistorySummary {
+  total: number
+  total_duration: number
+  first_session_start_time: string | null
+  session_count: number
+  session_map: Array<{ index: number; start_offset_sec: number; start_abs_time_ms: number }>
+}
+
 export const tasksApi = {
   list: (params?: { skip?: number; limit?: number; status?: string; search?: string; task_type?: string; model_id?: string; description?: string; date_from?: string; date_to?: string }): Promise<TaskListRes> =>
     request.get('/tasks', { params }),
@@ -103,20 +113,17 @@ export const tasksApi = {
       timeout: 300000,
     }),
 
-  update: (id: string, data: { name?: string; description?: string }): Promise<Task> =>
-    request.put(`/tasks/${id}`, data),
-
   updateDetectionConfig: (id: string, config: { detection_config: any }): Promise<{ message: string }> =>
     request.put(`/tasks/${id}/detection-config`, config),
 
   getDetectionRecords: (id: string, params?: { limit?: number; skip?: number; order?: string; start_time?: string; end_time?: string }): Promise<{ records: DetectionRecord[] }> =>
     request.get(`/tasks/${id}/detection-records`, { params }),
 
-  getDetectionEvents: (id: string, params?: { limit?: number; skip?: number; event_type?: string; class_name?: string; order?: string; start_time?: string; end_time?: string }): Promise<{ events: DetectionEvent[] }> =>
+  getDetectionEvents: (id: string, params?: { limit?: number; skip?: number; event_type?: string; class_name?: string; order?: string; start_time?: string; end_time?: string; at_time?: number }): Promise<{ events: DetectionEvent[]; total: number }> =>
     request.get(`/tasks/${id}/detection-events`, { params }),
 
-  getDetectionEventsSummary: (id: string): Promise<DetectionEventSummary> =>
-    request.get(`/tasks/${id}/detection-events/summary`),
+  getDetectionEventsSummary: (id: string, params?: { at_time?: number }): Promise<DetectionEventSummary> =>
+    request.get(`/tasks/${id}/detection-events/summary`, { params }),
 
   getDetections: (id: string, params: { start_time: number; end_time: number }): Promise<Array<{ timestamp: number; boxes: any[] }>> =>
     request.get(`/tasks/${id}/detections`, { params }),
@@ -127,23 +134,17 @@ export const tasksApi = {
   execute: (id: string): Promise<{ message: string; position: number }> =>
     request.post(`/tasks/${id}/execute`),
 
-  pause: (id: string): Promise<{ message: string }> =>
-    request.post(`/tasks/${id}/pause`),
+  stop: (id: string): Promise<{ message: string }> =>
+    request.post(`/tasks/${id}/stop`),
 
   result: (id: string): Promise<TaskResult> =>
     request.get(`/tasks/${id}/result`),
 
-  getHistoryVideos: (id: string, config?: { signal?: AbortSignal }): Promise<{ segments: VideoSegment[] }> =>
+  getHistoryVideos: (id: string, config?: { signal?: AbortSignal }): Promise<HistorySummary & { segments: VideoSegment[] }> =>
     request.get(`/tasks/${id}/videos`, config),
 
   getSnapshot: (id: string): Promise<any> =>
     request.get(`/tasks/${id}/snapshot`),
-
-  getMergedM3u8Url: (id: string): string =>
-    `${window.location.origin}/api/tasks/${id}/stream.m3u8`,
-
-  getLiveM3u8Url: (id: string): string =>
-    `${window.location.origin}/api/storage/${id}/live/index.m3u8`,
 
   logPlayback: (id: string, event_type: string, details: Record<string, unknown>): Promise<{ status: string }> =>
     request.post(`/tasks/${id}/playback-log`, {

@@ -1,4 +1,18 @@
-"""Glue between inference, overlay drawing, tracking and event recording."""
+"""
+Inference pipeline integration module - wires OverlayInjector and ObjectTracker into the inference flow
+
+Responsibilities:
+1. Receive raw frames and inference results
+2. Inject detection bounding boxes into frames (for the HLS stream)
+3. Track object state and generate events (for database records)
+4. Return the annotated frame and the list of events
+
+This is the core glue code of the new architecture, connecting:
+- InferenceWorker (inference)
+- OverlayInjector (in-frame drawing)
+- ObjectTracker (object tracking)
+- EventProcessor (event-driven recording)
+"""
 
 from __future__ import annotations
 
@@ -17,10 +31,20 @@ logger = logging.getLogger(__name__)
 
 
 class InferencePipelineIntegration:
-    """Draws detections on frames and turns tracker output into events.
+    """
+    Inference pipeline integrator
 
-    process_frame() returns the annotated frame and the Enter/Update/Leave events
-    generated for that frame.
+    Usage example:
+        pipeline = InferencePipelineIntegration(task_id="task_123")
+
+        # Call for every frame
+        annotated_frame, events = pipeline.process_frame(
+            frame=raw_frame,
+            detections=detections,
+            timestamp_ms=timestamp_ms
+        )
+
+        # events contains Enter/Leave events, which can be pushed to the frontend or written to the database
     """
     
     def __init__(
@@ -52,9 +76,18 @@ class InferencePipelineIntegration:
         detections: List[Detection],
         timestamp_ms: int,
     ) -> Tuple[np.ndarray, List[TrackEvent]]:
-        """Annotate the frame, update tracks and process the resulting events.
+        """
+        Process a single frame: inject detection boxes + track objects + generate events
 
-        Returns (annotated_frame, events).
+        Args:
+            frame: Raw BGR frame
+            detections: Inference results
+            timestamp_ms: Timestamp (milliseconds)
+
+        Returns:
+            (annotated_frame, events)
+            - annotated_frame: Frame with detection boxes drawn
+            - events: List of tracking events (Enter/Update/Leave)
         """
         self._frame_count += 1
         
@@ -84,7 +117,7 @@ class InferencePipelineIntegration:
         }
     
     def reset(self):
-        """Reset tracker and counters (on stream switch or task restart)."""
+        """Reset all state (used on stream switch or task restart)"""
         self.tracker.reset()
         self.event_processor.reset()
         self._frame_count = 0

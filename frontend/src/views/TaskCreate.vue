@@ -1,9 +1,9 @@
 <template>
   <a-modal 
-    title="New Detection Task"
+    title="新建检测任务"
     :open="true"
     @cancel="$emit('close')"
-    width="720px"
+    width="880px"
     destroyOnClose
     class="task-create-modal"
   >
@@ -11,89 +11,41 @@
       <a-form :model="form" :rules="rules" ref="formRef" layout="vertical">
         
         <div class="form-section">
-          <div class="section-title">Basic Information</div>
+          <div class="section-title">基本信息</div>
           <div class="form-row">
-            <a-form-item label="Task Name" name="name" class="form-col-2">
-              <a-input v-model:value="form.name" placeholder="Enter a task name" :maxlength="50" showCount />
+            <a-form-item label="任务名称" name="name" class="form-col-2">
+              <a-input v-model:value="form.name" placeholder="请输入任务名称" :maxlength="50" showCount />
             </a-form-item>
-            <a-form-item label="Task Type" name="task_type" class="form-col-1">
-              <a-select v-model:value="form.task_type" placeholder="Select" @change="handleTaskTypeChange">
-                <a-select-option value="image">Image Detection</a-select-option>
-                <a-select-option value="video">Video Detection</a-select-option>
-                <a-select-option value="stream">Live Stream</a-select-option>
+            <a-form-item label="任务类型" name="task_type" class="form-col-1">
+              <a-select v-model:value="form.task_type" placeholder="请选择" @change="handleTaskTypeChange">
+                <a-select-option value="image">图片检测</a-select-option>
+                <a-select-option value="video">视频检测</a-select-option>
+                <a-select-option value="stream">实时视频流</a-select-option>
               </a-select>
             </a-form-item>
           </div>
         </div>
 
+        <TaskModelConfigSection
+          :selected-models="selectedModels"
+          :filtered-models="filteredModels"
+          :loading-models="loadingModels"
+          :fusion-config="fusionConfig"
+          :is-model-selected-by-other="isModelSelectedByOther"
+          @add-model="addModel"
+          @remove-model="removeModel"
+          @model-change="handleMultiModelChange"
+          @configure-model="openPerModelConfig"
+        />
+
         <div class="form-section">
-          <div class="section-title">Model Configuration</div>
-
-          <div v-for="(sm, idx) in selectedModels" :key="idx" class="multi-model-row">
-            <div class="model-row-header">
-              <span class="model-row-label">Model {{ idx + 1 }}</span>
-              <a-button v-if="selectedModels.length > 1" type="link" size="small" danger @click="removeModel(idx)">
-                Remove
-              </a-button>
-            </div>
-            <div class="form-row">
-              <a-form-item label="Select Model" class="form-col-2">
-                <a-select
-                  v-model:value="sm.model_id"
-                  placeholder="Select a detection model"
-                  :loading="loadingModels"
-                  @change="(val: string) => handleMultiModelChange(idx, val)"
-                  style="width: 100%"
-                >
-                  <a-select-option
-                    v-for="m in filteredModels"
-                    :key="m.id"
-                    :value="m.id"
-                    :disabled="isModelSelectedByOther(m.id, idx)"
-                  >
-                    {{ m.name }} ({{ m.input_types.map((t: string) => t.toUpperCase()).join(', ') }})
-                  </a-select-option>
-                </a-select>
-              </a-form-item>
-              <a-form-item label="Weight" class="form-col-1">
-                <a-slider v-model:value="sm.weight" :min="0.1" :max="3.0" :step="0.1" />
-              </a-form-item>
-            </div>
-            <div v-if="sm.model_id" class="model-requirement-hint fade-in">
-              <span class="hint-label">Input types:</span>
-              <a-tag v-for="t in sm.input_types" :key="t" color="blue" class="requirement-tag">
-                {{ t.toUpperCase() }}
-              </a-tag>
-              <template v-if="selectedModels.length > 1">
-                <a-button size="small" style="margin-left: 12px" @click="configuringModelIndex = idx; showPerModelConfig = true">
-                  Configure Classes &amp; Thresholds
-                </a-button>
-                <span class="config-summary">
-                  {{ sm.categories.filter(c => c.selected).length }}/{{ sm.categories.length }} classes enabled
-                </span>
-              </template>
-            </div>
-          </div>
-
-          <a-button type="dashed" block @click="addModel" class="add-model-btn">
-            + Add Model
-          </a-button>
-
-          <div v-if="selectedModels.length > 1" class="fusion-config-section">
-            <div class="config-header">
-              <span class="config-title">Fusion Configuration</span>
-            </div>
-            <a-form-item label="WBF IoU Threshold">
-              <a-slider v-model:value="fusionConfig.wbf_iou_threshold" :min="0.3" :max="0.8" :step="0.05" />
-              <div class="config-hint">Boxes of the same class are fused when their IoU exceeds this value (default 0.55)</div>
-            </a-form-item>
-          </div>
+          <div class="section-title">运行配置</div>
 
           <div v-if="hasAnyModelSelected" class="inference-device-section">
-            <a-form-item label="Inference Device" class="device-item">
+            <a-form-item label="推理设备" class="device-item">
               <a-radio-group v-model:value="form.use_gpu">
-                <a-radio :value="false">CPU Inference</a-radio>
-                <a-radio :value="true" :disabled="!gpuAvailable && !gpuChecking">GPU Inference</a-radio>
+                <a-radio :value="false">CPU 推理</a-radio>
+                <a-radio :value="true" :disabled="!gpuAvailable && !gpuChecking">GPU 推理</a-radio>
               </a-radio-group>
               <a-button
                 size="small"
@@ -102,122 +54,79 @@
                 style="margin-left: 8px"
               >
                 <template #icon><ThunderboltOutlined /></template>
-                {{ gpuAvailable ? 'Re-check GPU' : 'Check GPU Status' }}
+                {{ gpuAvailable ? '重新检测 GPU' : '检测 GPU 状态' }}
               </a-button>
               <div v-if="gpuStatusMsg" class="gpu-status-msg" :class="{ 'gpu-ok': gpuAvailable, 'gpu-fail': !gpuAvailable }">
                 {{ gpuStatusMsg }}
               </div>
             </a-form-item>
           </div>
+
+          <div class="inference-device-section">
+            <a-form-item label="检测记录保留">
+              <a-select v-model:value="form.record_retention_days" style="width: 180px">
+                <a-select-option :value="7">7 天</a-select-option>
+                <a-select-option :value="30">30 天（推荐）</a-select-option>
+                <a-select-option :value="90">90 天</a-select-option>
+                <a-select-option :value="180">180 天</a-select-option>
+                <a-select-option :value="365">365 天</a-select-option>
+              </a-select>
+              <div class="config-hint">超过保留期的检测记录/事件会自动清理，默认保守保留 30 天。</div>
+            </a-form-item>
+            <a-form-item v-if="form.task_type === 'stream'" label="录像保留">
+              <a-select v-model:value="form.video_retention_hours" style="width: 180px">
+                <a-select-option :value="6">6 小时</a-select-option>
+                <a-select-option :value="12">12 小时（推荐）</a-select-option>
+                <a-select-option :value="24">24 小时</a-select-option>
+                <a-select-option :value="72">72 小时</a-select-option>
+              </a-select>
+              <div class="config-hint">仅影响历史录像分片，超出后由保洁自动删除。</div>
+            </a-form-item>
+          </div>
           
           <div v-if="selectedModels.length === 1 && selectedModels[0].model_id" class="detection-config-section">
             <div class="config-header">
-              <span class="config-title">Detection Configuration</span>
+              <span class="config-title">检测配置</span>
               <a-button size="small" @click="showDetectionConfig = true">
                 <template #icon><SettingOutlined /></template>
-                Configure Classes &amp; Thresholds
+                配置类别和阈值
               </a-button>
             </div>
             <div class="config-summary" v-if="categories.length > 0">
               <span class="summary-item">
-                {{ selectedCategoriesCount }}/{{ categories.length }} classes selected
+                已选择 {{ selectedCategoriesCount }}/{{ categories.length }} 个类别
               </span>
               <span class="summary-divider">|</span>
               <span class="summary-item">
-                Global threshold: {{ globalThreshold }}
+                全局阈值: {{ globalThreshold }}
               </span>
             </div>
           </div>
         </div>
 
-        <div class="form-section data-source-section">
-          <div class="section-title">Data Source</div>
-          
-          <div v-if="!hasAnyModelSelected" class="model-not-selected-placeholder">
-            <div class="placeholder-content">
-              <InfoCircleOutlined class="icon" />
-              <span>Select a model first — the upload area will unlock based on its requirements</span>
-            </div>
-          </div>
+        <TaskSourceSection
+          :form="form"
+          :has-any-model-selected="hasAnyModelSelected"
+          :has-ir-model="hasIrModel"
+          :allowed-source-types="allowedSourceTypes"
+          :source-url-placeholder="sourceUrlPlaceholder"
+          :onvif-scanning="onvifScanning"
+          v-model:rgb-files="rgbFiles"
+          v-model:ir-files="irFiles"
+          @source-change="handleSourceChange"
+          @scan-onvif="scanOnvif"
+        />
 
-          <div v-else class="data-source-content fade-in">
-            <a-form-item name="source_type" class="source-type-item">
-              <a-radio-group v-model:value="form.source_type" button-style="solid" @change="handleSourceChange">
-                <a-radio-button value="upload" :disabled="!allowedSourceTypes.upload">
-                  <UploadOutlined /> File Upload
-                </a-radio-button>
-                <a-radio-button value="url" :disabled="!allowedSourceTypes.url">
-                  <LinkOutlined /> URL
-                </a-radio-button>
-                <a-radio-button value="rtsp" :disabled="!allowedSourceTypes.rtsp">
-                  <VideoCameraOutlined /> RTSP Stream
-                </a-radio-button>
-              </a-radio-group>
-            </a-form-item>
-
-            <template v-if="form.source_type === 'upload'">
-              <div class="upload-row" v-if="form.input_types.includes('rgb')">
-                <div class="upload-label">
-                  <span class="required-mark">*</span> RGB Files
-                </div>
-                <div class="upload-zone" @click="triggerUpload('rgb')">
-                  <CloudUploadOutlined class="icon" />
-                  <div class="text">Click to upload RGB {{form.task_type==='image'?'images':'videos'}}</div>
-                  <div class="files" v-if="rgbFiles.length">
-                    <CheckCircleOutlined /> {{rgbFiles.length}} file(s) selected
-                  </div>
-                </div>
-                <input type="file" multiple ref="rgbInput" style="display:none" @change="onFileChange($event, 'rgb')" />
-              </div>
-
-              <div class="upload-row" v-if="form.input_types.includes('ir')">
-                <div class="upload-label">
-                  <span class="required-mark">*</span> IR Files
-                </div>
-                <div class="upload-zone" @click="triggerUpload('ir')">
-                  <CloudUploadOutlined class="icon" />
-                  <div class="text">Click to upload IR {{form.task_type==='image'?'images':'videos'}}</div>
-                  <div class="files" v-if="irFiles.length">
-                    <CheckCircleOutlined /> {{irFiles.length}} file(s) selected
-                  </div>
-                </div>
-                <input type="file" multiple ref="irInput" style="display:none" @change="onFileChange($event, 'ir')" />
-              </div>
-            </template>
-
-            <a-form-item v-else label="RGB Source URL" name="source_url">
-              <a-input
-                v-model:value="form.source_url"
-                :placeholder="hasIrModel ? 'RGB stream URL' : sourceUrlPlaceholder"
-              >
-                <template #prefix>
-                  <LinkOutlined style="color: var(--text-muted)" />
-                </template>
-              </a-input>
-            </a-form-item>
-            <a-form-item v-if="source_type !== 'upload' && hasIrModel" label="IR Source URL" name="source_url_ir">
-              <a-input
-                v-model:value="form.source_url_ir"
-                placeholder="IR stream URL"
-              >
-                <template #prefix>
-                  <LinkOutlined style="color: var(--text-muted)" />
-                </template>
-              </a-input>
-            </a-form-item>
-          </div>
-        </div>
-
-        <a-form-item v-if="form.model_id" label="Description" class="description-item">
-          <a-textarea v-model:value="form.description" :rows="2" placeholder="Optional: add a task description" :maxlength="200" showCount />
+        <a-form-item v-if="form.model_id" label="任务描述" class="description-item">
+          <a-textarea v-model:value="form.description" :rows="2" placeholder="可选：添加任务描述信息" :maxlength="200" showCount />
         </a-form-item>
 
       </a-form>
     </div>
 
     <template #footer>
-      <a-button @click="$emit('close')">Cancel</a-button>
-      <a-button type="primary" :loading="submitting" @click="submit">Create Task</a-button>
+      <a-button @click="$emit('close')">取消</a-button>
+      <a-button type="primary" :loading="submitting" @click="submit">创建任务</a-button>
     </template>
     
     <DetectionConfig
@@ -226,38 +135,74 @@
        :model-id="form.model_id"
        :initial-categories="categories"
        :initial-global-threshold="globalThreshold"
+       :initial-record-retention-days="form.record_retention_days"
+       :initial-video-retention-hours="form.video_retention_hours"
        @close="showDetectionConfig = false"
        @success="handleDetectionConfigSuccess"
     />
 
+    <!-- 多模型：每模型类别配置 -->
     <DetectionConfig
       :task-id="''"
        v-if="showPerModelConfig && configuringModelIndex >= 0"
        :model-id="selectedModels[configuringModelIndex]?.model_id || ''"
        :initial-categories="selectedModels[configuringModelIndex]?.categories || []"
        :initial-global-threshold="selectedModels[configuringModelIndex]?.global_threshold || 0.6"
+       :initial-record-retention-days="form.record_retention_days"
+       :initial-video-retention-hours="form.video_retention_hours"
        @close="showPerModelConfig = false"
        @success="handlePerModelConfigSuccess"
     />
+    <!-- ONVIF：局域网设备扫描与取流地址 -->
+    <a-modal v-model:open="onvifOpen" title="ONVIF 设备" :footer="null" width="560px">
+      <a-spin :spinning="onvifFetching">
+        <div v-if="!onvifDevices.length" class="onvif-empty">
+          未发现设备。请确认摄像头与电脑在同一网段、已开启 ONVIF，并允许防火墙的局域网组播（UDP 3702）。
+        </div>
+        <div v-else class="onvif-list">
+          <div
+            v-for="d in onvifDevices"
+            :key="d.xaddr"
+            class="onvif-item"
+            :class="{ active: onvifSelected?.xaddr === d.xaddr }"
+            @click="onvifSelected = d"
+          >
+            <div class="onvif-name">{{ d.name || d.hardware || d.host }}</div>
+            <div class="onvif-sub">{{ d.host }}:{{ d.port }} · {{ d.xaddr }}</div>
+          </div>
+        </div>
+        <a-form layout="vertical" style="margin-top: 12px">
+          <a-form-item label="设备用户名" style="margin-bottom: 8px">
+            <a-input v-model:value="onvifUser" placeholder="通常为 admin" />
+          </a-form-item>
+          <a-form-item label="设备密码" style="margin-bottom: 0">
+            <a-input-password v-model:value="onvifPass" placeholder="摄像头管理密码" />
+          </a-form-item>
+        </a-form>
+        <div class="onvif-actions">
+          <a-button @click="onvifOpen = false">取消</a-button>
+          <a-button type="primary" :disabled="!onvifSelected" :loading="onvifFetching" @click="fetchOnvifUri">
+            获取 RTSP 地址
+          </a-button>
+        </div>
+      </a-spin>
+    </a-modal>
   </a-modal>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed } from 'vue'
 import { modelsApi, type DetectionModel } from '@/api/models'
+import { onvifApi, type OnvifDevice } from '@/api/onvif'
 import { useTaskStore } from '@/stores/task'
 import { message } from 'ant-design-vue'
 import { 
-  CloudUploadOutlined, 
-  UploadOutlined, 
-  LinkOutlined, 
-  VideoCameraOutlined,
-  CheckCircleOutlined,
-  InfoCircleOutlined,
   SettingOutlined,
-  ThunderboltOutlined 
+  ThunderboltOutlined,
 } from '@ant-design/icons-vue'
 import DetectionConfig from '@/components/DetectionConfig.vue'
+import TaskSourceSection from '@/components/TaskSourceSection.vue'
+import TaskModelConfigSection from '@/components/TaskModelConfigSection.vue'
 
 const emit = defineEmits(['close', 'success'])
 const taskStore = useTaskStore()
@@ -266,9 +211,6 @@ const formRef = ref()
 const models = ref<DetectionModel[]>([])
 const loadingModels = ref(false)
 const submitting = ref(false)
-
-const rgbInput = ref<HTMLInputElement>()
-const irInput = ref<HTMLInputElement>()
 
 const rgbFiles = ref<File[]>([])
 const irFiles = ref<File[]>([])
@@ -279,6 +221,7 @@ const configuringModelIndex = ref<number>(-1)
 const categories = ref<Array<{ id: string; name: string; selected: boolean; threshold: number | null }>>([])
 const globalThreshold = ref<number>(0.6)
 
+// 多模型支持
 interface SelectedModel {
   model_id: string
   weight: number
@@ -312,6 +255,8 @@ interface TaskForm {
   source_url_ir: string
   description: string
   use_gpu: boolean
+  record_retention_days: number
+  video_retention_hours: number
 }
 
 const form = reactive<TaskForm>({
@@ -323,12 +268,62 @@ const form = reactive<TaskForm>({
   source_url: '',
   source_url_ir: '',
   description: '',
-  use_gpu: false
+  use_gpu: false,
+  record_retention_days: 30,
+  video_retention_hours: 12
 })
 
 const gpuAvailable = ref(false)
 const gpuChecking = ref(false)
 const gpuStatusMsg = ref('')
+
+// ONVIF 设备扫描
+const onvifOpen = ref(false)
+const onvifScanning = ref(false)
+const onvifFetching = ref(false)
+const onvifDevices = ref<OnvifDevice[]>([])
+const onvifSelected = ref<OnvifDevice | null>(null)
+const onvifUser = ref('admin')
+const onvifPass = ref('')
+
+async function scanOnvif() {
+  onvifScanning.value = true
+  try {
+    const res = await onvifApi.discover(3000)
+    onvifDevices.value = res.devices || []
+    onvifSelected.value = onvifDevices.value[0] || null
+    onvifOpen.value = true
+    if (!onvifDevices.value.length) {
+      message.warning('未发现 ONVIF 设备，请确认摄像头与电脑在同一网段')
+    } else {
+      message.success(`发现 ${onvifDevices.value.length} 台 ONVIF 设备`)
+    }
+  } catch (e) {
+    // 错误提示由 axios 拦截器统一展示
+  } finally {
+    onvifScanning.value = false
+  }
+}
+
+async function fetchOnvifUri() {
+  if (!onvifSelected.value) return
+  onvifFetching.value = true
+  try {
+    const res = await onvifApi.streamUri({
+      xaddr: onvifSelected.value.xaddr,
+      username: onvifUser.value,
+      password: onvifPass.value
+    })
+    form.source_url = res.rtsp_url
+    const label = [res.device?.manufacturer, res.device?.model].filter(Boolean).join(' ')
+    message.success(label ? `已填入 RTSP 地址（${label}）` : '已填入 RTSP 地址')
+    onvifOpen.value = false
+  } catch (e) {
+    // 错误提示由 axios 拦截器统一展示
+  } finally {
+    onvifFetching.value = false
+  }
+}
 
 const allowedSourceTypes = computed(() => {
   const types = { upload: true, url: true, rtsp: true }
@@ -346,35 +341,58 @@ const allowedSourceTypes = computed(() => {
 
 const sourceUrlPlaceholder = computed(() => {
   if (form.task_type === 'stream') return 'rtsp://...'
-  return 'http://... or https://...'
+  return 'http://... 或 https://...'
 })
 
 const rules = {
   name: [
-    { required: true, message: 'Please enter a task name', trigger: 'blur' },
-    { min: 2, max: 50, message: 'Name must be 2-50 characters', trigger: 'blur' }
+    { required: true, message: '请输入任务名称', trigger: 'blur' },
+    { min: 2, max: 50, message: '名称长度 2-50 个字符', trigger: 'blur' }
   ],
-  task_type: [{ required: true, message: 'Please select a task type', trigger: 'change' }],
-  input_types: [{ required: true, type: 'array', min: 1, message: 'The selected model requires an input type', trigger: 'change' }],
-  model_id: [{ required: true, message: 'Please select a model', trigger: 'change' }],
-  source_type: [{ required: true, message: 'Please select a data source', trigger: 'change' }],
+  task_type: [{ required: true, message: '请选择任务类型', trigger: 'change' }],
+  input_types: [{ required: true, type: 'array', min: 1, message: '模型要求输入类型缺失', trigger: 'change' }],
+  model_id: [{ required: true, message: '请选择模型', trigger: 'change' }],
+  source_type: [{ required: true, message: '请选择数据来源', trigger: 'change' }],
   source_url: [
-    { required: true, message: 'Please enter a source URL', trigger: 'blur' },
+    { required: true, message: '请输入资源地址', trigger: 'blur' },
     {
       validator: (_rule: any, value: string) => {
         if (!value) return Promise.resolve()
         const url = value.trim().toLowerCase()
         if (form.task_type === 'stream') {
           if (!url.startsWith('rtsp://')) {
-            return Promise.reject(new Error('The stream URL must start with rtsp://'))
+            return Promise.reject(new Error('实时视频流地址必须以 rtsp:// 开头'))
           }
         } else {
           if (url.startsWith('rtsp://')) {
-            return Promise.reject(new Error('Image and video tasks do not support RTSP URLs'))
+            return Promise.reject(new Error('图片或视频任务不支持 RTSP 地址'))
           }
           if (!url.startsWith('http://') && !url.startsWith('https://')) {
-            return Promise.reject(new Error('Please enter a valid HTTP/HTTPS URL'))
+            return Promise.reject(new Error('请输入有效的 HTTP/HTTPS 地址'))
           }
+        }
+        return Promise.resolve()
+      },
+      trigger: 'blur'
+    }
+  ],
+  // 双光模型的 IR 地址必须真的填了可用的流地址：只填空格、写错协议都要拦住。
+  source_url_ir: [
+    {
+      validator: (_rule: any, value: string) => {
+        if (!hasIrModel.value || form.source_type === 'upload') return Promise.resolve()
+        const raw = (value || '').trim()
+        if (!raw) return Promise.reject(new Error('双光模型必须填写 IR 视频流地址'))
+        const url = raw.toLowerCase()
+        if (form.task_type === 'stream') {
+          if (!url.startsWith('rtsp://')) {
+            return Promise.reject(new Error('IR 地址必须以 rtsp:// 开头'))
+          }
+        } else if (!url.startsWith('http://') && !url.startsWith('https://')) {
+          return Promise.reject(new Error('请输入有效的 HTTP/HTTPS 地址'))
+        }
+        if (/[\s；]/.test(raw)) {
+          return Promise.reject(new Error('IR 地址不能包含空格或分号'))
         }
         return Promise.resolve()
       },
@@ -436,7 +454,7 @@ function handleModelChange(modelId: string) {
         }
         
         if (classList.length === 0) {
-            classList = [{ id: 'default', name: 'Default Category' }]
+            classList = [{ id: 'default', name: '默认类别' }]
         }
         
         categories.value = classList.map(cat => ({
@@ -446,15 +464,16 @@ function handleModelChange(modelId: string) {
             threshold: null
         }))
         
-        // Default threshold for a new model selection
+        // V1.4.6: Force standard default threshold to 0.60 for initial creation
         globalThreshold.value = 0.6
     }
 }
 
 function handleTypeChange() {
+    // 移除原有的手动触发逻辑，改为由模型驱动
 }
 
-// Multi-model functions
+// ── 多模型函数 ──
 
 function addModel() {
     selectedModels.value.push({
@@ -465,7 +484,7 @@ function addModel() {
 function removeModel(idx: number) {
     selectedModels.value.splice(idx, 1)
     syncInputTypes()
-    // Sync the main form when falling back to one model
+    // 回到单模型时，同步 form.model_id 和类别配置
     if (selectedModels.value.length === 1) {
         const sm = selectedModels.value[0]
         if (sm.model_id) {
@@ -481,21 +500,27 @@ function isModelSelectedByOther(modelId: string, currentIdx: number): boolean {
     return selectedModels.value.some((sm, i) => i !== currentIdx && sm.model_id === modelId)
 }
 
+function openPerModelConfig(idx: number) {
+    configuringModelIndex.value = idx
+    showPerModelConfig.value = true
+}
+
 function handleMultiModelChange(idx: number, modelId: string) {
     const model = models.value.find(m => m.id === modelId)
     if (!model) return
     const sm = selectedModels.value[idx]
     sm.input_types = [...model.input_types]
+    // 构建该模型的类别配置
     let classList: Array<{ id: string; name: string }> = []
     if (model.label_config && Object.values(model.label_config).length > 0) {
         classList = Object.entries(model.label_config).map(([id, name]) => ({ id, name: name as string }))
     } else if (model.class_names && model.class_names.length > 0) {
         classList = model.class_names.map((name: string, i: number) => ({ id: String(i), name }))
     }
-    if (classList.length === 0) classList = [{ id: 'default', name: 'Default Category' }]
+    if (classList.length === 0) classList = [{ id: 'default', name: '默认类别' }]
     sm.categories = classList.map(cat => ({ ...cat, selected: true, threshold: null }))
     sm.global_threshold = 0.6
-    // Keep the single-model form in sync
+    // 同步到主 form（兼容单模型模式）
     syncInputTypes()
     if (selectedModels.value.length === 1) {
         form.model_id = modelId
@@ -511,28 +536,6 @@ function syncInputTypes() {
     form.input_types = [...allTypes]
 }
 
-function triggerUpload(type: 'rgb'|'ir') {
-    if (type === 'rgb') rgbInput.value?.click()
-    else irInput.value?.click()
-}
-
-function onFileChange(e: Event, type: 'rgb'|'ir') {
-    const target = e.target as HTMLInputElement
-    if (target.files) {
-        const files = Array.from(target.files)
-        const maxFileSize = 20 * 1024 * 1024 * 1024 // 20GB limit
-        for (const file of files) {
-            if (file.size > maxFileSize) {
-                message.error(`File "${file.name}" (${(file.size / 1024 / 1024).toFixed(1)}MB) exceeds the 20GB maximum file size limit`)
-                target.value = ''
-                return
-            }
-        }
-        if (type === 'rgb') rgbFiles.value = files
-        else irFiles.value = files
-    }
-}
-
 async function checkGpuStatus() {
   gpuChecking.value = true
   gpuStatusMsg.value = ''
@@ -540,13 +543,13 @@ async function checkGpuStatus() {
     const res = await taskStore.checkGpuStatus()
     gpuAvailable.value = res.available
     if (res.available) {
-      gpuStatusMsg.value = `GPU ready: ${res.checks.device_name || 'Unknown'}, VRAM: ${res.checks.vram_mb || 0}MB`
+      gpuStatusMsg.value = `GPU就绪: ${res.checks.device_name || '未知'}, 显存: ${res.checks.vram_mb || 0}MB`
     } else {
-      gpuStatusMsg.value = `GPU unavailable: ${res.reason || 'The environment does not meet the requirements'}`
+      gpuStatusMsg.value = `GPU不可用: ${res.reason || '环境不满足要求'}`
     }
   } catch (e: any) {
     gpuAvailable.value = false
-    gpuStatusMsg.value = `GPU check failed: ${e?.message || 'Unknown error'}`
+    gpuStatusMsg.value = `GPU检测失败: ${e?.message || '未知错误'}`
   } finally {
     gpuChecking.value = false
   }
@@ -562,21 +565,38 @@ async function submit() {
 
     if (form.source_type === 'upload') {
         if (form.input_types.includes('rgb') && rgbFiles.value.length === 0) {
-            message.warning('Please upload an RGB file')
+            message.warning('请上传 RGB 文件')
             return
         }
         if (form.input_types.includes('ir') && irFiles.value.length === 0) {
-            message.warning('Please upload an IR file')
+            message.warning('请上传 IR 文件')
             return
         }
-    } else if (form.source_type !== 'upload' && hasIrModel.value && !form.source_url_ir) {
-        message.warning('The selected model requires IR input. Please provide an IR source URL')
+    } else if (hasIrModel.value && !form.source_url_ir.trim()) {
+        message.warning('选中的模型包含 IR 输入，请提供 IR 源地址')
         return
     }
 
     const validModels = selectedModels.value.filter(sm => sm.model_id)
     if (validModels.length === 0) {
-        message.warning('Please select at least one detection model')
+        message.warning('请至少选择一个检测模型')
+        return
+    }
+
+    // 模型输入要求必须与任务输入类型严格一致：RGBIR 双光模型必须同时有 RGB + IR。
+    const mismatched = validModels.find(sm => {
+        const model = models.value.find(m => m.id === sm.model_id)
+        if (!model) return false
+        const hasRgb = model.input_types.includes('rgb')
+        const hasIr = model.input_types.includes('ir')
+        if (hasRgb && hasIr) {
+            return !(form.input_types.includes('rgb') && form.input_types.includes('ir'))
+        }
+        if (hasIr && !hasRgb) return true
+        return hasRgb && !form.input_types.includes('rgb')
+    })
+    if (mismatched) {
+        message.warning('模型输入要求与任务输入类型不一致：RGBIR 双光模型必须同时提供 RGB 与 IR')
         return
     }
 
@@ -587,8 +607,13 @@ async function submit() {
     fd.append('source_type', form.source_type)
     fd.append('description', form.description)
     fd.append('use_gpu', String(form.use_gpu))
+    fd.append('record_retention_days', String(form.record_retention_days))
+    if (form.task_type === 'stream') {
+        fd.append('video_retention_hours', String(form.video_retention_hours))
+    }
 
     if (validModels.length > 1) {
+        // 多模型模式：发送 model_ids + fusion_config
         const modelIdsPayload = validModels.map(sm => {
             const enabledClasses = sm.categories.filter(c => c.selected).map(c => c.id)
             const perClassThresholds: Record<string, number> = {}
@@ -606,11 +631,11 @@ async function submit() {
         })
         fd.append('model_ids', JSON.stringify(modelIdsPayload))
         fd.append('fusion_config', JSON.stringify(fusionConfig))
-        // Also send the first model as model_id for old clients
+        // 向后兼容：第一个模型作为主 model_id
         fd.append('model_id', validModels[0].model_id)
         fd.append('threshold', String(validModels[0].global_threshold))
     } else {
-        // Derive from selectedModels; form.model_id can go stale
+        // 单模型模式：从 selectedModels 派生，避免 form.model_id 不同步
         const sm0 = validModels[0]
         fd.append('model_id', sm0.model_id)
         fd.append('threshold', String(sm0.global_threshold || globalThreshold.value))
@@ -636,20 +661,20 @@ async function submit() {
         rgbFiles.value.forEach(f => fd.append('rgb_files', f))
         irFiles.value.forEach(f => fd.append('ir_files', f))
     } else {
-        // RGB and IR source URLs are joined with ';'
-        const url = hasIrModel.value && form.source_url_ir
-          ? `${form.source_url};${form.source_url_ir}`
-          : form.source_url
+        // 有 IR 模型时，用分号拼接 RGB 和 IR 源地址（两侧都 trim，避免空格混进 URL）
+        const rgbUrl = form.source_url.trim()
+        const irUrl = form.source_url_ir.trim()
+        const url = hasIrModel.value && irUrl ? `${rgbUrl};${irUrl}` : rgbUrl
         fd.append('source_url', url)
     }
 
     submitting.value = true
     try {
         await taskStore.createTask(fd)
-        message.success('Task created')
+        message.success('任务创建成功')
         emit('success')
     } catch(e: any) {
-        message.error('Failed to create task: ' + (e?.message || e?.detail || 'Unknown error'))
+        message.error('任务创建失败: ' + (e?.message || e?.detail || '未知错误'))
     } finally {
         submitting.value = false
     }
@@ -661,6 +686,12 @@ function handleDetectionConfigSuccess(config: any) {
     }
     if (config.globalThreshold !== undefined) {
         globalThreshold.value = config.globalThreshold
+    }
+    if (config.recordRetentionDays !== undefined) {
+        form.record_retention_days = config.recordRetentionDays
+    }
+    if (config.videoRetentionHours !== undefined) {
+        form.video_retention_hours = config.videoRetentionHours
     }
     showDetectionConfig.value = false
 }
@@ -675,6 +706,12 @@ function handlePerModelConfigSuccess(config: any) {
     if (config.globalThreshold !== undefined) {
         sm.global_threshold = config.globalThreshold
     }
+    if (config.recordRetentionDays !== undefined) {
+        form.record_retention_days = config.recordRetentionDays
+    }
+    if (config.videoRetentionHours !== undefined) {
+        form.video_retention_hours = config.videoRetentionHours
+    }
     showPerModelConfig.value = false
 }
 </script>
@@ -687,7 +724,11 @@ function handlePerModelConfigSuccess(config: any) {
 }
 
 .form-section {
-  margin-bottom: 24px;
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
 }
 
 .section-title {
@@ -718,60 +759,6 @@ function handlePerModelConfigSuccess(config: any) {
   flex: 3;
 }
 
-.source-type-item {
-  margin-bottom: 16px;
-}
-
-.upload-row {
-  margin-bottom: 16px;
-}
-
-.upload-label {
-  font-size: 14px;
-  color: var(--text-primary);
-  margin-bottom: 8px;
-  font-weight: 500;
-}
-
-.required-mark {
-  color: #ff4d4f;
-  margin-right: 4px;
-}
-
-.upload-zone {
-    width: 100%;
-    border: 1px dashed var(--border-color);
-    border-radius: 8px;
-    padding: 24px;
-    text-align: center;
-    cursor: pointer;
-    transition: all 0.3s;
-    background: var(--bg-input);
-}
-.upload-zone:hover {
-    border-color: var(--primary-blue);
-    background: rgba(0, 102, 204, 0.02);
-}
-.upload-zone .icon {
-    font-size: 28px;
-    color: var(--text-muted);
-    margin-bottom: 8px;
-}
-.upload-zone .text {
-    color: var(--text-secondary);
-    font-size: 13px;
-}
-.files {
-    margin-top: 8px;
-    color: var(--success-green);
-    font-weight: 600;
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-}
-
 .description-item {
   margin-top: 8px;
 }
@@ -800,50 +787,6 @@ function handlePerModelConfigSuccess(config: any) {
   color: #d0d5dd;
   background: #f9fafb;
   border-color: #e8ecf0;
-}
-
-.model-requirement-hint {
-  margin-top: 10px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--bg-secondary);
-  padding: 8px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border-color);
-}
-
-.hint-label {
-  font-weight: 500;
-  color: var(--text-muted);
-}
-
-.requirement-tag {
-  margin-right: 0 !important;
-  font-weight: 600;
-  border-radius: 4px;
-}
-
-.model-not-selected-placeholder {
-  padding: 32px;
-  text-align: center;
-  background: var(--bg-secondary);
-  border: 1px dashed var(--border-color);
-  border-radius: 8px;
-  color: var(--text-muted);
-}
-
-.placeholder-content {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.placeholder-content .icon {
-  font-size: 24px;
 }
 
 .inference-device-section {
@@ -882,6 +825,55 @@ function handlePerModelConfigSuccess(config: any) {
   border: 1px solid rgba(255, 77, 79, 0.3);
 }
 
+.onvif-list {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  border-radius: 6px;
+}
+
+.onvif-item {
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+}
+
+.onvif-item:last-child {
+  border-bottom: none;
+}
+
+.onvif-item.active {
+  background: rgba(22, 119, 255, 0.08);
+}
+
+.onvif-name {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.onvif-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.onvif-empty {
+  padding: 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 6px;
+}
+
+.onvif-actions {
+  margin-top: 16px;
+  text-align: right;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .detection-config-section {
   margin-top: 16px;
   padding: 12px 16px;
@@ -907,13 +899,6 @@ function handlePerModelConfigSuccess(config: any) {
   display: flex;
   gap: 12px;
   align-items: center;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.model-row .config-summary {
-  display: inline;
-  margin-left: 8px;
   font-size: 12px;
   color: var(--text-secondary);
 }

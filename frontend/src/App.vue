@@ -1,12 +1,12 @@
 <template>
-  <a-config-provider :locale="enUS">
+  <a-config-provider :locale="zhCN">
     <router-view />
   </a-config-provider>
 </template>
 
 <script setup lang="ts">
-import enUS from 'ant-design-vue/es/locale/en_US';
+import zhCN from 'ant-design-vue/es/locale/zh_CN';
 import dayjs from 'dayjs';
-import 'dayjs/locale/en';
-dayjs.locale('en');
+import 'dayjs/locale/zh-cn';
+dayjs.locale('zh-cn');
 </script>

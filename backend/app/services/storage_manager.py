@@ -16,10 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 class DirectHLSWriter:
-    """Records an RTSP source to HLS with wall-clock timestamps.
+    """
+    FFmpeg HLS recorder (wall-clock timestamps + two-level encoding fallback).
 
-    Encoding falls back from stream copy (level 0) to hardware encoding (level 1)
-    when FFmpeg fails repeatedly.
+    Encoding fallback strategy:
+    - Level 0: -c:v copy (zero encoding, preferred)
+    - Level 1: -c:v h264_nvenc/qsv/amf (hardware encoding)
     """
 
     @staticmethod
@@ -28,8 +30,9 @@ class DirectHLSWriter:
             return 0
         try:
             content = m3u8_path.read_text(encoding="utf-8", errors="ignore")
-            # Segment names vary (stream_rgb0.ts, stream_annotated0.ts); use the trailing digits.
+            # Match the trailing digits of all .ts segment filenames (compatible with stream_rgb0.ts, stream_annotated0.ts, etc.)
             numbers = re.findall(r"(\w+)\.ts", content)
+            # Extract the trailing digits from the matched filenames
             seg_nums = []
             for name in numbers:
                 m = re.search(r"(\d+)$", name)
@@ -60,7 +63,7 @@ class DirectHLSWriter:
         existing_ts = list(self.output_dir.glob(f"stream_{channel}*.ts")) if self.output_dir.exists() else []
         self._initial_seg_count = len(existing_ts) if resume else 0
         self._is_resume = resume and self._initial_seg_count > 0
-        # Resume: keep the old playlist text and merge segments on stop.
+        # Resume mode: back up the old m3u8 content, merge old and new segments on stop
         self._old_m3u8_content: str | None = None
         if self._is_resume and self.m3u8_path.exists():
             try:
@@ -108,19 +111,21 @@ class DirectHLSWriter:
         ]
 
         if config.USE_WALLCLOCK_TIMESTAMPS:
-            # Input option, must precede -i.
+            # Input option, must come before -i
             base_cmd += ["-use_wallclock_as_timestamps", "1"]
 
         base_cmd += ["-i", self.source_url]
 
         if self._encode_level == 0:
             base_cmd += ["-c:v", "copy"]
-        elif self._encode_level == 1 and self._hw_encoder_is_hw:
+        elif self._encode_level == 1:
+            # Re-encoding is also the fallback when no hardware encoder exists;
+            # build_hls_encode_args() emits libx264 arguments in that case.
             base_cmd += build_hls_encode_args(self._hw_encoder, self._hw_encoder_is_hw)
         else:
             raise RuntimeError(
                 f"DirectHLSWriter: no valid encoder (level={self._encode_level}, "
-                f"hw={self._hw_encoder_is_hw}). HW encoding is required."
+                f"hw={self._hw_encoder_is_hw})."
             )
 
         if not config.USE_WALLCLOCK_TIMESTAMPS:
@@ -141,11 +146,11 @@ class DirectHLSWriter:
 
     @staticmethod
     def _is_rtsp_source_gone(log_path: Path) -> bool:
-        """True if the FFmpeg log tail contains an RTSP 404, meaning the source is gone."""
+        """Check whether the tail of the FFmpeg log contains an RTSP 404 error, indicating the source is gone."""
         try:
             if not log_path.exists():
                 return False
-            # The last 2KB covers the final log lines.
+            # Reading the last 2KB is enough to cover the last few log lines
             with open(log_path, "rb") as f:
                 f.seek(0, 2)
                 size = f.tell()
@@ -157,7 +162,7 @@ class DirectHLSWriter:
 
     def start(self):
         if self._resume and self._is_resume:
-            # Resume: keep old segments, strip ENDLIST so FFmpeg keeps appending.
+            # Resume mode: keep old segments and only strip the ENDLIST marker so FFmpeg keeps appending
             self._strip_endlist()
             logger.info(
                 f"[DirectHLSWriter] Resume mode for {self.task_id}: "
@@ -174,6 +179,8 @@ class DirectHLSWriter:
         max_retries = 10
         retry_window = 120.0
         crash_timestamps = []
+
+        # CPU affinity removed — left to the OS scheduler to test dynamic resource allocation
 
         while not self._stop_event.is_set():
             try:
@@ -201,7 +208,7 @@ class DirectHLSWriter:
 
                     ret = self.process.wait()
 
-                    # Log the run state on exit.
+                    # Diagnostics: record the run state when FFmpeg exits
                     m3u8_exists = self.m3u8_path.exists()
                     ts_count = len(list(self.output_dir.glob(f"stream_{self.channel}*.ts"))) if self.output_dir.exists() else 0
                     logger.info(
@@ -225,10 +232,10 @@ class DirectHLSWriter:
                             f"[DirectHLSWriter] FFmpeg crashed (code {ret}) for {self.task_id} "
                             f"[encode_level={self._encode_level}]"
                         )
-                        # Only clean up zombies after an abnormal exit.
+                        # Clean up zombie processes only after an abnormal exit; skipped on normal startup
                         self._ensure_no_zombie_ffmpeg()
 
-                        # A 404 source will not recover on its own, so stop retrying.
+                        # Skip retries when the RTSP source is gone (404), since the source will not recover on its own
                         if self._is_rtsp_source_gone(ffmpeg_log_path):
                             logger.warning(
                                 f"[DirectHLSWriter] RTSP source gone (404) for {self.task_id}, "
@@ -240,7 +247,8 @@ class DirectHLSWriter:
                         self._consecutive_failures += 1
 
                         if self._consecutive_failures >= self._max_failures_before_escalate:
-                            max_level = 1 if self._hw_encoder_is_hw else 0
+                            # The driver now supports up to 8 concurrent streams, so the L0→L1 escalation strategy is restored
+                            max_level = 1
                             if self._encode_level < max_level:
                                 old_level = self._encode_level
                                 self._encode_level += 1
@@ -290,7 +298,7 @@ class DirectHLSWriter:
     def _ensure_no_zombie_ffmpeg(self):
         try:
             import psutil
-            for proc in psutil.process_iter(['pid', 'name']):
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 try:
                     if proc.info['name'] and 'ffmpeg' in proc.info['name'].lower():
                         cmdline = " ".join(proc.info['cmdline'] or [])
@@ -346,7 +354,7 @@ class DirectHLSWriter:
         return max(0, len(current_ts) - self._initial_seg_count)
 
     def _cleanup_old_segments(self):
-        """Remove old segments and playlists; a leftover ENDLIST stalls hls.js."""
+        """Delete old segments and playlists to avoid a leftover ENDLIST or segments mixing across sessions"""
         try:
             for pattern in [f"stream_{self.channel}*.ts", f"stream_{self.channel}*.m3u8*"]:
                 for f in self.output_dir.glob(pattern):
@@ -359,7 +367,7 @@ class DirectHLSWriter:
             logger.warning(f"[DirectHLSWriter] Cleanup warning: {e}")
 
     def _strip_endlist(self):
-        """Remove ENDLIST so FFmpeg can keep appending segments (resume mode)."""
+        """Resume mode: remove the ENDLIST marker from the m3u8 so FFmpeg can keep appending segments"""
         if not self.m3u8_path.exists():
             return
         try:
@@ -372,12 +380,12 @@ class DirectHLSWriter:
             logger.warning(f"[DirectHLSWriter] ENDLIST strip failed: {e}")
 
     def _merge_m3u8(self):
-        """Put old segment entries before the new ones (resume mode) so the timeline stays intact."""
+        """Resume mode: merge the old m3u8 segment entries into the new m3u8 so the historical duration stays correct"""
         try:
             new_content = self.m3u8_path.read_text(encoding="utf-8")
             old_content = self._old_m3u8_content
 
-            # Collect EXTINF / segment filename pairs.
+            # Extract EXTINF + segment filename line pairs from the old m3u8
             old_segments = []
             lines = old_content.splitlines()
             i = 0
@@ -385,7 +393,7 @@ class DirectHLSWriter:
                 line = lines[i].strip()
                 if line.startswith("#EXTINF:"):
                     extinf = line
-                    # The next non-comment line is the segment filename.
+                    # A non-comment next line = the segment filename
                     if i + 1 < len(lines):
                         next_line = lines[i + 1].strip()
                         if next_line and not next_line.startswith("#"):
@@ -397,6 +405,7 @@ class DirectHLSWriter:
             if not old_segments:
                 return
 
+            # Extract the header of the new m3u8 (from EXTM3U to the last header line) and its segment entries
             new_header_lines = []
             new_segments = []
             found_first_extinf = False
@@ -414,6 +423,7 @@ class DirectHLSWriter:
                     elif stripped and not stripped.startswith("#") and not stripped.startswith("#EXT"):
                         new_segments.append((extinf, stripped))
 
+            # Merge: header + old segments + new segments + ENDLIST
             merged_lines = list(new_header_lines)
             for extinf, seg in old_segments:
                 merged_lines.append(extinf)
@@ -460,7 +470,7 @@ class DirectHLSWriter:
                         pass
                 self.process = None
 
-        # Resume: merge the old playlist so historical segments remain listed.
+        # Resume mode: merge the old m3u8 with the new m3u8 so historical segments are not lost
         if self._old_m3u8_content and self.m3u8_path.exists():
             self._merge_m3u8()
 
@@ -468,7 +478,10 @@ class DirectHLSWriter:
 
 
 class StorageManager:
-    """Owns one DirectHLSWriter per task channel and serves VOD snapshots."""
+    """
+    Unified HLS recording manager using zero-copy DirectHLSWriter.
+    Maintains a single stream.m3u8 for each task channel.
+    """
 
     def __init__(self):
         self.storage_dir = Path(config.VIDEO_STORAGE_DIR)
@@ -590,7 +603,7 @@ class StorageManager:
         if not annotated_m3u8.exists() and not raw_m3u8.exists():
             raise HTTPException(status_code=404, detail="Stream playlist not found")
 
-        # Prefer annotated output; fall back to raw when it covers less than half the span.
+        # Prefer the annotated stream, but fall back to the raw stream when the snapshot is too short (< 50% of expected)
         snapshot = None
         duration = 0.0
 

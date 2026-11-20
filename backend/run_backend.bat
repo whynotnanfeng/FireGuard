@@ -1,13 +1,19 @@
 @echo off
-REM FireGuard backend launcher (Windows).
-REM Finds a local venv (.venv, venv, env) or PATH python and starts uvicorn.
+REM ---------------------------------------------------------------------------
+REM FireGuard Backend launcher (Windows)
+REM
+REM Locates a Python interpreter and starts the FastAPI server.
+REM Resolution order:
+REM   1. A virtual environment inside this directory (.venv, venv, env)
+REM   2. The interpreter on PATH
+REM ---------------------------------------------------------------------------
 setlocal
 
 cd /d %~dp0
 
 set "PYTHON_EXE="
 
-REM Local virtual environment
+REM --- 1. Local virtual environment -----------------------------------------
 for %%V in (.venv venv env) do (
     if exist "%%V\Scripts\python.exe" (
         set "PYTHON_EXE=%%V\Scripts\python.exe"
@@ -15,7 +21,7 @@ for %%V in (.venv venv env) do (
     )
 )
 
-REM Interpreter on PATH
+REM --- 2. Interpreter on PATH -----------------------------------------------
 where python >nul 2>&1 && set "PYTHON_EXE=python"
 
 :found

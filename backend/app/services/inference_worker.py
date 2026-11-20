@@ -1,9 +1,9 @@
 """
-ONNX inference in a dedicated process.
+Global Inference Worker — multiprocessing-based ONNX inference process.
 
-Separate process avoids the GIL. Consumes (frame, model_path, conf, iou, use_gpu, ...)
-tuples from the input queue and returns Detection lists on the output queue. Models
-are cached per process.
+Breaks GIL via separate process. Accepts (frame, model_path, conf, iou, use_gpu, ...) tuples
+on the input queue, runs ONNX inference, and puts Detection results on the output queue.
+Models are cached per-process to avoid repeated loading.
 """
 import multiprocessing as mp
 import logging
@@ -16,7 +16,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 class GlobalInferenceWorker(mp.Process):
-    """ONNX inference process."""
+    """Global AI inference process (separate process, breaks the GIL)"""
 
     def __init__(self, in_q: mp.Queue, out_q: mp.Queue, active_tasks_map=None):
         super().__init__(daemon=True)
@@ -28,8 +28,10 @@ class GlobalInferenceWorker(mp.Process):
     def run(self):
         import os as _os, sys as _sys
 
-        # Child processes do not inherit parent logging handlers.
-        _log_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "logs")
+        # ---- Child process logging init (multiprocessing does not inherit parent handlers) ----
+        from app.config import config as _config
+
+        _log_dir = str(_config.LOGS_DIR)
         _os.makedirs(_log_dir, exist_ok=True)
         _log_file = _os.path.join(_log_dir, "inference_worker.log")
         _root_logger = logging.getLogger()
@@ -38,15 +40,16 @@ class GlobalInferenceWorker(mp.Process):
         _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         _root_logger.addHandler(_fh)
 
-        # The spawned process needs the CUDA/cuDNN DLL directories on PATH.
+        # The child process must inherit the CUDA/cuDNN PATH (multiprocessing does not inherit env changes)
         _cur = _os.environ.get("PATH", "")
         _path_additions = []
 
+        # CUDA 12.8 toolkit
         _cuda_bin = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin"
         if _os.path.isdir(_cuda_bin) and _cuda_bin not in _cur:
             _path_additions.append(_cuda_bin)
 
-        # Prefer the pip-installed cuDNN package, then manual install locations.
+        # cuDNN: look in the pip package (nvidia-cudnn-cu12) first, then fall back to manual install paths
         _cudnn_bin = ""
         _site_candidates = [
             _p + r"\nvidia\cudnn\bin"
@@ -72,13 +75,14 @@ class GlobalInferenceWorker(mp.Process):
         if _path_additions:
             _os.environ["PATH"] = ";".join(_path_additions + [_cur])
 
-        # cuDNN 9.22's frontend engine has no kernels for GTX 1060 (sm_61); force the legacy API.
+# 0. Disable the cuDNN Frontend Engine (Graph API) and fall back to the legacy cuDNN API
+#    The cuDNN 9.22 Frontend Engine may lack kernel images for GTX 1060 (sm_61)
         _os.environ.setdefault("ORT_DISABLE_CUDNN_FE", "1")
 
-        # Import here so CUDA/ONNXRuntime initialize in the child process.
+        # 1. Import Detector lazily so that CUDA / ONNXRuntime run in the child process context
         from app.services.detector import Detector
 
-        # Cache key is "model_path|gpu=<bool>" because one model may run on CPU or GPU.
+        # Process-level model cache dict { "model_path|gpu=...": DetectorInstance }
         model_cache = {}
 
         logger.info(f"[InferenceWorker-{self.pid}] Started.")
@@ -89,9 +93,9 @@ class GlobalInferenceWorker(mp.Process):
                 if task_data is None:
                     break
 
-                # Input layouts vary by producer version:
-                # >=9 fields = shared memory, >=8 = JPEG, 13 with shm_name "DUAL" = RGB+IR.
-                # An optional trailing model_id identifies the model in multi-model tasks.
+                # Shared memory format (>=9 elements) or legacy JPEG format (<9 elements)
+                # With multiple models, model_id is appended at the end (10th/8th element)
+                # Dual-frame SharedMemory: 13 elements, shm_name="DUAL"
                 _model_id = None
                 _is_dual_shm = False
                 if len(task_data) >= 13 and task_data[5] == "DUAL":
@@ -120,7 +124,7 @@ class GlobalInferenceWorker(mp.Process):
                      conf_floor, jpeg_data, use_gpu) = task_data
                     _is_shm = False
 
-                # Load the model on first use.
+                # 2. Model cache management (load on demand, key includes use_gpu)
                 _cache_key = f"{model_path}|gpu={use_gpu}"
                 if _cache_key not in model_cache:
                     logger.info(
@@ -135,7 +139,7 @@ class GlobalInferenceWorker(mp.Process):
 
                 detector = model_cache[_cache_key]
 
-                # Shared memory must be copied out before the block is released.
+                # 3. Image decoding: shared memory or JPEG
                 try:
                     if _is_dual_shm:
                         import multiprocessing.shared_memory as _shm
@@ -171,20 +175,23 @@ class GlobalInferenceWorker(mp.Process):
                     logger.warning(f"[InferenceWorker] Decoded image is None for task {task_id}")
                     continue
 
+                # 4. Run inference
                 detections = detector.detect(
                     input_data,
                     conf=conf_floor,
                     label_mapping=label_mapping
                 )
 
+                # 5. Push back to the main process (with GPU provider diagnostics)
                 _backend = detector.backend if hasattr(detector, 'backend') else '?'
                 _ap = getattr(detector, 'session', None)
                 _ps = _ap.get_providers()[0] if _ap and hasattr(_ap, 'get_providers') else '?'
                 _result = (task_id, timestamp, detections, 0, None, f"{_backend}|{_ps}")
                 if _model_id is not None:
                     _result = _result + (_model_id,)
+                # Diagnostic log: with multiple models, log the model_id and detection count
                 if _model_id is not None:
-                    logger.info(
+                    logger.debug(
                         f"[InferenceWorker-{self.pid}] model_id={_model_id[:8]} "
                         f"detections={len(detections)} ts={timestamp:.3f}"
                     )

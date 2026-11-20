@@ -1,0 +1,23 @@
+[package]
+name = "fg-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "FireGuard 应用编排：事件总线、任务引擎与共享状态"
+
+[dependencies]
+fg-domain = { path = "../fg-domain" }
+fg-contracts = { path = "../fg-contracts" }
+fg-store = { path = "../fg-store" }
+fg-infer = { path = "../fg-infer" }
+fg-media = { path = "../fg-media" }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp"] }
+parking_lot = "0.12"
+rayon = "1.10"
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }

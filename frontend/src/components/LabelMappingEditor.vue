@@ -27,7 +27,7 @@
       <div class="actions">
         <a-button type="dashed" size="small" @click="addRow">
           <template #icon><PlusOutlined /></template>
-          Add Label
+          添加标签
         </a-button>
       </div>
     </div>
@@ -53,11 +53,11 @@ const mappingList = ref<MappingItem[]>([])
 
 const columns = [
   { title: 'ID', key: 'id', width: 100 },
-  { title: 'Label Name', key: 'name' },
-  { title: 'Actions', key: 'action', width: 80 }
+  { title: '标签名称', key: 'name' },
+  { title: '操作', key: 'action', width: 80 }
 ]
 
-// Build an object from the list, skipping empty rows
+// Helper to convert internal list back to object for comparison (skipping empty rows)
 const getMappingObject = () => {
   const obj: Record<string, string> = {}
   mappingList.value.forEach(item => {
@@ -69,11 +69,12 @@ const getMappingObject = () => {
   return obj
 }
 
-// Sync only when the prop changes externally
+// Sync internal state with prop ONLY if externally changed
 watch(() => props.modelValue, (newVal) => {
   const currentObj = getMappingObject()
   const incomingObj = newVal || {}
   
+  // Only overwrite if the prop represents a REAL change from another source
   if (JSON.stringify(currentObj) !== JSON.stringify(incomingObj)) {
     mappingList.value = Object.entries(incomingObj).map(([k, v]) => ({
       id: parseInt(k),
@@ -82,6 +83,7 @@ watch(() => props.modelValue, (newVal) => {
   }
 }, { immediate: true, deep: true })
 
+// Sync back to parent
 watch(mappingList, () => {
   const obj = getMappingObject()
   if (Object.keys(obj).length > 0 || mappingList.value.length === 0) {

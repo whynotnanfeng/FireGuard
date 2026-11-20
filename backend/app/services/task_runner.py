@@ -1,4 +1,9 @@
-"""Image/video task queue and video stream lifecycle management."""
+"""
+Task Runner:
+  - TaskRunner: asyncio queue for image/video tasks (single-concurrent)
+  - StreamManager: stream lifecycle management, inference process pool,
+    elastic scaling, result dispatching, and multi-model worker orchestration
+"""
 from __future__ import annotations
 
 import asyncio
@@ -32,6 +37,8 @@ from sqlmodel import Session, select
 logger = logging.getLogger(__name__)
 
 
+# ── Stream Manager ────────────────────────────────────────────────────────────
+
 class StreamManager:
     """Manages active VideoStream instances and their lifecycles."""
 
@@ -39,9 +46,11 @@ class StreamManager:
         self._streams: Dict[str, "VideoStream"] = {}
         self._paused: Set[str] = set()
         self._monitor_task: Optional[asyncio.Task] = None
+        # High-integrity identity tracking
         self._stream_tokens: Dict[str, object] = {} 
         
-        # Lazy init: re-import on Windows would otherwise spawn extra Managers.
+        # [Core optimization]: lazily initialize MP resources to prevent a Manager explosion
+        # caused by re-import on Windows
         self._manager = None
         self.active_tasks_map = None
         self.global_inference_in_q = None
@@ -53,7 +62,8 @@ class StreamManager:
         self._dispatcher_dead = False
         self._lock = threading.Lock()
 
-        # model_cache_key -> {in_q, out_q, worker, model_ids}
+        # ── Per-model worker pool (parallel inference for multiple models) ──
+        # model_cache_key → { 'in_q': mp.Queue, 'out_q': mp.Queue, 'worker': Process, 'model_ids': set }
         self._model_workers: Dict[str, dict] = {}
 
     def start_inference_pool(self, worker_count: int = 1):
@@ -62,8 +72,13 @@ class StreamManager:
         import sys
         import os
 
-        # Windows spawn uses the system Python by default; force the venv interpreter.
-        if os.name == 'nt' and hasattr(mp, 'set_executable'):
+        # In Windows spawn mode, child processes default to the system Python instead of the virtualenv
+        # set_executable must force child processes to use the current virtualenv Python
+        if (
+            os.name == 'nt'
+            and hasattr(mp, 'set_executable')
+            and not getattr(sys, 'frozen', False)
+        ):
             venv_python = os.path.join(sys.prefix, 'Scripts', 'python.exe')
             if os.path.exists(venv_python) and sys.executable != venv_python:
                 try:
@@ -72,7 +87,7 @@ class StreamManager:
                 except Exception as e:
                     logger.warning(f"[StreamManager] Failed to set MP executable: {e}")
 
-        # Initialize MP resources once, in the main process, from lifespan.
+        # 0. [Core fix]: initialize MP resources exactly once, explicitly, in the main process via lifespan
         if self._manager is None:
             logger.info("[StreamManager] Initializing Multiprocessing Resources...")
             self._manager = mp.Manager()
@@ -80,6 +95,7 @@ class StreamManager:
             self.global_inference_in_q = mp.Queue(maxsize=500)
             self.global_inference_out_q = mp.Queue(maxsize=500)
 
+        # 1. Start the result dispatcher thread (with automatic restart support)
         if self._dispatcher_thread is None or not self._dispatcher_thread.is_alive():
             if self._dispatcher_thread is not None and not self._dispatcher_thread.is_alive():
                 logger.warning("[StreamManager] Dispatcher thread died! Restarting...")
@@ -88,7 +104,7 @@ class StreamManager:
             self._dispatcher_dead = False
             logger.info("Started Results Dispatcher Thread.")
 
-        # Shared queues serve single-model streams.
+        # 2. Top up shared-queue workers (single-model stream compatibility)
         current_count = len(self.workers)
         if current_count < worker_count:
             for i in range(current_count, worker_count):
@@ -99,18 +115,23 @@ class StreamManager:
 
         logger.info(f"Inference Pool adjusted to {len(self.workers)} shared workers.")
 
+        # 3. Ensure the load monitor thread is running (started only once)
         if self._scaling_thread is None:
             self._scaling_thread = threading.Thread(target=self._background_scaling_loop, daemon=True)
             self._scaling_thread.start()
             logger.info("Started Elastic Scaling Background Monitor.")
 
-    def ensure_model_workers(self, model_configs: list):
-        """Start one inference worker per model so models run in parallel."""
+    def ensure_model_workers(self, model_configs: list, use_gpu: bool = False):
+        """Ensure each model in a multi-model configuration has its own inference worker process (parallel inference, eliminating the serial bottleneck)"""
         from app.services.inference_worker import GlobalInferenceWorker
         import sys
         import os
 
-        if os.name == 'nt' and hasattr(mp, 'set_executable'):
+        if (
+            os.name == 'nt'
+            and hasattr(mp, 'set_executable')
+            and not getattr(sys, 'frozen', False)
+        ):
             venv_python = os.path.join(sys.prefix, 'Scripts', 'python.exe')
             if os.path.exists(venv_python) and sys.executable != venv_python:
                 try:
@@ -120,8 +141,7 @@ class StreamManager:
 
         for mc in model_configs:
             model_path = mc["model_path"]
-            use_gpu = self._infer_use_gpu_from_configs(model_configs)
-            cache_key = f"{model_path}|gpu={use_gpu}"
+            cache_key = f"{model_path}|gpu={bool(use_gpu)}"
 
             if cache_key not in self._model_workers:
                 in_q = mp.Queue(maxsize=200)
@@ -138,7 +158,8 @@ class StreamManager:
                     f"[StreamManager] Per-model Worker started: {cache_key[:60]} (PID={w.pid})"
                 )
             else:
-                # Drain stale results so old task output cannot leak into a new task.
+                # Drain stale results from a reused worker to keep empty results from an old
+                # task from polluting a new task
                 entry = self._model_workers[cache_key]
                 _drained = 0
                 try:
@@ -161,26 +182,21 @@ class StreamManager:
         )
 
     def get_model_queue(self, model_path: str, use_gpu: bool) -> Optional[mp.Queue]:
-        """Return the input queue for a model path.
+        """Get the inference input queue corresponding to a model path.
 
-        cache_key must match ensure_model_workers().
+        The cache key must match ensure_model_workers(); both derive it from the
+        same task-level ``use_gpu`` flag, never from a hard-coded value.
         """
-        inferred_gpu = self._infer_use_gpu_from_configs([])
-        cache_key = f"{model_path}|gpu={inferred_gpu}"
+        cache_key = f"{model_path}|gpu={bool(use_gpu)}"
         entry = self._model_workers.get(cache_key)
         return entry['in_q'] if entry else None
 
     def get_model_output_queues(self) -> list:
-        """Output queues of all per-model workers."""
+        """Get the list of output queues of all per-model workers"""
         return [entry['out_q'] for entry in self._model_workers.values()]
 
-    @staticmethod
-    def _infer_use_gpu_from_configs(model_configs: list) -> bool:
-        """All multi-model streams currently run on GPU."""
-        return True
-
     def _background_scaling_loop(self):
-        """Monitor load every 3 s and scale workers, with a 10 s cooldown."""
+        """Background load monitoring loop: checks CPU pressure every 15 seconds and dynamically scales up/down (with a cooldown period to prevent oscillation)"""
         logger.info("[ElasticScaling] Background monitor loop started.")
         last_adjust_time = 0.0
         cooldown_seconds = 10.0
@@ -188,12 +204,13 @@ class StreamManager:
         while not self._stop_event.is_set():
             try:
                 now = time.time()
-                # Cooldown keeps scaling from amplifying CPU jitter.
+                # Skip adjustments during the cooldown period to prevent frequent scaling from worsening CPU jitter
                 if now - last_adjust_time >= cooldown_seconds:
                     if self._streams:
                         self._adjust_worker_count()
                         last_adjust_time = now
                 
+                # Dispatcher thread health check and automatic restart
                 if self._dispatcher_dead or (self._dispatcher_thread is not None and not self._dispatcher_thread.is_alive()):
                     logger.warning("[ElasticScaling] Dispatcher thread is dead, restarting...")
                     self._dispatcher_thread = threading.Thread(target=self._result_dispatcher_loop, daemon=True)
@@ -202,12 +219,13 @@ class StreamManager:
             except Exception as e:
                 logger.error(f"[ElasticScaling] Monitor loop error: {e}")
             
+            # Patrol once every 3 seconds
             for _ in range(3):
                 if self._stop_event.is_set(): break
                 time.sleep(1.0)
 
     def _adjust_worker_count(self):
-        """Adjust the shared worker pool from current load."""
+        """Dynamically adjust the inference process pool size based on real-time system load (elastic scaling strategy)"""
         from app.services.inference_worker import GlobalInferenceWorker
         import psutil
 
@@ -215,7 +233,7 @@ class StreamManager:
 
         cpu_usage = psutil.cpu_percent(interval=None)
 
-        # Remove dead workers first; stale counts would block scale-up.
+        # [P0 fix]: clean up dead workers first, preventing an inflated count from blocking scale-up forever
         alive_workers = []
         for w in self.workers:
             if w.is_alive():
@@ -225,42 +243,48 @@ class StreamManager:
         dead_count = len(self.workers) - len(alive_workers)
         self.workers = alive_workers
 
+        # Clean up dead per-model workers
         dead_model_keys = [k for k, v in self._model_workers.items() if not v['worker'].is_alive()]
         for k in dead_model_keys:
             logger.warning(f"[ElasticScaling] Dead per-model worker detected: {k[:60]}, removing...")
             del self._model_workers[k]
 
-        # Keep one seed process so new tasks start instantly.
+        # Keep one "seed process" even with no active streams, so new tasks start instantly
         if active_count == 0:
             target_workers = 1
             strategy = "IDLE_SEED"
         else:
+            # --- Elastic Scaling Algorithm ---
             target_workers = 1
             target_per_task = 1
             strategy = "DEFAULT"
+            # Multi-model streams use per-model workers and need no extra shared workers
             per_model_count = len(self._model_workers)
             if per_model_count > 0:
-                # Per-model workers do the inference; shared workers stay as a seed.
+                # Multi-model mode: per-model workers already handle inference, shared workers are kept only as a seed
                 target_per_task = 1
                 target_workers = 1
                 strategy = "PER_MODEL (dedicated workers active)"
             elif cpu_usage > config.CPU_THRESHOLD_SURVIVAL:
-                # Survival: one worker per stream.
+                # Red watermark: extremely high load. Revert to 1:1 allocation per stream; survival first
                 target_per_task = 1
                 strategy = "SURVIVAL (1:1)"
             elif cpu_usage > config.CPU_THRESHOLD_BALANCED:
-                # High load: halve per-stream workers.
+                # Yellow watermark: high load. Compress parallelism to free resources for OS scheduling
                 target_per_task = max(1, config.WORKERS_PER_TASK_LIMIT // 2)
                 strategy = "BALANCED (M/2)"
             else:
-                # Healthy load: full per-stream parallelism.
+                # Green watermark: healthy load. Full firepower to speed up single-stream inference
                 target_per_task = config.WORKERS_PER_TASK_LIMIT
                 strategy = "PERFORMANCE (MAX)"
 
             if per_model_count == 0:
+                # Compute the final target: bounded by the total system core limit
                 target_workers = min(active_count * target_per_task, config.MAX_TOTAL_WORKERS)
+                # At least one process must serve
                 target_workers = max(1, target_workers)
 
+            # Refinement: downgrade INFO to DEBUG, only emitting INFO when the strategy changes
             if not hasattr(self, '_last_strategy'): self._last_strategy = ""
             if strategy != self._last_strategy:
                 logger.info(f"[ElasticScaling] Strategy changed: {self._last_strategy} -> {strategy} (CPU: {cpu_usage}%)")
@@ -270,13 +294,15 @@ class StreamManager:
 
         current_workers = len(self.workers)
 
+        # Case 1: scale-up needed (including respawning dead workers)
         if target_workers > current_workers or dead_count > 0:
-            # Do not scale up under high CPU: loading a model can starve decoding and break H.264.
+            # Stability hardening: forbid scale-up when CPU is already high, since a new process loading a
+            # model can momentarily starve decode resources and cause H.264 errors
             respawn_needed = dead_count > 0
             if cpu_usage > 75 and not respawn_needed:
                 logger.info(f"[ElasticScaling] Scale-UP suppressed due to High CPU ({cpu_usage}%). Keeping {current_workers} workers.")
             else:
-                # Respawn dead workers regardless of CPU so inference stays up.
+                # Replace dead workers first (not subject to the CPU threshold, ensuring the inference pipeline stays up)
                 if respawn_needed:
                     logger.info(f"[ElasticScaling] Respawning {dead_count} dead worker(s) to maintain inference pipeline...")
                     for i in range(dead_count):
@@ -285,23 +311,33 @@ class StreamManager:
                         self.workers.append(w)
                         logger.info(f"[ElasticScaling] Dead worker respawned (PID={w.pid})")
 
+                # Then scale up as needed
                 if target_workers > len(self.workers):
                     self.start_inference_pool(target_workers)
 
+        # Case 2: scale-down needed (only released proactively when task count drops or load is too high)
         elif target_workers < current_workers:
-            # Windows jitters on bulk kills; retire one process per cycle.
+            # For Windows stability we scale down gently: kill only one surplus process at a time to avoid severe system jitter
             logger.info(f"[ElasticScaling] Scaling DOWN: Current {current_workers} -> Target {target_workers}")
             try:
                 w = self.workers.pop()
                 w.stop()
+                # Hardening: add a timeout
                 self.global_inference_in_q.put(None, timeout=1.0) # poison pill
             except Exception:
                 pass
+            # Note: the actual physical process is reclaimed after Join
+
+        # Scale-down logic rolled back
+        # For the absolute stability of Windows systems, we no longer automatically kill surplus processes.
+        # Keeping 1-2 idle processes places almost no load on the system and greatly speeds up task startup.
 
     def stop_inference_pool(self):
         """Safely shut down the process pool"""
+        # 1. Send the stop signal
         self._stop_event.set()
 
+        # 2. Stop per-model workers
         for cache_key, entry in self._model_workers.items():
             w = entry['worker']
             w.stop()
@@ -314,6 +350,7 @@ class StreamManager:
                 w.terminate()
         self._model_workers.clear()
 
+        # 3. Stop all shared worker processes
         for w in self.workers:
             w.stop()
             try:
@@ -326,14 +363,16 @@ class StreamManager:
             if w.is_alive():
                 w.terminate()
 
+        # 4. Stop the dispatcher thread
         if self._dispatcher_thread:
             try:
-                # Bounded put; a full queue would otherwise hang exit.
+                # Hardening: add a timeout to prevent exit from hanging due to a full queue
                 self.global_inference_out_q.put(None, timeout=1.0)
             except Exception:
                 pass
             self._dispatcher_thread.join(timeout=2.0)
 
+        # 5. Stop the elastic scaling thread
         if self._scaling_thread:
             self._scaling_thread.join(timeout=2.0)
 
@@ -346,7 +385,7 @@ class StreamManager:
             logger.info("[StreamManager] Monitor task cancelled.")
 
     def stop_all_streams(self, timeout: float = 5.0):
-        """Stop all streams and wait for drain so MediaMTX deregistration completes."""
+        """Stop all active streams and wait for drain to complete. Call before shutdown to ensure MediaMTX deregistration is clean."""
         import time
         with self._lock:
             task_ids = list(self._streams.keys())
@@ -358,6 +397,7 @@ class StreamManager:
                 self.stop_stream(task_id)
             except Exception as e:
                 logger.warning(f"[StreamManager] Error stopping stream {task_id}: {e}")
+        # Wait for all streams to finish draining
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self._lock:
@@ -375,20 +415,22 @@ class StreamManager:
             logger.info("[StreamManager] All streams stopped cleanly.")
 
     def _result_dispatcher_loop(self):
-        """Route inference results to streams, batching and reordering by timestamp."""
+        """Core router: pulls results from the global queues, supporting [batch aggregation] and [temporal reordering]"""
         from collections import defaultdict
         from app.services.video_stream import db_executor  # used to offload process_detections
 
         logger.info("[Dispatcher] Result dispatcher thread started. Batching enabled.")
 
-        # task_id -> [(timestamp, payload)]
+        # Per-task result buffer { task_id: [ (timestamp, payload), ... ] }
         batch_buffers = defaultdict(list)
+        # Last send time { task_id: last_send_time }
         last_send_times = defaultdict(float)
         
         batch_window = config.DETECTION_BATCH_WINDOW_MS / 1000.0
         _dispatcher_heartbeat_ts = time.time()
         _dispatcher_result_count = 0
         
+        # P0 fix: inference pipeline backpressure monitoring
         _dispatcher_last_result_ts = 0.0
         _dispatcher_max_gap = 0.0
         _dispatcher_result_timestamps = []
@@ -398,9 +440,10 @@ class StreamManager:
         
         while not self._stop_event.is_set():
             try:
+                # Pull results from per-model workers and the shared queue
                 result = None
                 _result_source = "none"
-                # Per-model queues first, then the shared queue.
+                # 1. Check per-model output queues first (parallel inference for multiple models)
                 for _mq in self.get_model_output_queues():
                     try:
                         result = _mq.get_nowait()
@@ -408,6 +451,7 @@ class StreamManager:
                         break
                     except queue.Empty:
                         continue
+                # 2. Fall back to the shared queue (single-model stream compatibility)
                 if result is None:
                     try:
                         result = self.global_inference_out_q.get(timeout=0.1)
@@ -422,11 +466,13 @@ class StreamManager:
                         active_tasks = [t_id for t_id in self._streams if self.is_active(t_id, self._streams[t_id].token if t_id in self._streams else None)]
                         queue_size = self.global_inference_out_q.qsize()
                         in_queue_size = self.global_inference_in_q.qsize() if hasattr(self, 'global_inference_in_q') else 0
+                        # per-model queue sizes
                         _model_q_sizes = {
                             k[:8]: (v['in_q'].qsize(), v['out_q'].qsize())
                             for k, v in self._model_workers.items()
                         }
                         
+                        # P0 fix: backpressure monitoring log
                         if queue_size > BACKPRESSURE_THRESHOLD:
                             if not _backpressure_warned or (now - _last_backpressure_log) > 60:
                                 logger.warning(
@@ -468,12 +514,14 @@ class StreamManager:
                         break
                     continue 
 
-                # Results are 3- to 7-tuples; trailing fields are optional.
+                # Add strict validation to prevent NoneType crashes
+                # Improved to support the 3/4/5-tuple formats
+                # The 5-tuple carries jpeg_data, ensuring frames and detection results correspond strictly
                 if not isinstance(result, (list, tuple)) or len(result) < 3:
                     logger.warning(f"[Dispatcher] Malformed inference result: {result}")
                     continue
 
-                # result[5] is provider diagnostics, result[6] is model_id.
+                # Parse the result: compatible with several formats (result[5] = provider diagnostics, result[6] = model_id)
                 task_id, timestamp, raw_detections = result[0], result[1], result[2]
                 inference_time_ms = result[3] if len(result) >= 4 else 0
                 returned_jpeg_data = result[4] if len(result) >= 5 else None
@@ -488,10 +536,12 @@ class StreamManager:
                     raw_detections = []
                 _dispatcher_result_count += 1
                 
+                # Diagnostic log monitoring the interval between results
                 if _dispatcher_last_result_ts > 0:
                     gap = timestamp - _dispatcher_last_result_ts
                     if gap > _dispatcher_max_gap:
                         _dispatcher_max_gap = gap
+                    # Emit a warning if the diagnostic log interval exceeds 5 seconds
                     if gap > 5.0:
                         logger.warning(
                             f"[DIAG-DISP] Large gap detected: {gap:.2f}s since last result for task {task_id}, "
@@ -505,9 +555,11 @@ class StreamManager:
                     logger.warning(f"[DIAG-DISP] No stream found for task {task_id}, discarding result")
                     continue
 
+                # 1. Apply the filter configuration
                 detections = [Detection(**d) if isinstance(d, dict) else d for d in raw_detections]
                 filtered = stream._apply_detection_config(detections, stream.detection_config)
 
+                # Diagnostic log: with multiple models, record each result's max_conf and filtering outcome
                 if _result_model_id and _dispatcher_result_count % 5 == 0:
                     _max_conf = max((d.confidence for d in detections), default=0.0)
                     _max_conf_f = max((d.confidence for d in filtered), default=0.0)
@@ -526,13 +578,22 @@ class StreamManager:
                         f"ts={timestamp:.3f}"
                     )
 
-                # timestamp is relative to session start; convert to absolute Unix ms for the frontend.
+                # 2. Build the payload
+                # [P0 fix - unified timestamp base]:
+                # timestamp is relative time (seconds since the session started, e.g. 210.5s)
+                # It must be converted to an absolute Unix timestamp so the frontend can match correctly
+                # Read the session start timestamp
                 stream_start_time = stream._session_start_time if hasattr(stream, '_session_start_time') else time.time()
                 ntp_offset_ms = clock_monitor.avg_offset_ms or 0.0
                 current_abs_time = int((stream_start_time + timestamp) * 1000 - ntp_offset_ms)
+                # Position inside the recording session, used to match frames
+                media_pts_ms = int(timestamp * 1000)
                 
-                # Box drawing and HLS writing run in _annotated_frame_writer at source fps.
-                # Multi-model results go to per-model buffers only, avoiding a dual-write race.
+                # Inference result path — only tracking + event processing + updating the latest detection results.
+                # Detection box drawing and HLS writing are handled independently by the
+                # _annotated_frame_writer thread (source frame rate 15fps, decoupled from the inference rate).
+                # Multi-model: route to each model's own buffer by model_id (do not write the global
+                # buffer, to avoid a dual-write race)
                 if _result_model_id and hasattr(stream, '_latest_results_by_model'):
                     with stream._results_by_model_lock:
                         stream._latest_results_by_model[_result_model_id] = filtered
@@ -545,15 +606,17 @@ class StreamManager:
                             f"detections={len(filtered)} raw={len(raw_detections)} ts={timestamp:.3f}"
                         )
                 else:
+                    # Single model: update the global buffer
                     with stream._lock:
                         stream._latest_results = filtered
                         stream._latest_results_timestamp = timestamp
                         stream._latest_results_wall_time = time.time()
 
                 if stream.pipeline and stream._pipeline_initialized:
-                    # Offload to the thread pool; running this here blocked grabber/writer threads.
+                    # Offload to the thread pool so process_detections does not hold the GIL,
+                    # which would block the grabber/writer threads (log diagnosis: frame gaps reached 263ms at 94% CPU)
                     try:
-                        logger.info(
+                        logger.debug(
                             f"[Dispatcher] Submitting process_detections: task_id={task_id}, "
                             f"detections={len(filtered)}, abs_time={current_abs_time}"
                         )
@@ -563,7 +626,8 @@ class StreamManager:
                     except Exception as e:
                         logger.error(f"Pipeline process_detections failed: {e}", exc_info=True)
                 
-                # PTS to wall-clock map records the exact capture time.
+                # 3. Build the WebSocket payload
+                # Read the exact frame capture moment from the PTS→wall-clock map recorded by the consumer
                 _frame_wall_clock = stream._frame_wall_clock_map.get(
                     timestamp, stream_start_time + timestamp
                 )
@@ -572,7 +636,8 @@ class StreamManager:
                     "timestamp": current_abs_time,
                     "timestamp_ms": current_abs_time,
                     "wall_clock": _frame_wall_clock,
-                    "frame_pts": timestamp,
+                    "frame_pts": timestamp,  # For frontend diagnostics
+                    "media_pts_ms": media_pts_ms,
                     "boxes": [
                         {
                             "x": float(d.box[0]), "y": float(d.box[1]),
@@ -584,45 +649,57 @@ class StreamManager:
                     "inference_time_ms": inference_time_ms,
                 }
                 
+                # 3. Append to the buffer
                 batch_buffers[task_id].append((timestamp, payload))
                 
+                # 4. Emit when the buffer is full or the window has elapsed
                 now = time.time()
                 is_first_frame = last_send_times[task_id] == 0.0
                 if is_first_frame or len(batch_buffers[task_id]) >= 10 or (now - last_send_times[task_id]) >= batch_window:
                     self._flush_batch(task_id, batch_buffers, last_send_times)
                     
+                # 5. Database persistence
                 if filtered:
-                    logger.info(
+                    logger.debug(
                         f"[Dispatcher] Saving {len(filtered)} detections for task {task_id}, "
                         f"timestamp_ms={current_abs_time}"
                     )
-                    db_executor.submit(stream._save_detection_records_sync, filtered, current_abs_time)
+                    db_executor.submit(
+                        stream._save_detection_records_sync,
+                        filtered,
+                        current_abs_time,
+                        media_pts_ms,
+                    )
                     stream._last_results_time = timestamp
 
             except Exception as e:
                 err_str = str(e)
-                # Windows reports "invalid handle" in localized text; the escaped form keeps this ASCII.
+                # The localized Windows "invalid handle" message is escaped so this match keeps
+                # working on Chinese locales while the source file stays ASCII
                 if "handle is closed" in err_str or "Event loop is closed" in err_str or "\u53e5\u67c4\u65e0\u6548" in err_str or "invalid handle" in err_str.lower():
                     logger.warning(f"[Dispatcher] Transient event loop error ({err_str}). Continuing...")
                     time.sleep(0.5)
                     continue
                 
+                # Mark the process dead to trigger an automatic restart
                 logger.error(f"Dispatcher loop error: {e}", exc_info=True)
                 self._dispatcher_dead = True
                 time.sleep(1.0)
 
     def _flush_batch(self, task_id, buffers, last_send_times):
-        """Sort buffered results by timestamp and publish them as one batch."""
+        """Sort the buffered results and report them in a batch"""
         if not buffers[task_id]:
             return
             
-        # Multi-core workers return frames out of order; sort before publishing.
+        # 1. Key fix: temporal reordering (fixes out-of-order frames caused by multi-core parallelism)
         batch = sorted(buffers[task_id], key=lambda x: x[0])
         payloads = [x[1] for x in batch]
         
+        # 2. Clear the buffer
         buffers[task_id] = []
         last_send_times[task_id] = time.time()
         
+        # 3. Publish
         channel_name = f"detections:{task_id}"
         try:
             broker.publish_sync(channel_name, {
@@ -651,9 +728,11 @@ class StreamManager:
         
         while True:
             await asyncio.sleep(5)
+            # logger.debug("Scanning active streams for errors...")
             try:
                 loop = asyncio.get_event_loop()
                 
+                # 1. Check existing streams for errors
                 for task_id in list(self._streams.keys()):
                     stream = self._streams.get(task_id)
                     if not stream or not stream._error_msg:
@@ -680,7 +759,7 @@ class StreamManager:
                         await notifier.broadcast_status(task_id, "exception", stream._error_msg)
                         self.stop_stream(task_id)
 
-                # Ghost task self-healing.
+                # 2. V14/V17/V19: Ghost Task Self-Healing
                 def sync_ghost_healing():
                     healed = []
                     with Session(engine) as session:
@@ -711,7 +790,7 @@ class StreamManager:
                     logger.warning(f"Self-Healing: Fixed ghost task {t_id}")
                     await notifier.broadcast_status(t_id, "exception", t_err)
 
-                # Initialization timeout (120 s).
+                # 3. Initializing timeout detection (2 minutes)
                 def sync_check_initializing_timeout():
                     timed_out = []
                     with Session(engine) as session:
@@ -753,12 +832,18 @@ class StreamManager:
         model_configs: Optional[List[dict]] = None,
         fusion_config: Optional[dict] = None,
     ) -> "VideoStream":
-        """Create and start a stream instance; stop any existing stream for this task first."""
+        """V12: cold start - always create a new stream instance (the caller is responsible for stopping the old stream first)
+
+        Args:
+            model_configs: Multi-model configuration list; each element contains model_path, label_mapping, model_id, weight, etc.
+            fusion_config: Fusion engine configuration (e.g. wbf_iou_threshold)
+        """
         from app.services.video_stream import VideoStream
 
-        # Give the OS time to close sockets from the previous stream.
+        # Add a short delay to ensure old thread sockets are fully closed by OS
         time.sleep(0.1)
 
+        # Pre-load detection config from DB
         detection_config = None
         from app.models.task import Task
         from sqlmodel import Session
@@ -768,13 +853,14 @@ class StreamManager:
             if task and task.detection_config:
                 try:
                     detection_config = json.loads(task.detection_config)
-                    # Normalize legacy 0-100 thresholds to 0-1.
+                    # [P1-A architecture alignment]: unified 0-1 scale migration logic
                     if detection_config:
                         gt = detection_config.get("global_threshold", 0.25)
                         if gt > 1:
                             detection_config["global_threshold"] = gt / 100.0
                             logger.info(f"[Migration] Normalized global_threshold for {task_id}: {gt} -> {gt/100.0}")
 
+                        # Per-class threshold migration
                         for cat in detection_config.get("categories", []):
                             if cat.get("threshold") and cat["threshold"] > 1:
                                 old_t = cat["threshold"]
@@ -785,13 +871,15 @@ class StreamManager:
                 except Exception as e:
                     logger.warning(f"Failed to parse initial config for {task_id}: {e}")
 
+        # Create unique identity token for this run
         token_val = str(time.time()) # Use a timestamp string as the serializable token
         self._stream_tokens[task_id] = token_val
         self.active_tasks_map[task_id] = token_val
 
-        # Send a frame-less preload so the worker loads weights before frames arrive.
+        # Model preloading: send a preload instruction to the inference queue (jpeg_data=None) so the Worker loads the model ahead of time
         if model_configs:
-            self.ensure_model_workers(model_configs)
+            # Multi-model mode: ensure each model has its own worker and preload to the matching queue
+            self.ensure_model_workers(model_configs, use_gpu=use_gpu)
             for mc in model_configs:
                 try:
                     preload_msg = (task_id, 0.0, mc["model_path"], mc["label_mapping"], 0.25, None, use_gpu)
@@ -812,7 +900,7 @@ class StreamManager:
             except Exception as e:
                 logger.warning(f"[Preload] Failed to send preload for {task_id}: {e}")
 
-        # Create the stream after models are preloaded.
+        # Start the new video stream processing
         new_stream = VideoStream(
             task_id, source, model_path, token_val, mapping,
             use_gpu=use_gpu,
@@ -821,15 +909,17 @@ class StreamManager:
         )
         new_stream._main_loop = main_loop
         new_stream._is_resuming = is_resume
-        new_stream.detection_config = detection_config
+        new_stream.detection_config = detection_config # Inject config
 
-        # Register before starting grabbers so early failures are cleaned up.
+        # Register with the manager before starting the grabbers, so the monitor can detect
+        # failures and clean up
         with self._lock:
             self._streams[task_id] = new_stream
         self._paused.discard(task_id)
 
         new_stream.start_grabbers()
 
+        # Dynamically adjust the process pool
         self._adjust_worker_count()
 
         logger.info(f"Stream {task_id} cold-started successfully using Global Pool")
@@ -854,28 +944,33 @@ class StreamManager:
             stream = self._streams.get(task_id)
         if stream:
             stream.stop()
-            # Removal happens in VideoStream's deferred_stop once the drain completes.
+            # Note: self._streams[task_id] is no longer deleted here
+            # VideoStream's deferred_stop thread calls _remove_stream back after the drain completes
         
-        # Invalidate the token so lingering threads see the task as inactive.
+        # Invalidate the token to kill any lingering threads
         if task_id in self._stream_tokens:
             del self._stream_tokens[task_id]
         
-        # Remove from shared state so child processes drop backlogged frames.
+        # [Core fix]: remove from shared state so inference child processes immediately
+        # notice and drop their backlogged frames
         if task_id in self.active_tasks_map:
             del self.active_tasks_map[task_id]
             
-        # Drain queued frames so the worker does not spin after stop.
+        # [New] Instantly drain this task's remaining frames from the global input queue,
+        # preventing it from spinning wildly after Stop
         try:
             temp_list = []
             while not self.global_inference_in_q.empty():
                 item = self.global_inference_in_q.get_nowait()
                 if item and item[0] != task_id:
                     temp_list.append(item)
+            # Put back the frames that do not belong to this task
             for item in temp_list:
                 self.global_inference_in_q.put_nowait(item)
         except Exception:
             pass
 
+        # Drain this task's backlogged frames from the per-model queues
         for entry in self._model_workers.values():
             try:
                 temp_list = []
@@ -890,14 +985,17 @@ class StreamManager:
             
         self._paused.discard(task_id)
 
+        # Clean up per-model workers that are no longer needed
         self._cleanup_idle_model_workers()
 
+        # Dynamically adjust the process pool
         self._adjust_worker_count()
 
         logger.info(f"Stream {task_id} logically detached (awaiting physical drain)")
 
     def _cleanup_idle_model_workers(self):
         """Clean up per-model workers no longer used by any active stream"""
+        # Collect the model_path|gpu keys still in use by all active streams
         active_model_keys = set()
         with self._lock:
             for stream in self._streams.values():
@@ -906,6 +1004,7 @@ class StreamManager:
                         cache_key = f"{mc['model_path']}|gpu={stream.use_gpu}"
                         active_model_keys.add(cache_key)
 
+        # Find the workers that are no longer needed
         idle_keys = [k for k in self._model_workers if k not in active_model_keys]
         for k in idle_keys:
             entry = self._model_workers.pop(k)
@@ -918,7 +1017,7 @@ class StreamManager:
             logger.info(f"[StreamManager] Cleaned up idle per-model worker: {k[:60]}")
 
     def _remove_stream(self, task_id: str, stream: object):
-        """Release the stream entry after VideoStream finishes draining."""
+        """Called back by VideoStream after its internal drain completes, to fully release resources"""
         with self._lock:
             if self._streams.get(task_id) is stream:
                 del self._streams[task_id]
@@ -936,6 +1035,8 @@ class StreamManager:
     def is_paused(self, task_id: str) -> bool:
         return task_id in self._paused
 
+
+# ── Task Runner ───────────────────────────────────────────────────────────────
 
 class TaskRunner:
     """Single-concurrent asyncio queue for image and video tasks."""
@@ -971,6 +1072,8 @@ class TaskRunner:
         self._cancelled_tasks.add(task_id)
         logger.info(f"Task {task_id} marked for cancellation")
 
+    # ── Execution dispatcher ─────────────────────────────────────────────────
+
     async def _execute(self, task_id: str) -> None:
         from sqlmodel import Session, select
         from app.database import engine
@@ -984,16 +1087,19 @@ class TaskRunner:
                 logger.error(f"Task {task_id} not found")
                 return
 
+            # Update status to running
             task.status = "running"
             task.updated_at = now_beijing()
             session.add(task)
             session.commit()
             session.refresh(task)
 
+            # Check if cancelled before starting
             if task_id in self._cancelled_tasks:
                 logger.info(f"Task {task_id} was cancelled before execution started")
                 return
 
+            # Multi-model support: load from the task_models table first, falling back to a single model_id
             task_models = list(session.exec(
                 select(TaskModel).where(TaskModel.task_id == task.id)
             ).all())
@@ -1091,6 +1197,8 @@ class TaskRunner:
         finally:
             self._cancelled_tasks.discard(task_id)
 
+    # ── Image processing ─────────────────────────────────────────────────────
+
     async def _process_image(
         self, task_id: str, source_path: str, user_id: str, model_path: str,
         label_mapping: Optional[dict] = None, detection_config: Optional[dict] = None,
@@ -1110,6 +1218,7 @@ class TaskRunner:
         is_multi_model = model_configs is not None and len(model_configs) > 1
 
         def _run() -> tuple:
+            # Load models: in multi-model mode load per model_configs; in single-model mode load just one
             detectors: dict[str, tuple] = {}  # model_id -> (detector, config)
             if is_multi_model:
                 for mc in model_configs:
@@ -1171,6 +1280,7 @@ class TaskRunner:
                 if img_rgb is None:
                     continue
 
+                # Load the IR image (if present)
                 img_ir = None
                 if has_ir_dir:
                     ir_path = ir_dir / img_path.name
@@ -1178,6 +1288,7 @@ class TaskRunner:
                         img_ir = cv2.imread(str(ir_path))
 
                 if is_multi_model:
+                    # ── Multi-model dispatch + fusion ──
                     model_results: list[ModelDetection] = []
                     for mid, (det, mc) in detectors.items():
                         input_data = img_rgb
@@ -1199,12 +1310,14 @@ class TaskRunner:
 
                     final_dets = fusion_engine.fuse(model_results, rgb_frame=img_rgb)
                 else:
+                    # ── Single model (backward compatible) ──
                     det, mc = detectors["__single__"]
                     is_multimodal = mc["is_rgbir"] and img_ir is not None
                     input_data = [img_rgb, img_ir] if is_multimodal else img_rgb
                     dets = det.detect(input_data, label_mapping=mc.get("label_mapping"))
                     final_dets = self._apply_detection_config(dets, detection_config)
 
+                # Save the RGB annotated image
                 annotated = Detector.draw_boxes(img_rgb, final_dets)
                 out_name = f"annotated_{img_path.name}"
                 out_path = result_dir / out_name
@@ -1213,6 +1326,7 @@ class TaskRunner:
                     first_result_path = str(out_path)
                 all_detections[out_name] = [d.to_dict() for d in final_dets]
 
+                # Save the IR annotated image (if IR input exists)
                 if img_ir is not None:
                     ir_annotated = Detector.draw_boxes(img_ir, final_dets)
                     ir_out_name = f"ir_annotated_{img_path.name}"
@@ -1220,6 +1334,7 @@ class TaskRunner:
 
                 last_process_time = time.time()
 
+                # Progress reporting (every 5 images)
                 if total_images > 0 and (idx + 1) % 5 == 0:
                     try:
                         with Session(engine) as db_sess:
@@ -1251,6 +1366,8 @@ class TaskRunner:
                 logger.info(f"Image task {task_id} completed. Detections: {len(detections)}")
                 await notifier.broadcast_status(task_id, "completed")
 
+    # ── Video processing ──────────────────────────────────────────────────────
+
     async def _process_video(
         self, task_id: str, source_path: str, user_id: str, model_path: str,
         label_mapping: Optional[dict] = None, detection_config: Optional[dict] = None,
@@ -1270,6 +1387,7 @@ class TaskRunner:
         is_multi_model = model_configs is not None and len(model_configs) > 1
 
         def _run() -> tuple:
+            # Load models
             detectors: dict[str, tuple] = {}
             if is_multi_model:
                 for mc in model_configs:
@@ -1293,6 +1411,7 @@ class TaskRunner:
             rgb_dir = Path(source_path) / "rgb"
             ir_dir = Path(source_path) / "ir"
 
+            # Find video file
             video_files = []
             if rgb_dir.exists():
                 video_files = sorted([
@@ -1333,11 +1452,12 @@ class TaskRunner:
                 out_name = f"annotated_{video_path_obj.stem}.webm"
                 out_path = result_dir / out_name
 
-                # VP80 keeps output compatible with standard WebM playback.
+                # VP80 for standard WebM compatibility
                 fourcc = cv2.VideoWriter_fourcc(*"VP80")
                 vid_detections = []
                 frame_idx = 0
 
+                # Dynamic FPS Calculation
                 fps_target = detection_config.get("fps", config.DETECTION_FPS_VIDEO)
                 if fps_target > 0:
                     frame_step = max(1, int(fps / fps_target))
@@ -1349,6 +1469,7 @@ class TaskRunner:
                 output_fps = max(1, fps // frame_step)
                 writer = cv2.VideoWriter(str(out_path), fourcc, output_fps, (w, h))
 
+                # IR annotated video writer (generated in multimodal mode)
                 ir_writer = None
                 if cap_ir is not None:
                     ir_out_name = f"ir_annotated_{video_path_obj.stem}.webm"
@@ -1374,8 +1495,10 @@ class TaskRunner:
                         if not ret_ir:
                             frame_ir = None
 
+                    # Only detect and WRITE every Nth frame
                     if frame_idx % frame_step == 0:
                         if is_multi_model:
+                            # ── Multi-model dispatch + fusion ──
                             model_results: list[ModelDetection] = []
                             for mid, (det, mc) in detectors.items():
                                 input_data = frame_rgb
@@ -1397,6 +1520,7 @@ class TaskRunner:
 
                             final_dets = fusion_engine.fuse(model_results, rgb_frame=frame_rgb)
                         else:
+                            # ── Single model (backward compatible) ──
                             det, mc = detectors["__single__"]
                             is_multimodal = mc["is_rgbir"] and frame_ir is not None
                             input_data = [frame_rgb, frame_ir] if is_multimodal else frame_rgb
@@ -1412,6 +1536,7 @@ class TaskRunner:
                             ir_annotated = Detector.draw_boxes(frame_ir, final_dets)
                             ir_writer.write(ir_annotated)
 
+                    # Progress reporting (every 100 frames)
                     if total_frames > 0 and frame_idx % 100 == 0:
                         try:
                             with Session(engine) as db_sess:
@@ -1454,6 +1579,8 @@ class TaskRunner:
                 logger.info(f"Video task {task_id} completed. Frames processed")
                 await notifier.broadcast_status(task_id, "completed")
 
+    # ── Error helper ─────────────────────────────────────────────────────────
+
     @staticmethod
     def _fail_task(session, task, error_msg: str) -> None:
         task.accumulate_running_seconds()
@@ -1471,15 +1598,18 @@ class TaskRunner:
         if not detection_config:
             return detections
         
-        # Thresholds may be stored as 0-100 or 0-1.
+        # 1. Resolve Global Threshold (Default to 0.25 if not set)
         global_threshold_val = detection_config.get("global_threshold", 25)
+        # Convert 0-100 to 0.0-1.0
         global_threshold = global_threshold_val / 100.0 if global_threshold_val > 1 else global_threshold_val
         
         categories = detection_config.get("categories", [])
         if not categories:
+            # If categories config is empty, only apply global threshold
             return [d for d in detections if (d.confidence if hasattr(d, 'confidence') else d.get("confidence", 0)) >= global_threshold]
 
-        # Models may report class names or numeric ids; config carries both.
+        # 2. Build lookups for both ID and Name to be robust
+        # Some models return "fire", some "0". Config usually has both.
         selected_by_id = {}
         selected_by_name = {}
         
@@ -1493,18 +1623,23 @@ class TaskRunner:
         filtered = []
         for det in detections:
             class_name = str(det.class_name if hasattr(det, 'class_name') else det.get("class", "")).lower()
-            class_id = str(getattr(det, 'class_id', ""))
+            # Try to find class_id if available (not all detectors provide it in Detection object yet)
+            class_id = str(getattr(det, 'class_id', "")) # placeholder if we add it later
             confidence = det.confidence if hasattr(det, 'confidence') else det.get("confidence", 0)
             
+            # Match by Name OR ID
             cat_config = None
             if class_name in selected_by_name:
                 cat_config = selected_by_name[class_name]
             elif class_id in selected_by_id:
                 cat_config = selected_by_id[class_id]
             
+            # If the class is not and wasn't intended to be in the "categories" list, 
+            # we consider it "not selected" if the list is non-empty.
             if cat_config is None:
                 continue
             
+            # 3. Resolve Effective Threshold
             cat_threshold = cat_config.get("threshold")
             if cat_threshold is not None:
                 effective_threshold = cat_threshold / 100.0 if cat_threshold > 1 else cat_threshold
@@ -1517,5 +1652,6 @@ class TaskRunner:
         return filtered
 
 
+# Global singletons
 task_runner = TaskRunner()
 stream_manager = StreamManager()

@@ -13,7 +13,7 @@ from app.models.user import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-# Password hashing
+# ── Password helpers ────────────────────────────────────────────────────────
 
 def hash_password(password: str) -> str:
     pwd_bytes = password.encode('utf-8')
@@ -27,7 +27,7 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain_bytes, hashed_bytes)
 
 
-# JWT
+# ── JWT helpers ─────────────────────────────────────────────────────────────
 
 def create_access_token(data: dict, expires_minutes: Optional[int] = None) -> str:
     to_encode = data.copy()
@@ -49,7 +49,7 @@ def decode_token(token: str) -> dict:
         )
 
 
-# Auth dependency
+# ── FastAPI dependency ───────────────────────────────────────────────────────
 
 def get_current_user(
     token: str = Depends(oauth2_scheme),
@@ -66,7 +66,7 @@ def get_current_user(
     return user
 
 
-# Storage usage
+# ── Storage helpers ──────────────────────────────────────────────────────────
 
 import os
 import time
@@ -74,14 +74,14 @@ from functools import lru_cache
 
 
 def get_dir_size(path: str) -> int:
-    """Total directory size in bytes, cached for 30 seconds to avoid repeated disk walks."""
+    """Compute the total size of a directory; results are cached for 30 seconds to avoid frequent disk walks."""
     cache_key = time.time() // 30
     return _get_dir_size_cached(path, cache_key)
 
 
 @lru_cache(maxsize=8)
 def _get_dir_size_cached(path: str, cache_time: float) -> int:
-    """Cached walk; cache_time changes every TTL to invalidate the entry."""
+    """Internal cached implementation. cache_time forces TTL invalidation."""
     total = 0
     for dirpath, _, filenames in os.walk(path):
         for f in filenames:

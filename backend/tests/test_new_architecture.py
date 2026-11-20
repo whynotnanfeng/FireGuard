@@ -1,4 +1,6 @@
-"""Tests for OverlayInjector, ObjectTracker and EventProcessor."""
+"""
+Tests for the new architecture modules: OverlayInjector, ObjectTracker, EventProcessor
+"""
 import pytest
 import numpy as np
 from datetime import datetime

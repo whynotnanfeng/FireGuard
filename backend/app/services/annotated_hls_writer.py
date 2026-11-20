@@ -1,9 +1,17 @@
 """
-HLS writer for annotated frames.
+HLS encoder for annotated frames (daemon version)
 
-A dedicated writer thread pulls from a bounded queue and paces output against the
-wall clock, decoupling inference rate from video rate. FFmpeg is restarted after a
-crash, and a full queue drops the oldest frame.
+Architecture inspired by DirectHLSWriter, with the frame writer changed to daemon mode:
+- A dedicated writer thread continuously pulls frames from the queue
+- The frame rate is controlled by the writer thread (stable output)
+- The inference frame rate is decoupled from the video frame rate
+- FFmpeg is restarted automatically after a crash
+- When the queue is full, old frames are dropped to keep the newest ones
+
+Key improvements:
+- The writer thread does not use time.sleep to control the frame rate (which caused inaccurate frame rates)
+- Switched to precise wall-clock frame rate control
+- Added the key stability parameters from DirectHLSWriter
 """
 
 from __future__ import annotations
@@ -26,10 +34,18 @@ logger = logging.getLogger(__name__)
 
 
 class AnnotatedHLSWriter:
-    """Writes annotated BGR frames to an HLS playlist through FFmpeg.
+    """
+    HLS encoder for annotated frames (daemon version)
 
-    Frames enter through put_frame() and are encoded by a background thread; a
-    missing frame repeats the previous one so the output stream stays continuous.
+    Architecture:
+        inference thread → put_frame() → bounded queue → daemon writer thread → FFmpeg pipe → HLS output
+
+    Key design:
+    - The inference frame rate is decoupled from the video frame rate: inference may run at 5-10fps
+      while video is output steadily at 15fps
+    - Daemon writer thread: runs continuously, repeating the last frame when the queue is empty
+    - The frame rate is wall-clock controlled: accurate to the millisecond
+    - When the queue is full, old frames are dropped: the newest frames are kept
     """
     
     def __init__(
@@ -40,7 +56,7 @@ class AnnotatedHLSWriter:
         height: int = 1080,
         fps: float = 15.0,
         channel: str = "rgb",
-        queue_size: int = 120,
+        queue_size: Optional[int] = None,
         resume: bool = False,
     ):
         self.task_id = task_id
@@ -52,8 +68,10 @@ class AnnotatedHLSWriter:
         self.channel = channel
         self.m3u8_path = self.output_dir / f"stream_{channel}.m3u8"
         self._resume = resume
+        if queue_size is None:
+            queue_size = config.HLS_WRITER_QUEUE_FRAMES
 
-        # Resume: keep the old playlist text and merge segments on stop.
+        # Resume mode: back up the old m3u8 content, merge old and new segments on stop
         self._old_m3u8_content: Optional[str] = None
         if resume and self.m3u8_path.exists():
             try:
@@ -78,11 +96,11 @@ class AnnotatedHLSWriter:
         self._queue_drops = 0
         self._log_file = None
 
-        self._frame_interval = 1.0 / fps if fps > 0 else 0.067
-
         self._crash_timestamps = []
         self._max_retries = 10
         self._retry_window = 120.0
+        self._crash_lock = threading.Lock()
+        self._last_write_at = time.monotonic()
 
         self._resolve_encoder()
     
@@ -117,28 +135,35 @@ class AnnotatedHLSWriter:
             "-i", "pipe:0",
         ]
         
-        # GOP = fps * hls_time so every segment starts on a keyframe.
+        # Compute GOP dynamically from fps and hls_time
+        # Industry standard: GOP = fps × hls_time, ensuring each HLS segment starts with a keyframe
         hls_time = 1
         gop = int(self.fps * hls_time)
 
-        # Fixed 720p output: lowers BGR->NV12 and encode load and avoids corrupt frames.
-        annot_w = 1280
-        annot_h = 720
-        vf_scale = f"scale={annot_w}:{annot_h}"
+        # Frames already arrive at the pipeline resolution (see config.STREAM_FRAME_*),
+        # so only rescale when the caller explicitly asked for another size.
+        needs_scale = (self.width, self.height) != (
+            config.STREAM_FRAME_WIDTH,
+            config.STREAM_FRAME_HEIGHT,
+        )
+        if needs_scale:
+            base_cmd += [
+                "-vf",
+                f"scale={config.STREAM_FRAME_WIDTH}:{config.STREAM_FRAME_HEIGHT}",
+            ]
 
         if "nvenc" in self._hw_encoder:
             base_cmd += [
-                "-vf", vf_scale,
                 "-c:v", self._hw_encoder,
                 "-preset", "p1",
                 "-tune", "ll",
                 "-rc", "cbr",
-                "-b:v", "3M",           # 3M avoids blocking artifacts in complex scenes
+                "-b:v", "3M",
                 "-maxrate", "3M",
-                "-bufsize", "6M",        # 2-second buffer for sudden scene changes
+                "-bufsize", "3M",        # bufsize must equal maxrate, otherwise frames tear
                 "-g", str(gop),
-                "-force_key_frames", "expr:gte(t,n_forced*1)",  # keyframe every second aligns HLS segments
-                "-sc_threshold", "0",    # disable scene-cut keyframes so boundaries stay regular
+                "-force_key_frames", "expr:gte(t,n_forced*1)",
+                "-sc_threshold", "0",
                 "-pix_fmt", "nv12",
                 "-bf", "0",
                 "-gpu", "0",
@@ -146,7 +171,6 @@ class AnnotatedHLSWriter:
             ]
         elif "qsv" in self._hw_encoder:
             base_cmd += [
-                "-vf", vf_scale,
                 "-c:v", self._hw_encoder,
                 "-preset", "veryfast",
                 "-b:v", "3M",
@@ -156,12 +180,25 @@ class AnnotatedHLSWriter:
                 "-r", str(self.fps),
             ]
         else:
-            raise RuntimeError(
-                f"AnnotatedHLSWriter: unsupported encoder '{self._hw_encoder}'. "
-                "Hardware encoding (NVENC/QSV) is required."
-            )
+            # Software fallback: machines without NVENC/QSV can still run, at a
+            # higher CPU cost. ultrafast+zerolatency keeps latency predictable.
+            base_cmd += [
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-rc", "cbr",
+                "-b:v", "2M",
+                "-maxrate", "2M",
+                "-bufsize", "2M",
+                "-g", str(gop),
+                "-keyint_min", str(gop),
+                "-sc_threshold", "0",
+                "-pix_fmt", "yuv420p",
+                "-bf", "0",
+                "-r", str(self.fps),
+            ]
         
-        # Resume: append to the existing playlist and continue segment numbering.
+        # Resume mode: append to the old m3u8 and set start_number correctly
         has_old_segments = self.m3u8_path.exists() and self._resume
         if has_old_segments:
             start_num = self._get_last_segment_number(self.m3u8_path)
@@ -173,7 +210,7 @@ class AnnotatedHLSWriter:
         base_cmd += [
             "-fflags", "+genpts",
             "-avoid_negative_ts", "make_zero",
-            "-max_muxing_queue_size", "4096",  # avoid muxer queue overflow corrupting frames
+            "-max_muxing_queue_size", "4096",  # 5.6: avoid muxer queue overflow causing corrupted frames
             "-f", "hls",
             "-hls_time", str(hls_time),
             "-hls_list_size", "0",
@@ -196,7 +233,7 @@ class AnnotatedHLSWriter:
         logger.info(f"[AnnotatedHLSWriter] FFmpeg cmd: {' '.join(ffmpeg_cmd)}")
         
         try:
-            # Close the previous handle to avoid leaking file descriptors.
+            # Close the old log_file (prevents FD leak)
             if self._log_file:
                 try:
                     self._log_file.close()
@@ -212,7 +249,7 @@ class AnnotatedHLSWriter:
                 stderr=subprocess.STDOUT,
             )
             
-            # Catch encoder or output-path failures right away.
+            # Check whether FFmpeg exits immediately after startup
             time.sleep(0.2)
             poll_result = self.process.poll()
             if poll_result is not None:
@@ -254,34 +291,17 @@ class AnnotatedHLSWriter:
                 pass
             self._log_file = None
 
-    def _write_frame_safe(self, frame_bytes: bytes, timeout: float = 0.08) -> bool:
-        """Write one frame with a timeout, dropping it if FFmpeg blocks.
-
-        A write can block indefinitely when the encoder falls behind, which would
-        stall the writer thread. select() is unavailable for pipes on Windows, so
-        the write runs in a worker thread with a timeout instead.
-        """
-        if self.process is None or self.process.stdin is None:
-            return False
-        try:
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(self.process.stdin.write, frame_bytes)
-                try:
-                    future.result(timeout=timeout)
-                    return True
-                except FuturesTimeoutError:
-                    self._queue_drops += 1
-                    return False
-        except (BrokenPipeError, OSError):
-            self._consecutive_failures += 1
-            self._handle_crash()
-            return False
-
     def _write_loop(self):
-        """Feed queued frames to FFmpeg stdin until stopped."""
+        """Drain the bounded queue into FFmpeg stdin.
+
+        This is the only thread that touches the pipe, so a stalled encoder can
+        never block capture or inference: ``put_frame`` drops the oldest frame
+        once the queue is full. The previous implementation created a
+        ThreadPoolExecutor per frame, and its context manager waited for the
+        pending write on exit — turning an encoder stall into a pipeline stall.
+        """
         _last_diag_time = time.monotonic()
-        _write_times: list[float] = []  # durations of the last 50 writes
+        _write_times: list[float] = []
 
         while not self._stop_event.is_set():
             try:
@@ -298,15 +318,19 @@ class AnnotatedHLSWriter:
             try:
                 if frame.shape != (self.height, self.width, 3):
                     frame = _resize_frame(frame, self.width, self.height)
+                elif not frame.flags["C_CONTIGUOUS"]:
+                    frame = np.ascontiguousarray(frame)
+
                 write_start = time.monotonic()
-                wrote = self._write_frame_safe(frame.tobytes())
+                # memoryview avoids the extra full-frame copy that tobytes() made
+                self.process.stdin.write(memoryview(frame).cast("B"))
                 write_elapsed = time.monotonic() - write_start
 
-                if wrote:
-                    self._frame_count += 1
-                    _write_times.append(write_elapsed)
-                    if len(_write_times) > 50:
-                        _write_times.pop(0)
+                self._frame_count += 1
+                self._last_write_at = time.monotonic()
+                _write_times.append(write_elapsed)
+                if len(_write_times) > 50:
+                    _write_times.pop(0)
 
                 now = time.monotonic()
                 if now - _last_diag_time >= 5.0:
@@ -334,30 +358,57 @@ class AnnotatedHLSWriter:
                         f"failures={self._consecutive_failures}"
                     )
                     _write_times.clear()
-
+            except (BrokenPipeError, OSError):
+                self._consecutive_failures += 1
+                self._handle_crash()
             except Exception as e:
                 logger.error(f"[AnnotatedHLSWriter] Write error: {e}")
+
+    def _watchdog_loop(self):
+        """Restart FFmpeg when a blocked pipe write stops draining the queue.
+
+        A blocking write on the pipe cannot be interrupted portably (Windows has
+        no select() on pipes), so a second thread detects the stall and closes
+        the process, which unblocks the writer.
+        """
+        while not self._stop_event.wait(2.0):
+            if not self._started or self.process is None or self.error_msg:
+                continue
+            stalled = time.monotonic() - self._last_write_at
+            if self._queue.qsize() > 0 and stalled > 5.0:
+                logger.warning(
+                    f"[AnnotatedHLSWriter] Encoder stalled for {self.task_id} "
+                    f"({stalled:.1f}s, qdepth={self._queue.qsize()}), restarting"
+                )
+                self._handle_crash()
     
     def _handle_crash(self):
-        now = time.monotonic()
-        self._crash_timestamps = [t for t in self._crash_timestamps if now - t < self._retry_window]
-        self._crash_timestamps.append(now)
-        
-        if len(self._crash_timestamps) >= self._max_retries:
-            self.error_msg = f"FFmpeg crashed {self._max_retries} times within {self._retry_window}s"
-            logger.critical(f"[AnnotatedHLSWriter] {self.error_msg}")
-            self._started = False
+        # The writer thread and the watchdog can both spot the same failure.
+        if not self._crash_lock.acquire(blocking=False):
             return
-        
-        logger.warning(f"[AnnotatedHLSWriter] Restarting FFmpeg...")
-        self._stop_ffmpeg()
-        
-        backoff_time = min(1.0 * (2 ** (len(self._crash_timestamps) - 1)), 10.0)
-        time.sleep(backoff_time)
-        
-        if self._start_ffmpeg():
-            self._consecutive_failures = 0
-            logger.info(f"[AnnotatedHLSWriter] FFmpeg restarted")
+        try:
+            now = time.monotonic()
+            self._crash_timestamps = [t for t in self._crash_timestamps if now - t < self._retry_window]
+            self._crash_timestamps.append(now)
+
+            if len(self._crash_timestamps) >= self._max_retries:
+                self.error_msg = f"FFmpeg crashed {self._max_retries} times within {self._retry_window}s"
+                logger.critical(f"[AnnotatedHLSWriter] {self.error_msg}")
+                self._started = False
+                return
+
+            logger.warning("[AnnotatedHLSWriter] Restarting FFmpeg...")
+            self._stop_ffmpeg()
+
+            backoff_time = min(1.0 * (2 ** (len(self._crash_timestamps) - 1)), 10.0)
+            self._stop_event.wait(backoff_time)
+
+            if self._start_ffmpeg():
+                self._consecutive_failures = 0
+                self._last_write_at = time.monotonic()
+                logger.info("[AnnotatedHLSWriter] FFmpeg restarted")
+        finally:
+            self._crash_lock.release()
     
     def start(self):
         if self._started:
@@ -367,14 +418,14 @@ class AnnotatedHLSWriter:
         has_old_segments = len(existing_ts) > 0
 
         if self._resume and has_old_segments:
-            # Resume: keep old segments and strip only the ENDLIST tag.
+            # Resume mode: keep old segments, only strip the ENDLIST
             self._strip_endlist()
             logger.info(
                 f"[AnnotatedHLSWriter] Resume mode for {self.task_id}: "
                 f"keeping {len(existing_ts)} old segments"
             )
         else:
-            # Fresh start: remove previous files.
+            # Brand-new start: clean up old files
             self._cleanup_old_segments()
 
         self._stop_event.clear()
@@ -387,11 +438,13 @@ class AnnotatedHLSWriter:
 
         self._write_thread = threading.Thread(target=self._write_loop, daemon=True)
         self._write_thread.start()
+        self._last_write_at = time.monotonic()
+        threading.Thread(target=self._watchdog_loop, daemon=True).start()
 
         logger.info(f"[AnnotatedHLSWriter] Daemon started for {self.task_id}")
 
     def _cleanup_old_segments(self):
-        """Remove old segments and playlists; a leftover ENDLIST stalls hls.js."""
+        """Delete old segments and playlists to avoid a leftover ENDLIST breaking hls.js"""
         try:
             for pattern in [f"stream_{self.channel}*.ts", f"stream_{self.channel}*.m3u8*"]:
                 for f in self.output_dir.glob(pattern):
@@ -404,7 +457,7 @@ class AnnotatedHLSWriter:
             logger.warning(f"[AnnotatedHLSWriter] Cleanup warning: {e}")
 
     def _strip_endlist(self):
-        """Remove ENDLIST so FFmpeg can keep appending segments (resume mode)."""
+        """Resume mode: remove the ENDLIST marker from the m3u8 so FFmpeg can keep appending segments"""
         if not self.m3u8_path.exists():
             return
         try:
@@ -417,7 +470,7 @@ class AnnotatedHLSWriter:
             logger.warning(f"[AnnotatedHLSWriter] ENDLIST strip failed: {e}")
 
     def _merge_m3u8(self):
-        """Put old segment entries before the new ones (resume mode) so the timeline stays intact."""
+        """Resume mode: merge the old m3u8 segment entries into the new m3u8 so the historical duration stays correct"""
         import re
         try:
             new_content = self.m3u8_path.read_text(encoding="utf-8")
@@ -475,7 +528,7 @@ class AnnotatedHLSWriter:
 
     @staticmethod
     def _get_last_segment_number(m3u8_path: Path) -> int:
-        """Return the next segment number from the playlist, used as start_number."""
+        """Extract the last segment number from the m3u8, used as start_number in resume mode"""
         if not m3u8_path.exists():
             return 0
         try:
@@ -493,7 +546,9 @@ class AnnotatedHLSWriter:
 
     def put_frame(self, frame: np.ndarray) -> bool:
         """
-        Queue a frame without blocking; when full, drop the oldest to keep the newest.
+        Put a frame into the async queue (non-blocking)
+
+        When the queue is full, old frames are dropped to keep the newest ones
         """
         if not self._started or self._stop_event.is_set():
             return False
@@ -511,7 +566,7 @@ class AnnotatedHLSWriter:
                 return False
     
     def write_frame(self, frame: np.ndarray) -> bool:
-        """Alias of put_frame() for older callers."""
+        """Backward-compatible interface"""
         return self.put_frame(frame)
     
     def stop(self):
@@ -531,7 +586,7 @@ class AnnotatedHLSWriter:
         
         self._stop_ffmpeg()
 
-        # Resume: merge the old playlist so historical segments remain listed.
+        # Resume mode: merge the old m3u8 with the new m3u8 so historical segments are not lost
         if self._old_m3u8_content and self.m3u8_path.exists():
             self._merge_m3u8()
 

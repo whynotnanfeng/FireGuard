@@ -78,8 +78,13 @@ htmlcov/
 .pytest_cache/
 **/.pytest_cache/
 
+# --- Rust core ---
+rust/target/
+**/target/debug/
+**/target/release/
+
 # --- Project data & databases ---
-/data/
+data/
 backend/data/*
 !backend/data/.gitkeep
 backend/logs/*
@@ -108,17 +113,19 @@ uploads/
 *.swo
 .history/
 
-# --- Third-party binaries (not distributed) ---
-bin/*
-!bin/.gitkeep
-
-# --- Internal documentation (not part of the open-source release) ---
-docs/
+# --- Third-party binaries ---
+bin/
+**/bin/ffmpeg.exe
+**/bin/ffmpeg
+**/ffmpeg.zip
+**/MediaMTX/
 
 # --- Copyright registration material (not published) ---
 ruanzhu/
 
-# --- AI agent configuration (not part of the release) ---
+# --- Internal documentation (not part of the open-source release) ---
+docs/
+PROJECT_VARIANTS.md
 CLAUDE.md
 skills-lock.json
 .mcp.json

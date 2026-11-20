@@ -1,7 +1,14 @@
-"""Event-driven detection records: one row per object lifecycle instead of one per frame.
+"""
+Event-driven detection record model
 
-Per-frame rows grow linearly with FPS; enter/leave events keep the same information at a
-small fraction of the volume.
+Differences from the legacy DetectionRecord:
+- Legacy: one record per frame (data explodes at high FPS)
+- New: one record per object lifecycle (Enter → Update × N → Leave)
+
+Data volume comparison (15 FPS, 1 minute, 5 objects):
+- Legacy: 15 × 60 = 900 records/object × 5 = 4500 records
+- New: 2 records/object (Enter + Leave) × 5 = 10 records
+- Reduction: 99.8%
 """
 
 import uuid

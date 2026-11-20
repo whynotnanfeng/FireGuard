@@ -1,610 +1,440 @@
-# FireGuard — Intelligent Fire Monitoring Platform
+# FireGuard — Intelligent Fire Monitoring System
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](backend/requirements.txt)
+[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](rust/Cargo.toml)
 [![Vue](https://img.shields.io/badge/Vue-3.3-42b883.svg)](frontend/package.json)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.104-009688.svg)](backend/requirements.txt)
+[![ONNX Runtime](https://img.shields.io/badge/ONNX%20Runtime-DirectML%20%7C%20CUDA-005CED.svg)](https://onnxruntime.ai/)
 
-FireGuard is a deep-learning-based fire and smoke monitoring platform. It supports image, video file,
-and live stream detection tasks, improves detection through multi-model fusion and RGB/IR dual-spectrum
-analysis, and provides a web console for task management, model management, live monitoring, history
-playback, and detection event review.
+**FireGuard** is an AI-based, multi-model multimodal fire and smoke detection platform.
+It runs deep-learning object detectors over images, video files, and live video streams,
+and serves the results through a web console for task management, model management,
+live monitoring, and detection-event forensics.
 
-This repository is the open-source fixed release. It contains the complete source code and deployment
-instructions. Runtime dependencies (FFmpeg, MediaMTX, Redis), detection models, and runtime data are
-not distributed with the repository.
+This repository is the English-language open-source release of **FireGuard Intelligent
+Fire Monitoring System V1.0**, the name under which the project is registered for
+software copyright (registered pinyin name: *Huozai Renzhi Jiance Xitong*).
 
 ---
 
 ## Table of Contents
 
-- [Features](#features)
+- [Why FireGuard](#why-fireguard)
+- [Core Capabilities](#core-capabilities)
 - [Architecture](#architecture)
 - [Tech Stack](#tech-stack)
 - [Repository Layout](#repository-layout)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Running the Services](#running-the-services)
-- [Ports](#ports)
-- [Server Deployment](#server-deployment)
+- [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Detection Models](#detection-models)
-- [Data and Logs](#data-and-logs)
-- [Troubleshooting](#troubleshooting)
+- [API Overview](#api-overview)
+- [Streaming Setup](#streaming-setup)
+- [Stream Simulator](#stream-simulator)
 - [License](#license)
+- [Acknowledgements](#acknowledgements)
 
 ---
 
-## Features
+## Why FireGuard
 
-### Detection and fusion
+Industrial production, warehousing and logistics, commercial buildings, forests and
+grasslands all face fire as one of the most destructive safety hazards. Conventional
+fire monitoring relies on hardware sensors such as smoke and temperature detectors,
+which have limited coverage, a high false-alarm rate, and offer no way to visually
+confirm an alarm.
 
-- **Three task types**: image (`image`), video file (`video`), and live stream (`stream`). Each task can use multiple detection models.
-- **Multi-model fusion**: threshold pre-filter → illumination-aware weighting → weighted box fusion (WBF). Each model has its own weight, class thresholds, and enabled classes.
-- **RGB / IR dual spectrum**: visible-light and thermal inputs are aligned by timestamp. IR model weight increases automatically in low light.
-- **ONNX inference**: ONNX Runtime on CPU or NVIDIA CUDA. Supports YOLO-family models, RT-DETR, and custom models that follow the output contract.
-- **Elastic inference pool**: inference processes scale with CPU load. Each model runs in its own worker process to avoid blocking other models.
-- **Tracking and events**: Enter/Leave events are generated from detection boxes and written only on state changes, reducing database load.
+Computer-vision-based detection changes that: it identifies flames and smoke directly
+in camera footage, giving earlier warning and evidence a human can actually review.
 
-### Streaming and monitoring
+FireGuard targets five core requirements:
 
-- **Multi-protocol ingest**: RTSP, RTMP, and HTTP streams. Standard RTSP cameras (Hikvision, Dahua, Uniview, etc.) and ONVIF discovery are supported.
-- **Media gateway**: MediaMTX provides RTSP, HLS, and WebRTC, with dynamic path registration and lifecycle management.
-- **Server-rendered detection boxes**: boxes are drawn into the HLS picture by the backend, keeping playback and detection events frame-accurate without frontend canvas overlays.
-- **Live monitoring and history playback**: multi-channel grid, live HLS playback, seekable history playback, and a detection event timeline.
-- **Resumable recording**: HLS segments and playlists are preserved when a stream task stops. The next run continues from the previous checkpoint without overwriting history.
-- **Hardware acceleration**: FFmpeg capture supports NVIDIA NVDEC, Intel QSV, and AMD AMF, with CPU fallback.
+| # | Requirement | How FireGuard meets it |
+|---|-------------|------------------------|
+| 1 | **Multi-model fusion detection** | Load several ONNX detectors per task and fuse their output to reduce misses and false positives |
+| 2 | **Multimodal input** | RGB and IR (thermal) channels with illumination-aware weighting for low-light and night operation |
+| 3 | **Live video monitoring** | Low-latency HLS/WebRTC delivery with server-rendered bounding boxes overlaid on the picture |
+| 4 | **Playback and resume** | Review past detections and query the event timeline; stream tasks resume from their last checkpoint |
+| 5 | **Elastic inference** | A worker pool that scales its process count against live CPU load |
 
-### Platform
+> **v3.0.0 runtime:** production builds ship the Rust core in `rust/` (axum + sqlx + ort)
+> as a single self-contained `FireGuard.exe` — no Python runtime is installed.
+> `backend/` remains in the repository as the Python reference implementation used for
+> algorithm development and side-by-side comparison; it is not part of the installer.
 
-- **Model management**: upload `.onnx` models, maintain metadata, configure label mapping and per-class thresholds.
-- **Task management**: create, start, pause, stop, and delete tasks; inspect status, results, and logs.
-- **Authentication and security**: JWT login, bcrypt password hashing, rate limiting, storage quotas, and upload size limits.
-- **Stream simulator**: publish local video files as RTSP streams when no camera is available.
-- **DVR / VOD**: live recordings, history segments, and result snapshots are stored on disk and can be replayed per task.
+---
+
+## Core Capabilities
+
+### Detection engine
+
+- **Three task types** — `image`, `video`, and `stream`, each configurable with multiple models.
+- **Three-stage fusion pipeline** — threshold pre-filter → illumination-aware adaptive
+  weighting → Weighted Box Fusion (WBF). Each model keeps its own per-class thresholds.
+- **Illumination-aware adaptation** — an EMA-smoothed weight adjustment with cold-start
+  repair shifts trust toward the IR model when ambient light drops.
+- **In-process inference pool** — each model keeps a small ONNX Runtime session pool
+  (GPU default 2, CPU 1) and Rayon workers; no cross-process frame shipping.
+- **Runtime selection** — DirectML first (any DX12 GPU), CUDA when the optional runtime
+  pack is installed, automatic CPU fallback when GPU initialisation fails.
+
+### Event and recording pipeline
+
+- **Event-driven detection records** — Enter/Leave lifecycle events replace per-frame
+  database writes, cutting database I/O by ~99.8%.
+- **Server-side annotation rendering** — boxes are drawn in Rust and encoded straight into
+  the HLS stream, guaranteeing frame-exact sync and removing frontend canvas complexity.
+- **Single annotated HLS channel** — `stream_annotated.m3u8` by default; optional raw feed
+  behind `RECORD_RAW_HLS`. Segment windows follow the task's retention hours and are
+  rotated by FFmpeg, with orphan cleanup and a disk quota janitor.
+- **Media time base** — FFmpeg `showinfo` PTS is normalised by `MediaClock`; records store
+  `abs_ms` and `media_pts_ms`, so playback seeks and boxes share one timeline (no NTP/EWMA).
+- **Cross-modal alignment** — an RGB/IR freshness window (500 ms) keeps stale IR frames
+  out of fusion.
+- **Resumable execution** — stopping a stream task keeps segments, playlists and records;
+  the next run appends and continues track IDs from the previous maximum.
+- **Batch persistence** — detection records are committed by a single writer thread
+  (up to 512 rows / 30 ms per transaction); storage and record janitors enforce retention.
+
+### Media gateway
+
+- RTSP / RTMP / HLS ingestion over TCP through an FFmpeg subprocess, with a watchdog that
+  restarts capture after a 6-second frame stall.
+- Encoder selection: NVENC → QSV → AMF → libx264, all driven by PTS-throttled frame rates.
+- A MediaMTX gateway with separated RTSP / HLS / WebRTC ports and lifecycle management.
+- ONVIF device discovery for IP cameras.
+
+### Web console
+
+Vue 3 + TypeScript + Ant Design Vue, covering authentication, model management, task
+management, multi-channel live monitoring with a dashboard grid, historical playback,
+detection-event tracking, and storage/log diagnostics.
 
 ---
 
 ## Architecture
 
-```mermaid
-graph LR
-    U[Browser<br/>Vue 3 console] -->|REST /api| B[FastAPI backend]
-    U -->|WebSocket /ws| B
-    U -->|HLS /storage| B
-
-    B -->|path registration / status| M[MediaMTX<br/>RTSP / HLS / WebRTC]
-    M -->|RTSP pull| C[FFmpegCapture]
-    C -->|shared frames / inference queue| W[Inference pool<br/>InferenceWorker × N]
-    W --> F[FusionEngine<br/>threshold → illumination-aware → WBF]
-    F --> T[Tracker + EventProcessor]
-    T --> DB[(SQLite WAL)]
-    T -->|detection events / boxes| B
-    F --> A[AnnotatedHLSWriter<br/>server-side boxes]
-    A --> V[(video_storage<br/>HLS segments)]
-    B --> R[(Redis<br/>config / registry / message bus)]
-
-    S[Simulator<br/>optional] -->|RTSP push| M
-    S --> R
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│             Frontend — Vue 3 + TypeScript                                                                          │
+│                  http://localhost:5173                                                                             │
+└──────────────────────────────────────────────────────────┬─────────────────────────────────────────────────────────┘
+                                                           │  REST /api · WebSocket /ws · HLS /storage
+┌──────────────────────────────────────────────────────────▼─────────────────────────────────────────────────────────┐
+│              Runtime — Rust core (v3.0.0)                                                                          │
+│                http://localhost:8000                                                                               │
+│  ┌────────────┐   ┌────────────────┐   ┌────────────────┐                                                          │
+│  │ fg-app     │   │ FusionEngine   │   │ fg-infer       │                                                          │
+│  │ task types │   │ 3-stage fusion │   │ ort CPU / DML  │                                                          │
+│  └────────────┘   └────────────────┘   └────────────────┘                                                          │
+│  ┌───────────────────┐   ┌─────────────────┐   ┌────────────────┐                                                  │
+│  │ fg-media          │   │ fg-infer pool   │   │ Tracker        │                                                  │
+│  │ RTSP / RTMP / HLS │   │ session pool    │   │ Enter / Leave  │                                                  │
+│  └───────────────────┘   └─────────────────┘   └────────────────┘                                                  │
+│  ┌───────────────────┐   ┌────────────────────┐   ┌─────────────────┐                                              │
+│  │ HLS writer        │   │ Annotated writer   │   │ fg-server       │                                              │
+│  │ clean + resumable │   │ boxes burned in    │   │ axum HTTP/WS    │                                              │
+│  └───────────────────┘   └────────────────────┘   └─────────────────┘                                              │
+└──────────────┬──────────────────────────────┬─────────────────────────────┬──────────────────────────┬─────────────┘
+             │                              │                             │                          │
+┌─────────────▼─────────┐   ┌────────────────▼────────────┐   ┌────────────▼────────┐   ┌─────────────▼────────┐
+│ SQLite (WAL)          │   │ In-process event bus        │   │ MediaMTX            │   │ Storage              │
+│ fg-store repositories │   │ broadcast, no Redis         │   │ RTSP / HLS / WebRTC │   │ segments + artifacts │
+└───────────────────────┘   └─────────────────────────────┘   └─────────────────────┘   └──────────────────────┘
 ```
 
-### Main modules
-
-| Module | Responsibility |
-|--------|----------------|
-| `backend/app/task_runner.py` | Task lifecycle, model worker scheduling, image/video/stream dispatch |
-| `backend/app/services/video_stream.py` | Stream capture, inference scheduling, box injection, HLS writing |
-| `backend/app/services/fusion_engine.py` | Three-stage fusion: threshold filter, illumination-aware weighting, WBF |
-| `backend/app/services/detector.py` | ONNX model loading, inference, and post-processing |
-| `backend/app/services/inference_worker.py` | Standalone inference process consuming frame queues |
-| `backend/app/services/ffmpeg_capture.py` | FFmpeg subprocess capture with resolution and frame-rate normalization |
-| `backend/app/services/storage_manager.py` | HLS recording, history segments, result snapshots |
-| `backend/app/services/media_server.py` | MediaMTX startup, port allocation, health checks, takeover |
-| `backend/app/services/registry.py` | Redis-backed configuration center and service registry |
-| `simulator/` | Local video → RTSP stream simulator for testing without a camera |
-
-### Detection data flow
-
-1. A camera or the simulator pushes RTSP/RTMP to MediaMTX.
-2. The backend pulls the stream per task; FFmpegCapture decodes it into normalized RGB/IR frames.
-3. Frames enter shared memory and inference queues, then are processed by the worker for each model.
-4. FusionEngine applies threshold filtering, illumination-aware weighting, and WBF.
-5. Tracker generates Enter/Leave events, writes them to SQLite, and pushes them to the frontend over WebSocket.
-6. AnnotatedHLSWriter draws boxes onto frames and encodes HLS. The player and event timeline stay in sync.
+> The Python reference implementation (`backend/`) mirrors this layout with
+> FastAPI + SQLModel and can be useful for algorithm experiments, but the shipped
+> product is the Rust runtime above.
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology | Verified version |
-|-------|------------|------------------|
-| Frontend | Vue 3, TypeScript, Vite, Ant Design Vue, Pinia, Vue Router, hls.js | Vue 3.3 / Vite 5 / Node.js 22.14.0 |
-| Backend | Python, FastAPI, Uvicorn, Pydantic v2, SQLModel | Python 3.13.1 / FastAPI 0.136.1 |
-| Inference | ONNX Runtime, OpenCV, NumPy | ONNX Runtime 1.20.0 / OpenCV 4.13 |
-| Streaming | FFmpeg, MediaMTX | FFmpeg 6.1.1 / MediaMTX 1.18.1 |
-| Data | SQLite (WAL), Redis | Redis 5.0.14.1 (bundled Windows build) |
-| Auth | JWT (python-jose), bcrypt (passlib), SlowAPI | - |
+| Layer | Technology |
+|-------|------------|
+| Runtime (v3.0.0) | Rust workspace: `fg-domain` / `fg-contracts` / `fg-infer` / `fg-media` / `fg-store` / `fg-app` / `fg-server` |
+| Frontend | Vue 3, TypeScript, Vite, Ant Design Vue, Pinia, Vue Router, hls.js |
+| Reference backend | Python 3.10+, FastAPI, Uvicorn, Pydantic v2, SQLModel (not shipped) |
+| Inference | ONNX Runtime via `ort` (DirectML by default, optional CUDA runtime pack) |
+| Streaming | FFmpeg, MediaMTX (RTSP / HLS / WebRTC) |
+| Data | SQLite (WAL) through `fg-store` repositories; in-process event bus (no Redis) |
+| Auth | JWT + bcrypt, 60-second WebSocket tickets |
 
-> Python 3.10+ and Node.js 18+ are supported. The versions above are the environment used for this release.
+Supported detector families: **YOLO**, **RT-DETR**, and custom-trained ONNX models.
 
 ---
 
 ## Repository Layout
 
-```text
-FireGuard/
+```
+.
+├── rust/
+│   ├── fireguardd/               # entry point: CLI, single instance, Job Object, logging
+│   └── crates/
+│       ├── fg-domain/            # pure domain models and time helpers
+│       ├── fg-contracts/         # config, API DTOs, event payloads
+│       ├── fg-infer/             # ort sessions, pre/post-processing, model pool
+│       ├── fg-media/             # FFmpeg capture/encode, MediaMTX, HLS writers
+│       ├── fg-store/             # sqlx + repositories (task/model/user/record)
+│       ├── fg-app/               # engine, task lifecycle, fusion, tracker, janitor
+│       └── fg-server/            # axum routes, auth, static assets
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                 # FastAPI entry, WebSocket, HLS static serving
-│   │   ├── config.py               # Environment and runtime configuration
-│   │   ├── database.py             # SQLite initialization and migration
-│   │   ├── dependencies.py         # JWT, password hashing, current user
-│   │   ├── limiter.py              # Rate limiting
-│   │   ├── models/                 # SQLModel data models
-│   │   ├── routers/                # auth / models / tasks routes
-│   │   ├── schemas/                # Request and response schemas
-│   │   ├── services/               # Detection, fusion, streaming, storage
-│   │   └── utils/                  # Logging, clock, shared memory, hardware
-│   ├── tests/                      # pytest suite
-│   ├── data/                       # Runtime data (uploads, models, results, recordings)
-│   ├── logs/                       # Backend logs
-│   ├── requirements.txt            # CPU dependencies
-│   ├── requirements-gpu.txt        # NVIDIA CUDA dependencies
-│   ├── requirements-dev.txt        # Test and development dependencies
-│   ├── .env.example                # Environment template
-│   └── run_backend.bat             # Windows launcher
+│   │   ├── main.py               # FastAPI application entry point
+│   │   ├── config.py             # Settings and runtime configuration
+│   │   ├── dependencies.py       # Auth and database dependencies
+│   │   ├── limiter.py            # Rate limiting
+│   │   ├── models/               # SQLModel / Pydantic schemas
+│   │   ├── repositories/         # Data access layer
+│   │   ├── routers/              # auth, models, tasks
+│   │   ├── schemas/              # Request / response schemas
+│   │   ├── services/             # Detection, fusion, streaming, storage
+│   │   └── utils/                # Logging, clocks, shared memory, hardware
+│   ├── tests/                    # Test suite
+│   ├── migrate_db.py             # Schema migration helper
+│   ├── requirements.txt          # CPU dependencies
+│   └── requirements-gpu.txt      # CUDA 12.1 dependencies
 ├── frontend/
-│   ├── src/
-│   │   ├── api/                    # Axios API clients
-│   │   ├── components/             # Player, detection config, event panel
-│   │   ├── router/                 # Routes
-│   │   ├── stores/                 # Pinia stores
-│   │   ├── utils/                  # Frontend logging
-│   │   └── views/                  # Login, tasks, models, monitoring
-│   ├── package.json
-│   └── vite.config.ts
-├── simulator/                      # RTSP stream simulator
-├── bin/                            # Runtime dependency directory (place FFmpeg / MediaMTX / Redis here)
-└── README.md
+│   └── src/
+│       ├── api/       # Axios clients
+│       ├── components/           # Player, result viewer, detection config
+│       ├── composables/          # useHlsPlayer / useDetectionBuffer / useLiveDrift
+│       ├── stores/               # Pinia stores
+│       ├── utils/                # Logging helpers
+│       └── views/                # Login, tasks, models, monitor dashboard
+├── packaging/                    # Windows build scripts + Inno Setup scripts
+└── simulator/                    # Synthetic RTSP stream generator for testing
 ```
 
 ---
 
-## Requirements
+## Quick Start
 
-### Hardware
+### Prerequisites
 
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| CPU | 4 cores | 8 cores or more |
-| Memory | 8 GB | 16 GB or more |
-| Disk | 10 GB free | SSD, 50 GB or more |
-| GPU | None (CPU inference) | NVIDIA GPU with at least 4 GB VRAM |
+- Python 3.10 or newer (reference backend and simulator only)
+- Node.js 18 or newer (frontend build)
+- Rust toolchain (production runtime build)
+- FFmpeg on `PATH`
+- MediaMTX (optional, for the RTSP/HLS/WebRTC gateway)
+- Redis only for the Python reference backend (optional; the Rust runtime does not use it)
 
-### Software
+### 0. Production runtime (Rust, recommended)
 
-| Software | Version | Purpose | Required |
-|----------|---------|---------|----------|
-| Python | 3.10+ | Backend and simulator | Yes |
-| Node.js | 18+ | Frontend build and dev server | Yes |
-| FFmpeg / FFprobe | 4.0+ (tested 6.1.1) | Decoding, transcoding, HLS | Yes |
-| MediaMTX | 1.18+ (tested 1.18.1) | RTSP / HLS / WebRTC gateway | Yes, for live streaming |
-| Redis | 5.0+ (tested 5.0.14.1) | Config center, registry, message bus | Recommended (falls back to in-memory) |
-| NVIDIA driver / CUDA | Driver ≥ 525.60, CUDA 12.1, cuDNN 9.1 | GPU inference | Optional |
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build_rust.ps1
+# artifacts: dist\FireGuard\FireGuard.exe, dist\FireGuard-Portable.zip,
+#            packaging\installer\Output\FireGuard-Setup-3.0.0.exe
+```
 
-> This open-source repository does not bundle FFmpeg, MediaMTX, or Redis. Prepare them as described
-> under Installation → Runtime dependencies. On Windows, place the binaries under `bin/` and the
-> backend starts them automatically.
+Run `dist\FireGuard\FireGuard.exe` (double-click opens the browser). It serves the API and
+the built frontend on <http://localhost:8000>, stores data in `data\` next to the exe
+(portable) or `%ProgramData%\FireGuard\data` (installed), and exits about 15 seconds after
+the last console page closes. Use `--keep-alive` to keep it resident.
 
----
+Quality gates before submitting a change:
 
-## Installation
+```powershell
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+powershell -ExecutionPolicy Bypass -File rust\check-deps.ps1
+```
 
-### 1. Python virtual environment
+### 1. Reference backend (Python, development only)
 
 ```bash
 cd backend
 
 python -m venv .venv
+# Windows:   .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
 
-# Windows
-.venv\Scripts\activate
-# Linux / macOS
-source .venv/bin/activate
+pip install -r requirements.txt          # CPU
+# pip install -r requirements-gpu.txt    # NVIDIA CUDA 12.1
+
+cp .env.example .env                     # then edit SECRET_KEY
 ```
 
-Install backend dependencies:
-
-```bash
-# CPU
-pip install -r requirements.txt
-
-# NVIDIA GPU (CUDA 12.1)
-pip install -r requirements-gpu.txt
-
-# Development and tests (optional)
-pip install -r requirements-dev.txt
-```
-
-### 2. Frontend dependencies
-
-```bash
-cd frontend
-npm install
-```
-
-### 3. Runtime dependencies (FFmpeg / MediaMTX / Redis)
-
-#### Windows
-
-This repository does not include the binaries. Place the following files under `bin/`:
-
-```text
-bin/
-├── ffmpeg.exe
-├── ffprobe.exe
-├── mediamtx.exe
-├── mediamtx.yaml
-└── redis/
-    ├── redis-server.exe
-    ├── redis-cli.exe
-    └── redis.windows.conf
-```
-
-Download links:
-
-- FFmpeg (Windows builds): <https://www.gyan.dev/ffmpeg/builds/>
-- MediaMTX: <https://github.com/bluenviron/mediamtx/releases> (v1.18.1 recommended)
-- Redis for Windows: <https://github.com/tporadowski/redis/releases> (5.0.14 recommended)
-
-After placing the files under `bin/`, the backend starts Redis and MediaMTX automatically; no manual
-startup is needed.
-
-#### Linux / macOS
-
-```bash
-# Ubuntu / Debian
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip ffmpeg redis-server
-
-# Start Redis
-sudo systemctl enable --now redis-server
-```
-
-The backend looks for `bin/mediamtx.exe` by default. On Linux, place the MediaMTX binary at that path
-(the file name can stay as-is; the binary is executed directly):
-
-```bash
-wget https://github.com/bluenviron/mediamtx/releases/download/v1.18.1/mediamtx_v1.18.1_linux_amd64.tar.gz
-tar -xzf mediamtx_v1.18.1_linux_amd64.tar.gz
-sudo install -m 755 mediamtx /opt/FireGuard/bin/mediamtx.exe
-```
-
-Alternatively, create a symlink:
-
-```bash
-ln -s /usr/local/bin/mediamtx bin/mediamtx.exe
-```
-
-> On Linux, the backend does not start Redis automatically. Use the system Redis service; if it is
-> unavailable, the message bus falls back to in-memory mode.
-
-### 4. Environment variables
-
-```bash
-cd backend
-
-# Windows
-copy .env.example .env
-# Linux / macOS
-cp .env.example .env
-```
-
-Edit `backend/.env` and set at least `SECRET_KEY`:
+Generate a JWT secret:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-```ini
-SECRET_KEY=<generated-random-string>
-```
-
-> `.env` is excluded by `.gitignore`; do not commit it.
-
----
-
-## Running the Services
-
-### 1. Start the backend
+Start the API server:
 
 ```bash
-cd backend
-
-# Generic command
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-On Windows, you can also run:
+Interactive API documentation is then available at <http://localhost:8000/api/docs>
+(development mode only — it is disabled when `FIREGUARD_MODE=production`).
 
-```bat
-backend\run_backend.bat
-```
-
-After startup:
-
-- Health check: <http://localhost:8000/api/health>
-- API docs: <http://localhost:8000/api/docs> (disabled when `FIREGUARD_MODE=production`)
-
-The backend automatically:
-
-1. Connects to Redis (on Windows, starts the bundled build if present and port 6379 is free);
-2. Initializes the config center and registers the backend service;
-3. Initializes the SQLite database with WAL mode;
-4. Starts MediaMTX when a binary is present under `bin/`;
-5. Starts the inference pool and task scheduler.
-
-### 2. Start the frontend
+### 2. Frontend
 
 ```bash
 cd frontend
+npm install
 npm run dev
 ```
 
-Open <http://localhost:5173>. The dev server proxies `/api`, `/ws`, and `/storage` to `http://127.0.0.1:8000`.
+The console is served at <http://localhost:5173> and proxies `/api`, `/ws` and
+`/storage` to the backend.
 
-> To access the dev server from another machine, run `npm run dev -- --host 0.0.0.0`.
-
-### 3. Start the simulator (optional)
-
-If no camera is available, publish local video files as RTSP streams:
-
-```bash
-cd simulator
-
-# Reuse the backend virtual environment, or create a separate one
-pip install -r requirements.txt
-
-python -m uvicorn main:app --host 0.0.0.0 --port 8001
-```
-
-Console: <http://localhost:8001>
-
-The simulator uses separate MediaMTX ports (RTSP 8555 / API 9996) and does not conflict with the backend.
-
-### 4. First use
-
-1. Open <http://localhost:5173>, register an account (username 2–50 characters, password at least 6 characters).
-2. Go to **Model Management**, upload an `.onnx` model, and configure label mapping.
-3. Go to **Task Management**, create an image, video, or stream task, and bind one or more models.
-4. Start the task and open **Live Monitoring** to view the picture, boxes, and detection events.
-5. Without a camera, upload a video in the simulator, start its RTSP stream, and use
-   `rtsp://127.0.0.1:8555/<stream_path>` as the source.
-
-### 5. Production frontend build
+### 3. Production build
 
 ```bash
 cd frontend
-npm run build
+npm run build      # output in frontend/dist
 ```
-
-The output is written to `frontend/dist/` and can be served by Nginx or any static file server.
-
----
-
-## Ports
-
-| Service | Default port | Address | Description |
-|---------|--------------|---------|-------------|
-| Backend API | 8000 | <http://localhost:8000> | FastAPI service |
-| Frontend dev server | 5173 | <http://localhost:5173> | Vite |
-| Simulator console | 8001 | <http://localhost:8001> | Simulated stream management |
-| Redis | 6379 | `localhost:6379` | Config center / message bus |
-| MediaMTX RTSP | 8554 | `rtsp://localhost:8554` | Backend RTSP ingest/playback |
-| MediaMTX HLS | 8888 | <http://localhost:8888> | HLS playback |
-| MediaMTX WebRTC | 8889 | - | WebRTC playback |
-| MediaMTX API | 9997 | <http://localhost:9997> | Stream path management |
-| Simulator RTSP | 8555 | `rtsp://localhost:8555` | Separate simulator gateway |
-| Simulator API | 9996 | <http://localhost:9996> | Simulator gateway management |
-
-> Ports can be changed with the `MEDIAMTX_*` variables in `backend/.env`. Update firewall and reverse
-> proxy rules after changing them.
-
----
-
-## Server Deployment
-
-The example below targets Ubuntu 22.04 / Debian 12 with the application installed at `/opt/FireGuard`.
-
-### 1. System dependencies
-
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip ffmpeg redis-server nginx
-sudo systemctl enable --now redis-server
-```
-
-Place MediaMTX at `bin/mediamtx.exe` (see above), or run MediaMTX as a separate systemd service.
-
-### 2. Backend systemd service
-
-```ini
-# /etc/systemd/system/fireguard-backend.service
-[Unit]
-Description=FireGuard Backend
-After=network.target redis-server.service
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/FireGuard/backend
-EnvironmentFile=/opt/FireGuard/backend/.env
-ExecStart=/opt/FireGuard/backend/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now fireguard-backend
-sudo systemctl status fireguard-backend
-```
-
-Recommended `backend/.env` settings:
-
-```ini
-FIREGUARD_MODE=production
-SECRET_KEY=<your-random-secret>
-ALLOWED_ORIGINS=https://your-domain.example
-```
-
-In production mode, `/api/docs` and `/api/redoc` are disabled.
-
-### 3. Frontend Nginx configuration
-
-```nginx
-server {
-    listen 80;
-    server_name fireguard.example.com;
-
-    root /opt/FireGuard/frontend/dist;
-    index index.html;
-    client_max_body_size 2g;
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_read_timeout 600s;
-    }
-
-    location /ws/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_read_timeout 3600s;
-    }
-
-    location /storage/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-    }
-}
-```
-
-```bash
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-### 4. Network and security
-
-- Expose only 80/443. Keep the backend (8000), Redis (6379), and MediaMTX API (9997) on the internal network.
-- If cameras push directly to the server, allow RTSP 8554.
-- Use HTTPS in production. WebSocket connections will use `wss://` automatically.
-- Back up `backend/data/` and `backend/.env` regularly.
 
 ---
 
 ## Configuration
 
-See `backend/.env.example` and `backend/app/config.py` for the full list.
+> The table below documents the Python reference backend. The Rust runtime reads a smaller,
+> largely overlapping set: `FIREGUARD_PORT`, `FIREGUARD_DATA_DIR`, `MAX_STORAGE_BYTES`,
+> `STREAM_FRAME_WIDTH/HEIGHT`, `DETECTION_FPS_STREAM`, `ANNOTATED_HLS_FPS`, `CAPTURE_FPS`,
+> `STREAM_RETENTION_HOURS`, `STORAGE_JANITOR_INTERVAL`, `MAX_STREAM_TASKS`,
+> `MAX_TOTAL_WORKERS`, `INFERENCE_POOL_SIZE`, `DETECTION_RECORD_FPS`, `USE_GPU`,
+> `RECORD_RAW_HLS`, `MEDIAMTX_*_PORT`. See `CLAUDE.md` → Environment for details.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SECRET_KEY` | None (required) | JWT signing key; the backend refuses to start without it |
-| `FIREGUARD_MODE` | `development` | `development` / `production` / `simulator` |
+All settings come from environment variables; see [`backend/.env.example`](backend/.env.example).
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SECRET_KEY` | — | **Required.** JWT signing secret |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `1440` | Access token lifetime |
-| `MAX_CONCURRENT_TASKS` | `4` | Maximum concurrent tasks |
-| `MAX_STORAGE_BYTES` | `21474836480` | Total storage quota (20 GB) |
-| `MAX_FILE_SIZE_BYTES` | `21474836480` | Per-file size limit |
-| `MAX_UPLOAD_SIZE_MB` | `20480` | Upload size limit (MB) |
-| `DETECTION_FPS_STREAM` | `15` | Stream inference FPS cap |
-| `DETECTION_FPS_VIDEO` | `5` | Video inference FPS |
-| `DETECTION_FPS_IMAGE` | `10` | Image inference FPS |
-| `USE_GPU` | `False` | Enable GPU inference |
-| `GPU_DEVICE_ID` | `0` | GPU index |
-| `HW_ACCEL_DECODER` | `auto` | `auto` / `nvenc` / `qsv` / `amf` / `cpu` |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string |
-| `ALLOWED_ORIGINS` | Local dev origins | CORS allow-list, comma-separated |
-| `MEDIAMTX_RTSP_PORT` | `8554` | RTSP port |
-| `MEDIAMTX_HLS_PORT` | `8888` | HLS port |
-| `MEDIAMTX_API_PORT` | `9997` | MediaMTX control API port |
-| `FFMPEG_PATH` / `FFPROBE_PATH` | Auto-detect | Explicit executable paths |
+| `MAX_STORAGE_BYTES` | `1073741824` | Total storage quota (1 GiB) |
+| `MAX_FILE_SIZE_BYTES` | `1073741824` | Per-file size limit |
+| `MAX_UPLOAD_SIZE_MB` | `1024` | Upload size limit |
+| `MAX_CONCURRENT_TASKS` | `1` | Concurrent task limit |
+| `STREAM_FPS` | `30` | Stream processing frame rate |
+| `RECONNECT_MAX_RETRIES` | `3` | Stream reconnect attempts |
+| `USE_FFMPEG_CAPTURE` | `True` | Use FFmpeg instead of OpenCV for capture |
+| `ALLOWED_ORIGINS` | localhost dev origins | CORS allow-list |
+| `REDIS_URL` | in-memory fallback | Redis connection string |
 
-> Values in `.env.example` are examples; adjust them for your hardware and workload.
+Never commit a populated `.env`; it is excluded from version control.
+
+### Port map
+
+| Service | Port |
+|---------|------|
+| API + frontend | 8000 |
+| Frontend dev server | 5173 |
+| Redis (Python reference only) | 6379 |
+| MediaMTX RTSP (backend) | 8554 |
+| MediaMTX HLS | 8888 |
+| MediaMTX WebRTC | 8889 |
+| MediaMTX control API (backend) | 9997 |
+| Stream simulator API | 8001 |
+| MediaMTX RTSP (simulator) | 8555 |
+| MediaMTX control API (simulator) | 9996 |
+
+### Start everything (three terminals)
+
+| Terminal | Working directory | Command | URL |
+|----------|-------------------|---------|-----|
+| 1 | `backend` | `uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload` | <http://localhost:8000/api/docs> |
+| 2 | `frontend` | `npm run dev` | <http://localhost:5173> |
+| 3 | `simulator` | `uvicorn main:app --host 0.0.0.0 --port 8001` | <http://localhost:8001> |
+
+On Windows, run the backend with `run_backend.bat` inside `backend/` — it finds a local
+`.venv`, `venv` or `env` automatically and falls back to the `python` on `PATH`, so no
+absolute interpreter path is needed.
+
+The simulator is optional — only start it if you have no physical camera available.
 
 ---
 
 ## Detection Models
 
-Model files are not distributed with this repository. Prepare your own trained ONNX models and upload
-them in **Model Management** (only `.onnx` is supported).
+FireGuard runs standard ONNX object detectors. Export your model to ONNX, then register
+it in the console under **Model Management**.
 
-### Input and output contract
+Expected output contract:
 
-- **Input**: `[1, 3, H, W]` float tensor, RGB order, normalized to `0..1`.
-- **Output**: `[1, N, 5 + C]`. Each box is
-  `[cx, cy, w, h, objectness, class_score_1, ..., class_score_C]`,
-  with coordinates in input-image pixels.
-- **Compatible models**: YOLO family, RT-DETR, and custom models that follow the contract above.
-- Class names can be configured under **Model Management → Label Mapping**.
+- **Input** — one image tensor, typically `[1, 3, H, W]`, normalised to `0..1` with
+  `RGB` channel order.
+- **Output** — `[1, N, 5 + num_classes]`, laid out as
+  `[cx, cy, w, h, objectness, class scores...]` in **input-image pixel coordinates**.
 
-### GPU inference
+Compatible architectures include YOLO (v5/v8-style exports) and RT-DETR. Custom-trained
+models work as long as they follow the layout above. Label names are mapped to display
+names through the label-mapping editor in the console.
 
-1. Install an NVIDIA driver (≥ 525.60) and CUDA 12.1 / cuDNN 9.1.
-2. Run `pip install -r backend/requirements-gpu.txt`.
-3. Set `USE_GPU=True` in `backend/.env`.
-4. Verify:
+GPU execution requires an NVIDIA driver (>= 525.60) and CUDA Toolkit 12.1. FFmpeg
+hardware decoding is tried in the order CUDA (NVDEC) → Intel QSV → AMD AMF → CPU.
+
+---
+
+## API Overview
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/auth/login` | Authenticate and obtain a JWT |
+| `GET` | `/api/models` | List registered detection models |
+| `POST` | `/api/models` | Register a model |
+| `GET` | `/api/tasks` | List detection tasks |
+| `POST` | `/api/tasks` | Create an `image` / `video` / `stream` task |
+| `POST` | `/api/tasks/{id}/execute` | Start a task |
+| `POST` | `/api/tasks/{id}/stop` | Stop a task |
+| `GET` | `/api/tasks/{id}/detection-events` | Detection events for a task |
+| `WS` | `/ws/notifications?ticket=` | Real-time notification channel |
+| `WS` | `/ws/stream/{task_id}?ticket=` | Live annotated stream session |
+
+WebSocket connections need a short-lived ticket from `POST /api/auth/ws-ticket`.
+The detailed endpoint reference lives in [`docs/api.md`](docs/api.md).
+
+---
+
+## Streaming Setup
+
+Place the `mediamtx` binary where the service can find it, then adjust the gateway
+settings (API port `9997`, RTSP `8554`, HLS `8888` are the defaults).
+
+Camera sources are configured per task and may be:
+
+| Source | Type | Notes |
+|--------|------|-------|
+| RTSP camera | `rtsp` | Standard IP cameras (Hikvision, Dahua, Uniview…), TCP transport |
+| ONVIF device | — | Built-in WS-Discovery in the Rust core returns the RTSP URL |
+| Drone downlink | `rtsp` / `url` | UAVs such as DJI Matrice or Autel EVO pushing RTSP/RTMP |
+| Video file upload | `upload` | Local file, transcoded into an RTSP stream |
+| HTTP / RTMP stream | `url` | Any HTTP or RTMP source |
+
+For RGB + IR fusion, register both stream URLs; the core keeps a 500 ms freshness window
+so stale IR frames are excluded from fusion.
+
+---
+
+## Stream Simulator
+
+`simulator/` contains a lightweight synthetic stream generator, useful for development
+when no physical camera is available. It publishes uploaded video files over RTSP and
+exposes a small dashboard for monitoring stream health.
 
 ```bash
-python -c "import onnxruntime; print(onnxruntime.get_available_providers())"
+cd simulator
+
+python -m venv .venv
+# Windows:   .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
+
+pip install -r requirements.txt
+
+# Windows
+.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8001
+# Linux/macOS
+python -m uvicorn main:app --host 0.0.0.0 --port 8001
 ```
 
-The output should include `CUDAExecutionProvider`.
+The dashboard is then available at <http://localhost:8001>.
 
----
-
-## Data and Logs
-
-| Path | Content |
-|------|---------|
-| `backend/data/fire_detection.db` | SQLite database (tasks, models, events, records) |
-| `backend/data/uploads/` | Uploaded images and videos |
-| `backend/data/models/` | Registered ONNX model files |
-| `backend/data/results/` | Image detection results and snapshots |
-| `backend/data/video_storage/` | HLS recordings, live, and history segments |
-| `backend/logs/` | Backend logs |
-| `simulator/data/uploads/` | Videos uploaded to the simulator |
-| `simulator/data/logs/` | Simulator and MediaMTX logs |
-
-These directories are excluded by `.gitignore`. When migrating or backing up, include `backend/data/`
-and `backend/.env`.
-
----
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `SECRET_KEY environment variable is not set` | Missing secret | Set `SECRET_KEY` in `backend/.env` |
-| `MediaMTX binary not found` in logs | Missing `bin/mediamtx.exe` | Download and place it as described above; on Linux, symlink it to that path |
-| Redis connection failure | Not installed or not running | Check `bin/redis/` on Windows; start `redis-server` on Linux |
-| Port already in use | 8000/8554/9997 already bound | Change the `.env` ports or stop the conflicting process |
-| Blank frontend page / API 404 | Backend not running or proxy misconfigured | Verify port 8000 and the Vite proxy |
-| `/api/docs` returns 404 in production | Docs are disabled in production | Expected; use development mode to access them |
-| Model fails to load | ONNX format or output contract mismatch | Check input/output dimensions and coordinate range |
-| Large upload fails | Nginx or application limit | Adjust `client_max_body_size` and `MAX_UPLOAD_SIZE_MB` |
-| No live stream picture | MediaMTX not running or wrong RTSP URL | Check MediaMTX logs and the task source URL |
-| WebRTC playback fails | Network or reverse proxy blocks WebSocket | Verify 8889/9997 reachability, or use HLS |
+The simulator starts its own media gateway on RTSP `8555` / API `9996` (deliberately
+offset from the backend gateway on `8554` / `9997`, so both can run side by side). It
+also needs FFmpeg and a `mediamtx` binary on `PATH` (or under `bin/`).
 
 ---
 
@@ -612,6 +442,11 @@ and `backend/.env`.
 
 Released under the [MIT License](LICENSE).
 
-Third-party components (FastAPI, Vue, ONNX Runtime, FFmpeg, MediaMTX, Redis, etc.) remain under their
-own licenses. No model weights are included in this repository; use models you trained or are licensed
-to use.
+---
+
+## Acknowledgements
+
+Built on the shoulders of excellent open-source projects, including Rust (axum, sqlx, ort),
+Vue 3, ONNX Runtime, FFmpeg, MediaMTX and SQLite. The Python reference backend additionally
+uses FastAPI. Detector weights are **not** included in this repository — supply your own
+trained or appropriately licensed ONNX models.

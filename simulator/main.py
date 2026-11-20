@@ -1,34 +1,40 @@
 import os
 import uuid
-import shutil
 import subprocess
 import logging
 import asyncio
 import json
+import sys
 import time
 import random
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, Response, FileResponse
+
+# Windowed build: every console child must be started without a console window.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 try:
     from simulator.manager import StreamManager
 except ImportError:
     from manager import StreamManager
 
+# --- Configuration ---
 BASE_DIR = Path(__file__).resolve().parent
-UPLOADS_DIR = BASE_DIR / "data" / "uploads"
-# Prefer the repo-root bin directory when present.
+# Writable data must live outside the install directory when packaged.
+DATA_DIR = Path(os.getenv("SIMULATOR_DATA_DIR", BASE_DIR / "data"))
+UPLOADS_DIR = DATA_DIR / "uploads"
+# [V1.5.0 unification]: prefer the merged bin directory at the repo root
 ROOT_BIN = BASE_DIR.parent / "bin"
 BIN_DIR = ROOT_BIN if ROOT_BIN.exists() else BASE_DIR / "bin"
 TOOLS_DIR = BIN_DIR 
 
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-METADATA_FILE = BASE_DIR / "data" / "device_names.json"
+METADATA_FILE = DATA_DIR / "device_names.json"
 
 
 def get_metadata():
@@ -46,7 +52,7 @@ _METADATA_CACHE_TTL = 5.0
 
 
 def get_metadata_cached() -> dict:
-    """Cached metadata read (5s TTL)."""
+    """Cached metadata read: returns the cached result within 5 seconds."""
     now = time.time()
     if (_metadata_cache["data"] is not None
             and now - _metadata_cache["time"] < _METADATA_CACHE_TTL):
@@ -64,22 +70,31 @@ def save_metadata(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# Logging
-LOG_FILE = BASE_DIR / "data" / "logs" / "simulator.log"
-(BASE_DIR / "data" / "logs").mkdir(parents=True, exist_ok=True)
+# Setup Logging
+LOG_DIR = DATA_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "simulator.log"
 
 logger = logging.getLogger("simulator")
 logger.setLevel(logging.INFO)
 
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+# 与检测端的按天滚动对齐：长期跑联调时日志不能无限增长（曾积累到 160MB+）。
+from logging.handlers import RotatingFileHandler
+
+fh = RotatingFileHandler(
+    LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
 fh.setFormatter(formatter)
 logger.addHandler(fh)
 
-sh = logging.StreamHandler()
-sh.setFormatter(formatter)
-logger.addHandler(sh)
+# Windowed builds have no console: attaching a StreamHandler to a missing
+# stdout/stderr only produces logging errors, so skip it there.
+if sys.stderr is not None:
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
 
 
 def find_executable(name: str):
@@ -102,7 +117,7 @@ def probe_video(video_path: str):
             "-of", "json",
             video_path
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW)
         if result.returncode == 0:
             data = json.loads(result.stdout)
             stream = data.get("streams", [{}])[0]
@@ -219,18 +234,78 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global state
+# Global State
 stream_manager: Optional[StreamManager] = None
 mediamtx_process: Optional[subprocess.Popen] = None
+runtime_ports: dict = {}
+
+# 桌面默认"关掉浏览器 = 停掉模拟器"：靠前端心跳判定，与检测端保持一致。
+# 仅当没有任何推流在跑时才退出；--keep-alive / SIMULATOR_KEEP_ALIVE=1 可常驻。
+_HEARTBEAT = {"last": time.time(), "leaving": None}
+_KEEP_ALIVE = os.getenv("SIMULATOR_KEEP_ALIVE", "").strip().lower() in ("1", "true", "yes")
+_IDLE_TIMEOUT = max(10.0, float(os.getenv("SIMULATOR_IDLE_TIMEOUT", "120")))
+_LEAVE_GRACE = 15.0
+# 与检测端保持一致的资源上限：单文件 4GB、同时最多 4 路推流。
+_MAX_UPLOAD_BYTES = max(1, int(float(os.getenv("SIMULATOR_MAX_UPLOAD_MB", "4096")))) * 1024 * 1024
+_MAX_STREAMS = max(1, int(float(os.getenv("SIMULATOR_MAX_STREAMS", "4"))))
+# 供 `FireGuardSimulator.exe stop` 定位并停止后台实例。
+_PID_FILE = DATA_DIR / "fireguardsim.pid"
+
+
+async def _watch_idle_and_exit():
+    """浏览器全部关闭且无推流时自动退出，避免进程挂在后台锁住程序目录。"""
+    if _KEEP_ALIVE:
+        logger.info("[Simulator] --keep-alive 已启用，忽略浏览器心跳")
+        return
+    while True:
+        await asyncio.sleep(5)
+        now = time.time()
+        idle = now - _HEARTBEAT["last"]
+        leaving_at = _HEARTBEAT["leaving"]
+        leaving = leaving_at is not None and (now - leaving_at) > _LEAVE_GRACE
+        if not (leaving and idle > _LEAVE_GRACE) and idle <= _IDLE_TIMEOUT:
+            continue
+        active = len(stream_manager.get_active_streams()) if stream_manager else 0
+        if active > 0:
+            logger.info(f"[Simulator] 浏览器已关闭，但仍有 {active} 路推流，保持运行")
+            continue
+        last_client = _HEARTBEAT.get("client", "未知")
+        logger.info(
+            f"[Simulator] 浏览器已关闭且无推流，自动退出（最后一跳 {idle:.0f}s 前，{last_client}）"
+        )
+        await _exit_process(0)
+        return
+
+
+async def _exit_process(code: int):
+    """先停推流与 MediaMTX，再退出；否则子进程会残留并锁住程序目录。"""
+    try:
+        if stream_manager:
+            stream_manager.stop_health_monitor()
+            stream_manager.stop_all()
+        if mediamtx_process and mediamtx_process.poll() is None:
+            mediamtx_process.terminate()
+            try:
+                mediamtx_process.wait(timeout=3)
+            except Exception:
+                mediamtx_process.kill()
+    finally:
+        try:
+            _PID_FILE.unlink()
+        except Exception:
+            pass
+        logging.shutdown()
+        os._exit(code)
+
 
 
 async def cleanup_port(port: int):
-    """Kill a process holding this port only if it is mediamtx."""
+    """More robustly find and kill the process occupying a given port(only kills mediamtx, to protect backend services)"""
     if os.name != 'nt':
         return
     try:
         cmd = f'netstat -ano | findstr ":{port} "'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, creationflags=_NO_WINDOW)
         if result.stdout:
             lines = result.stdout.strip().split('\n')
             pids = set()
@@ -252,13 +327,14 @@ async def cleanup_port(port: int):
                 except Exception:
                     pass
                 logger.info(f"Detected mediamtx conflict on port {port}, killing PID {pid}")
-                subprocess.run(["taskkill", "/F", "/PID", pid, "/T"], capture_output=True)
+                subprocess.run(["taskkill", "/F", "/PID", pid, "/T"], capture_output=True, creationflags=_NO_WINDOW)
                 await asyncio.sleep(1.0)
     except Exception as e:
         logger.warning(f"Port cleanup error: {e}")
 
 
 def is_port_in_use(port: int) -> bool:
+    """Check whether a port is in use"""
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
@@ -266,7 +342,7 @@ def is_port_in_use(port: int) -> bool:
 
 @app.on_event("startup")
 async def startup():
-    global stream_manager, mediamtx_process
+    global stream_manager, mediamtx_process, runtime_ports
     mediamtx_path = find_executable("mediamtx")
     ffmpeg_path = find_executable("ffmpeg")
     logger.info(f"Using mediamtx: {mediamtx_path}")
@@ -275,7 +351,7 @@ async def startup():
     fireguard_mode = os.getenv("FIREGUARD_MODE", "development")
     logger.info(f"[Simulator] Running in '{fireguard_mode}' mode")
     
-    rtsp_port = 8555  # Separate from backend MediaMTX (8554) to avoid conflicts
+    rtsp_port = 8555  # Kept separate from the backend MediaMTX (8554) to avoid port conflicts
     api_port = 9996
     
     try:
@@ -283,8 +359,8 @@ async def startup():
         r = _redis.from_url(
             os.getenv("REDIS_URL", "redis://localhost:6379/0"),
             decode_responses=True,
-            socket_connect_timeout=2.0,
-            socket_timeout=2.0,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
         )
         r.ping()
         cfg_rtsp = r.hget("fireguard:config", "mediamtx_rtsp_port")
@@ -297,8 +373,12 @@ async def startup():
         logger.info(f"[Simulator] Ports from config center: RTSP={rtsp_port}, API={api_port}")
     except Exception as e:
         logger.info(f"[Simulator] Config center unavailable, using mode defaults: RTSP={rtsp_port}, API={api_port} ({e})")
+
+    # Exposed through /health so the backend can discover the simulator over
+    # HTTP when Redis is not running.
+    runtime_ports = {"rtsp_port": rtsp_port, "mediamtx_api_port": api_port}
     
-    # Startup race: a busy port likely means another service is starting mediamtx.
+    # Gracefully handle the startup race: if either port is busy, another service is most likely bringing up mediamtx
     if is_port_in_use(rtsp_port) or is_port_in_use(api_port):
         logger.info(f"[Simulator] Detected port activity on :{rtsp_port} or :{api_port}. Waiting for full readiness...")
         await asyncio.sleep(2.0)
@@ -324,16 +404,21 @@ async def startup():
         return
 
     try:
-        mediamtx_log_path = BASE_DIR / "data" / "logs" / "mediamtx.log"
+        mediamtx_log_path = LOG_DIR / "mediamtx.log"
         mediamtx_log = open(mediamtx_log_path, "a", encoding="utf-8")
         mediamtx_log.write(f"\n--- Simulator mediamtx Starting at {time.strftime('%Y-%m-%d %H:%M:%S')} (mode={fireguard_mode}) ---\n")
         mediamtx_log.flush()
         
-        mediamtx_config_path = BIN_DIR / "mediamtx.yaml"
-        mediamtx_config_content = f"""protocols: [tcp]
+        mediamtx_config_path = DATA_DIR / "mediamtx.generated.yaml"
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        mediamtx_config_content = f"""rtspTransports: [tcp]
 rtspAddress: :{rtsp_port}
 api: true
 apiAddress: :{api_port}
+rtmp: no
+hls: no
+webrtc: no
+srt: no
 paths:
   all:
     source: publisher
@@ -345,7 +430,11 @@ paths:
             cwd=str(BIN_DIR), 
             stdout=mediamtx_log, 
             stderr=mediamtx_log,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
+            # The simulator itself is a windowed binary: without CREATE_NO_WINDOW
+            # every console child (mediamtx/ffmpeg) pops up its own black window.
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            ) if os.name == 'nt' else 0
         )
         
         await asyncio.sleep(3)
@@ -370,22 +459,35 @@ paths:
     stream_manager.start_health_monitor()
 
     try:
+        _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
+    try:
         import redis as _redis
         import json as _json
-        r = _redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+        r = _redis.from_url(
+            os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+            decode_responses=True,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+        )
         payload = {
             "name": "simulator",
             "pid": os.getpid(),
             "started_at": time.time(),
             "last_heartbeat": time.time(),
             "port": 8001,
+            "control_port": 8001,
             "mode": fireguard_mode,
             "rtsp_port": rtsp_port,
             "api_port": api_port,
+            "mediamtx_api_port": api_port,
         }
         r.hset("fireguard:registry", "simulator", _json.dumps(payload))
         
-        # Claim MediaMTX ownership so the backend discovers it without a 30s wait.
+        # [IMPORTANT]: register as the MediaMTX owner so the backend can discover it directly, avoiding a 30s wait
         r.set("fireguard:mediamtx:owner", _json.dumps({
             "rtsp_port": rtsp_port,
             "api_port": api_port,
@@ -397,9 +499,18 @@ paths:
     except Exception as e:
         logger.info(f"[Simulator] Config center registration skipped: {e}")
 
+    asyncio.create_task(_watch_idle_and_exit())
+    # 启动阶段可能要等 MediaMTX 就绪，不能把这几十秒算成"无心跳空闲"，
+    # 否则打包版会在浏览器还没连上时自己退出。
+    _HEARTBEAT["last"] = time.time()
+
 
 @app.on_event("shutdown")
 async def shutdown():
+    try:
+        _PID_FILE.unlink()
+    except Exception:
+        pass
     if stream_manager:
         stream_manager.stop_health_monitor()
         stream_manager.stop_all()
@@ -409,7 +520,12 @@ async def shutdown():
     try:
         import redis as _redis
         import json as _json
-        r = _redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+        r = _redis.from_url(
+            os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+            decode_responses=True,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+        )
         r.hdel("fireguard:registry", "simulator")
 
         owner_data = r.get("fireguard:mediamtx:owner")
@@ -461,7 +577,11 @@ class StreamInfo(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
-    return FileResponse(BASE_DIR / "dashboard.html")
+    # 页面文本会随版本更新；禁用浏览器启发式缓存，普通刷新即可拿到新内容。
+    return FileResponse(
+        BASE_DIR / "dashboard.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
 
 
 @app.get("/presets")
@@ -483,19 +603,112 @@ def get_hw_encoders_status():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "app": "Stream Simulator"}
+    return {
+        "status": "ok",
+        "app": "Stream Simulator",
+        "rtsp_port": runtime_ports.get("rtsp_port", 8555),
+        "mediamtx_api_port": runtime_ports.get("mediamtx_api_port", 9996),
+    }
+
+
+# 1x1 transparent PNG used by the startup splash (CORS-free <img> probe).
+_HEALTH_PIXEL = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\x00\x01"
+    b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+@app.get("/health/pixel")
+def health_pixel():
+    return Response(content=_HEALTH_PIXEL, media_type="image/png")
+
+
+@app.post("/heartbeat")
+def heartbeat(request: Request, leaving: int = 0, hidden: int = 0):
+    """页面心跳：关闭页面时前端用 sendBeacon 上报 leaving=1。
+
+    记录来源与 hidden 状态：排查"页面明明关了却还有心跳"时，日志能直接看出
+    是哪个客户端、页面是否被切到后台。第一次出现新客户端或每 5 分钟记一条，
+    避免每 15 秒刷屏。
+    """
+    now = time.time()
+    client = request.client.host if request.client else "?"
+    ua = request.headers.get("user-agent", "")
+    prev = _HEARTBEAT.get("client")
+    _HEARTBEAT["last"] = now
+    _HEARTBEAT["leaving"] = now if leaving == 1 else None
+    _HEARTBEAT["client"] = f"{client} hidden={hidden} ua={ua[:70]}"
+    if prev != _HEARTBEAT["client"] or (now - _HEARTBEAT.get("logged_at", 0)) > 300:
+        logger.info(f"[Simulator] 心跳来自 {_HEARTBEAT['client']}")
+        _HEARTBEAT["logged_at"] = now
+    return {
+        "ok": True,
+        "keep_alive": _KEEP_ALIVE,
+        "idle_timeout_secs": _IDLE_TIMEOUT,
+        "streams": len(stream_manager.get_active_streams()) if stream_manager else 0,
+    }
+
+
+@app.post("/shutdown")
+async def shutdown_simulator(request: Request):
+    """页面上的"退出模拟器"按钮：停推流、停 MediaMTX 并退出进程。
+
+    只允许本机调用。心跳在某些关闭方式下不会触发 sendBeacon，靠 120 秒
+    空闲超时退太慢，这个接口给用户一个确定能关掉的方式。
+    """
+    client = request.client.host if request.client else ""
+    if client not in ("127.0.0.1", "::1"):
+        raise HTTPException(status_code=403, detail="only local access allowed")
+    logger.info(f"[Simulator] 收到退出请求（{client}），正在停止")
+    asyncio.create_task(_deferred_exit())
+    return {"ok": True}
+
+
+async def _deferred_exit():
+    """先让 HTTP 响应写回去，再执行退出，避免前端拿到连接重置。"""
+    await asyncio.sleep(0.4)
+    await _exit_process(0)
 
 
 @app.post("/videos/upload")
-async def upload_video(file: UploadFile = File(...), device_name: str = Form("Unnamed Device")):
+async def upload_video(file: UploadFile = File(...), device_name: str = Form("")):
+    name = device_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="请填写设备名称后再上传")
     file_id = str(uuid.uuid4())
     ext = Path(file.filename).suffix
     save_path = UPLOADS_DIR / f"{file_id}{ext}"
-    with save_path.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # 分块写盘 + 上限校验：异常/超大文件不会留下半个 .mp4 占用空间。
+    part_path = UPLOADS_DIR / f"{file_id}{ext}.part"
+    total = 0
+    try:
+        with part_path.open("wb") as buffer:
+            while True:
+                chunk = await asyncio.to_thread(file.file.read, 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"单个文件不能超过 {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB",
+                    )
+                buffer.write(chunk)
+        os.replace(part_path, save_path)
+    except Exception:
+        try:
+            part_path.unlink()
+        except Exception:
+            pass
+        try:
+            save_path.unlink()
+        except Exception:
+            pass
+        raise
     probe_data = probe_video(str(save_path))
     meta = get_metadata()
-    meta[file_id] = {"name": device_name, **probe_data}
+    meta[file_id] = {"name": name, **probe_data}
     save_metadata(meta)
     return {"file_id": file_id, "metadata": probe_data}
 
@@ -538,6 +751,11 @@ def delete_video(file_id: str):
 def start_stream_endpoint(req: StreamStartRequest):
     video_file = next((f for f in UPLOADS_DIR.iterdir() if f.stem == req.file_id), None)
     if not video_file: raise HTTPException(status_code=404)
+    if stream_manager and len(stream_manager.get_active_streams()) >= _MAX_STREAMS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"同时推流已达上限（{_MAX_STREAMS}），请先停止其他推流",
+        )
     stream_id = str(uuid.uuid4())[:8]
     try:
         rtsp_url = stream_manager.start_stream(

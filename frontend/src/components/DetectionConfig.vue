@@ -1,6 +1,6 @@
 <template>
   <a-modal 
-    title="Detection Config"
+    title="检测配置"
     :open="true"
     @cancel="$emit('close')"
     width="720px"
@@ -10,19 +10,19 @@
     <div class="config-content">
       <div class="config-section">
         <div class="section-header">
-          <span class="section-title">Category Selection &amp; Thresholds</span>
+          <span class="section-title">类别选择与阈值配置</span>
           <a-checkbox 
             v-model:checked="selectAll" 
             @change="handleSelectAll"
             class="select-all-checkbox"
           >
-            Select all
+            全选
           </a-checkbox>
         </div>
         
         <a-input-search
           v-model:value="searchText"
-          placeholder="Search categories..."
+          placeholder="搜索类别..."
           size="small"
           class="category-search"
           allow-clear
@@ -42,7 +42,7 @@
             </a-checkbox>
             
             <div class="threshold-input">
-              <span class="threshold-label">Threshold:</span>
+              <span class="threshold-label">阈值:</span>
               <a-input-number 
                 v-model:value="cat.threshold" 
                 :min="CONF_FLOOR" 
@@ -60,15 +60,15 @@
         <div class="config-explanation">
           <InfoCircleOutlined class="info-icon" />
           <div class="explanation-text">
-            <p><strong>Global threshold:</strong> the default threshold applied to all selected categories. Range 0.25–1.00 (0.40–0.80 recommended).</p>
-            <p><strong>Category threshold:</strong> an independent threshold for a specific category, which takes priority over the global threshold. Leave empty to use the global threshold.</p>
-            <p><strong>Category selection:</strong> unselected categories are ignored during detection.</p>
-            <p class="floor-hint"><WarningOutlined /> The built-in inference floor is {{ CONF_FLOOR }}. Setting a lower value has no additional effect.</p>
+            <p><strong>公共阈值:</strong> 对所有选中类别生效的默认阈值。范围 0.25–1.00（推荐 0.40–0.80）。</p>
+            <p><strong>类别阈值:</strong> 针对特定类别的独立阈值，优先级高于公共阈值。留空则使用公共阈值。</p>
+            <p><strong>类别选择:</strong> 未选中的类别在检测时将被忽略。</p>
+            <p class="floor-hint"><WarningOutlined /> 系统推理最低门限为 {{ CONF_FLOOR }}，设置低于该值时没有额外效果。</p>
           </div>
         </div>
         
         <div class="global-threshold">
-          <span class="threshold-label">Global threshold:</span>
+          <span class="threshold-label">公共阈值:</span>
           <a-input-number 
             v-model:value="globalThreshold" 
             :min="CONF_FLOOR" 
@@ -79,14 +79,45 @@
             :placeholder="`≥ ${CONF_FLOOR}`"
           />
 
-          <span class="floor-badge">Floor {{ CONF_FLOOR }}</span>
+          <span class="floor-badge">最低门限 {{ CONF_FLOOR }}</span>
+        </div>
+      </div>
+
+      <div class="config-section">
+        <div class="section-header">
+          <span class="section-title">数据保留策略</span>
+        </div>
+        <div class="retention-row">
+          <span class="threshold-label">检测记录保留:</span>
+          <a-select v-model:value="recordRetentionDays" size="small" style="width: 170px">
+            <a-select-option :value="7">7 天</a-select-option>
+            <a-select-option :value="30">30 天（推荐）</a-select-option>
+            <a-select-option :value="90">90 天</a-select-option>
+            <a-select-option :value="180">180 天</a-select-option>
+            <a-select-option :value="365">365 天</a-select-option>
+          </a-select>
+        </div>
+        <div v-if="taskType === 'stream'" class="retention-row">
+          <span class="threshold-label">录像保留:</span>
+          <a-select v-model:value="videoRetentionHours" size="small" style="width: 170px">
+            <a-select-option :value="6">6 小时</a-select-option>
+            <a-select-option :value="12">12 小时（推荐）</a-select-option>
+            <a-select-option :value="24">24 小时</a-select-option>
+            <a-select-option :value="72">72 小时</a-select-option>
+          </a-select>
+        </div>
+        <div class="config-explanation">
+          <InfoCircleOutlined class="info-icon" />
+          <div class="explanation-text">
+            <p>超过保留期的检测记录与录像分片会由后台保洁自动删除，默认 30 天 / 12 小时。</p>
+          </div>
         </div>
       </div>
     </div>
 
     <template #footer>
-      <a-button @click="$emit('close')">Cancel</a-button>
-      <a-button type="primary" :loading="submitting" @click="submit">Save Config</a-button>
+      <a-button @click="$emit('close')">取消</a-button>
+      <a-button type="primary" :loading="submitting" @click="submit">保存配置</a-button>
     </template>
   </a-modal>
 </template>
@@ -98,7 +129,8 @@ import { modelsApi } from '@/api/models'
 import { message } from 'ant-design-vue'
 import { InfoCircleOutlined, WarningOutlined } from '@ant-design/icons-vue'
 
-// Must match the backend ONNX NMS confidence; lower values are discarded there.
+// 系统推理最低门限（与后端 ONNX NMS conf 保持一致）
+// 用户设置低于该値时，后端在 NMS 阶段已丢弃这些候选框，设置无效果
 const CONF_FLOOR = 0.25
 
 const props = defineProps<{
@@ -106,6 +138,8 @@ const props = defineProps<{
   modelId: string
   initialCategories?: Array<{ id: string; name: string; selected: boolean; threshold: number | null }>
   initialGlobalThreshold?: number
+  initialRecordRetentionDays?: number
+  initialVideoRetentionHours?: number
 }>()
 
 const emit = defineEmits(['close', 'success'])
@@ -122,6 +156,10 @@ const globalThreshold = ref<number>(0.4)
 const selectAll = ref(true)
 const submitting = ref(false)
 const searchText = ref('')
+const taskType = ref('')
+const existingConfig = ref<any>(null)
+const recordRetentionDays = ref(30)
+const videoRetentionHours = ref(12)
 
 const filteredCategories = computed(() => {
   if (!searchText.value.trim()) return categories.value
@@ -142,8 +180,8 @@ onMounted(async () => {
     }
     
     if (classList.length === 0) {
-      message.warning('This model has no category configuration — using defaults')
-      classList = [{ id: 'default', name: 'Default Category' }]
+      message.warning('该模型未配置类别信息，将使用默认设置')
+      classList = [{ id: 'default', name: '默认类别' }]
     }
     
     let existingConfig: any = null
@@ -152,6 +190,7 @@ onMounted(async () => {
       try {
         const task = await tasksApi.get(props.taskId)
         existingConfig = task.detection_config
+        taskType.value = task.task_type || ''
       } catch (e) {
         console.warn('Failed to load task config, using defaults')
       }
@@ -160,6 +199,17 @@ onMounted(async () => {
         global_threshold: props.initialGlobalThreshold,
         categories: props.initialCategories
       }
+    }
+    existingConfig.value = existingConfig
+    if (existingConfig?.record_retention_days != null) {
+      recordRetentionDays.value = Number(existingConfig.record_retention_days) || 30
+    } else if (props.initialRecordRetentionDays != null) {
+      recordRetentionDays.value = props.initialRecordRetentionDays
+    }
+    if (existingConfig?.video_retention_hours != null) {
+      videoRetentionHours.value = Number(existingConfig.video_retention_hours) || 12
+    } else if (props.initialVideoRetentionHours != null) {
+      videoRetentionHours.value = props.initialVideoRetentionHours
     }
     
     categories.value = classList.map((cat: any) => {
@@ -182,7 +232,7 @@ onMounted(async () => {
       }
     })
     
-    // 0.4 default gives better recall
+    // V1.4.7: Smart Defaulting - Use 0.4 as default for better recall
     if (existingConfig?.global_threshold !== undefined && existingConfig.global_threshold !== null) {
       globalThreshold.value = existingConfig.global_threshold
     } else if (props.initialGlobalThreshold !== undefined) {
@@ -196,7 +246,7 @@ onMounted(async () => {
 
   } catch (e) {
     console.error('Failed to load config:', e)
-    message.error('Failed to load config')
+    message.error('加载配置失败')
   }
 })
 
@@ -222,13 +272,16 @@ async function submit() {
   submitting.value = true
   try {
     const config = {
+      ...(existingConfig.value || {}),
       global_threshold: globalThreshold.value,
       categories: categories.value.map(cat => ({
         id: cat.id,
         name: cat.name,
         selected: cat.selected,
         threshold: cat.selected ? cat.threshold : null
-      }))
+      })),
+      record_retention_days: recordRetentionDays.value,
+      video_retention_hours: videoRetentionHours.value
     }
     
     if (props.taskId) {
@@ -237,14 +290,16 @@ async function submit() {
       })
     }
     
-    message.success('Config saved')
+    message.success('配置保存成功')
     emit('success', {
       categories: categories.value,
-      globalThreshold: globalThreshold.value
+      globalThreshold: globalThreshold.value,
+      recordRetentionDays: recordRetentionDays.value,
+      videoRetentionHours: videoRetentionHours.value
     })
   } catch (e) {
     console.error('Failed to save detection config:', e)
-    message.error('Failed to save config')
+    message.error('配置保存失败')
   } finally {
     submitting.value = false
   }
@@ -380,5 +435,12 @@ async function submit() {
   background: var(--bg-input);
   border-radius: 6px;
   border: 1px solid var(--border-color);
+}
+
+.retention-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 </style>

@@ -6,12 +6,14 @@ from app.services.detector import get_detector, Detector, Detection
 @pytest.fixture
 def mock_onnx_session():
     with patch("onnxruntime.InferenceSession") as mock_session:
+        # Mock session behavior
         session_instance = mock_session.return_value
         session_instance.get_modelmeta.return_value.custom_metadata_map = {"names": '{"0": "person", "1": "car"}'}
         session_instance.get_inputs.return_value = [MagicMock(name="input")]
         session_instance.get_outputs.return_value = [MagicMock(name="output")]
         
-        # Output row: [x1, y1, x2, y2, conf, cls]
+        # Mock run output: [x1, y1, x2, y2, conf, cls] 
+        # Row: [10, 10, 100, 100, 0.9, 0] (Class 0: person)
         session_instance.run.return_value = [np.array([[[10, 10, 100, 100, 0.9, 0]]], dtype=np.float32)]
         yield session_instance
 
@@ -28,14 +30,17 @@ def test_label_mapping_isolation(mock_onnx_session):
     
     img = np.zeros((640, 640, 3), dtype=np.uint8)
     
+    # Test case 1: Custom mapping A
     map_a = {0: "Fire"}
     dets_a = detector.detect(img, label_mapping=map_a)
     assert dets_a[0].class_name == "Fire"
     
+    # Test case 2: Custom mapping B
     map_b = {0: "Smoke"}
     dets_b = detector.detect(img, label_mapping=map_b)
     assert dets_b[0].class_name == "Smoke"
     
+    # Test case 3: Fallback to model metadata
     dets_none = detector.detect(img, label_mapping=None)
     assert dets_none[0].class_name == "person"
 
@@ -58,7 +63,8 @@ def test_rt_detr_variant_mapping(mock_onnx_session):
     detector.session = mock_onnx_session
     detector.class_names = ["person"]
     
-    # RT-DETR outputs: pred_boxes [1, N, 4], pred_scores [1, N, 3]
+    # RT-DETR expected outputs: pred_boxes, pred_scores
+    # pred_boxes: [1, N, 4], pred_scores: [1, N, 3] (3 classes as per current impl)
     boxes = np.zeros((1, 1, 4), dtype=np.float32)
     boxes[0, 0] = [0.5, 0.5, 0.2, 0.2] # cx, cy, w, h
     scores = np.zeros((1, 1, 3), dtype=np.float32)
@@ -82,13 +88,13 @@ def test_videostream_mapping_propagation():
     assert vs.label_mapping == mapping
 
 def test_metadata_extraction():
-    """Verify that the detector extracts labels from common metadata formats."""
+    """Verify that detector correctly extract labels from various metadata formats."""
     with patch("onnxruntime.InferenceSession") as mock_session:
         session_instance = mock_session.return_value
         session_instance.get_inputs.return_value = [MagicMock(name="input")]
         session_instance.get_outputs.return_value = [MagicMock(name="output")]
         
-        # YOLO dict format
+        # Scenario 1: Dictionary names (YOLO format)
         session_instance.get_modelmeta.return_value.custom_metadata_map = {
             "names": '{"0": "smoke", "1": "fire"}'
         }
@@ -96,7 +102,7 @@ def test_metadata_extraction():
         assert det1.metadata_label_map == {"0": "smoke", "1": "fire"}
         assert det1.class_names == ["smoke", "fire"]
         
-        # List format
+        # Scenario 2: List format
         session_instance.get_modelmeta.return_value.custom_metadata_map = {
             "classes": '["cat", "dog"]'
         }
@@ -104,10 +110,10 @@ def test_metadata_extraction():
         assert det2.metadata_label_map == {"0": "cat", "1": "dog"}
         assert det2.class_names == ["cat", "dog"]
 
-        # String keys, unordered
+        # Scenario 3: Mixed numbering/Unordered dict (should be sorted by int keys)
         session_instance.get_modelmeta.return_value.custom_metadata_map = {
             "names": '{"10": "last", "0": "first"}'
         }
         det3 = Detector("test3.onnx")
         assert det3.metadata_label_map == {"10": "last", "0": "first"}
-        assert det3.class_names == ["first", "last"]
+        assert det3.class_names == ["first", "last"] # Correctly sorted

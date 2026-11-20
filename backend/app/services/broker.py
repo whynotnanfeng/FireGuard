@@ -12,30 +12,30 @@ from app.config import config
 logger = logging.getLogger(__name__)
 
 class BaseBroker:
-    """Message bus interface: sync publish, async subscribe, status snapshots and cache."""
+    """Message bus interface: supports synchronous publish, async subscribe, status snapshots and cache management."""
 
     def publish_sync(self, channel: str, message: dict):
-        """Publish synchronously (thread-safe)."""
+        """Publish a message to the given channel synchronously (thread-safe)."""
         raise NotImplementedError
 
     async def subscribe(self, channel: str) -> Any:
-        """Subscribe; returns an asyncio.Queue."""
+        """Subscribe to a channel asynchronously, returning an asyncio.Queue."""
         raise NotImplementedError
 
     async def unsubscribe(self, channel: str, subscriber: Any):
-        """Release a subscriber."""
+        """Unsubscribe and release resources."""
         raise NotImplementedError
 
     async def get_recent_cache(self, channel: str, limit: int = 150) -> List[dict]:
-        """Return the most recent cached messages of a channel."""
+        """Get the N most recent cached messages of a channel."""
         raise NotImplementedError
 
     def set_status(self, task_id: str, status_payload: dict):
-        """Set the task status snapshot."""
+        """Set the task status snapshot (for WebSocket polling)."""
         raise NotImplementedError
 
     def get_status(self, task_id: str) -> Optional[dict]:
-        """Return the latest status snapshot."""
+        """Get the latest status snapshot of a task."""
         raise NotImplementedError
 
     def clear_status(self, task_id: str):
@@ -45,7 +45,7 @@ class BaseBroker:
         """Clear the channel message cache."""
 
     async def connect(self):
-        """Establish the connection."""
+        """Establish the connection (creates a connection pool in Redis mode)."""
 
     async def disconnect(self):
         """Disconnect and release resources."""
@@ -122,11 +122,17 @@ class InMemoryBroker(BaseBroker):
 
 
 class HybridBroker(BaseBroker):
-    """Redis-backed bus with local fallback.
+    """
+    Hybrid message bus: prefers Redis and automatically degrades to in-memory dispatch
+    when Redis is unavailable.
 
-    publish_sync always delivers to in-process subscribers and then writes to Redis,
-    so WebSocket clients keep receiving when Redis is down. Cross-process delivery
-    relies on Redis; single-host deployments do not need it.
+    Core design:
+    - publish_sync: always writes to the in-memory cache and dispatches to local subscribers
+      first, then attempts to write to Redis
+    - Local dispatch keeps working even if Redis is unavailable
+    - _listen_loop: runs only when Redis is available; responsible for cross-process /
+      cross-machine message dispatch
+    - For single-machine deployments (our scenario), _listen_loop is not required
     """
 
     def __init__(self, redis_url: str):
@@ -139,6 +145,7 @@ class HybridBroker(BaseBroker):
         self._redis_last_fail_time = 0.0
         self._REDIS_RETRY_INTERVAL = 10.0
         self._shutting_down = False
+        self._redis_disabled = False
 
         self._subscribers = defaultdict(list)
         self._cache = defaultdict(lambda: deque(maxlen=1000))
@@ -153,7 +160,7 @@ class HybridBroker(BaseBroker):
         self._loop = loop
 
     async def connect(self):
-        if self._shutting_down:
+        if self._shutting_down or self._redis_disabled:
             return
         async with self._redis_lock:
             if self._async_redis:
@@ -204,8 +211,24 @@ class HybridBroker(BaseBroker):
         self._async_redis = None
         self._sync_redis = None
 
+    def disable_redis(self, reason: str = "") -> None:
+        """Stay in in-memory mode without retrying Redis.
+
+        Called when no bundled Redis exists and none is running: a single-node
+        install is complete without it, and repeated connection attempts only
+        produce noisy warnings.
+        """
+        self._redis_disabled = True
+        self._redis_available = False
+        logger.info(
+            f"[HybridBroker] In-memory mode{': ' + reason if reason else ''}. "
+            "Single-node installs do not require Redis."
+        )
+
     async def _health_monitor(self):
-        """Ping Redis and update availability state; reconnects when it comes back."""
+        """Redis health monitoring: periodic ping checks the connection state and automatically flags availability"""
+        if self._redis_disabled:
+            return
         while not self._shutting_down:
             try:
                 await asyncio.sleep(5.0)
@@ -248,9 +271,8 @@ class HybridBroker(BaseBroker):
 
     def publish_sync(self, channel: str, message: dict):
         """
-        Dispatch locally first, then attempt Redis persistence.
-
-        Local subscribers receive messages even when Redis is unavailable.
+        Core method: always performs local in-memory dispatch first, then tries Redis persistence.
+        Even if Redis is completely unavailable, local WebSocket clients still receive messages.
         """
         with self._lock:
             self._cache[channel].append(message)
@@ -394,7 +416,7 @@ class HybridBroker(BaseBroker):
                 pass
 
 
-# Factory
+# ── Factory ───────────────────────────────────────────────────────────────────
 
 if config.REDIS_URL:
     logger.info(f"[Broker] Using HybridBroker (Redis + InMemory fallback) -> {config.REDIS_URL}")

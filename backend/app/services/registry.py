@@ -15,34 +15,58 @@ DEFAULT_CONFIG = {
     "mediamtx_api_port": 9997,
     "mediamtx_rtsp_port": 8554,
     "backend_port": 8000,
-    "simulator_port": 8008,
+    "simulator_port": 8001,
     "redis_port": 6379,
 }
 
 
 class ServiceRegistry:
-    """Redis-backed config store and service registry.
+    """
+    Redis-based unified configuration center and service registry.
 
-    Config is a hash at fireguard:config; service records are a hash at
-    fireguard:registry keyed by service name.
+    Core capabilities:
+    1. Configuration center: all ports/addresses are read from Redis, so a single
+       change takes effect globally
+    2. Service registration: services register themselves on startup and support
+       heartbeat keep-alive
+    3. Service discovery: query registered service instances
+
+    Redis data structures:
+    - fireguard:config          Hash  global configuration items
+    - fireguard:registry        Hash  service instance registrations {name: json_info}
     """
 
     def __init__(self, redis_url: str = "redis://localhost:6379/0"):
         self._redis_url = redis_url
         self._redis = None
+        self._disabled = False
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._registered_service: Optional[str] = None
 
+    def disable(self, reason: str = "") -> None:
+        """Stop attempting Redis; configuration falls back to env/defaults."""
+        if self._disabled:
+            return
+        self._disabled = True
+        self._redis = None
+        logger.info(
+            f"[Registry] Disabled{': ' + reason if reason else ''}. "
+            "Using environment variables and defaults."
+        )
+
     def _get_redis(self):
+        if self._disabled:
+            return None
         if self._redis is None:
             try:
                 import redis
                 self._redis = redis.from_url(self._redis_url, decode_responses=True)
                 self._redis.ping()
             except Exception as e:
-                logger.warning(f"[Registry] Redis connection failed: {e}")
+                logger.info(f"[Registry] Redis unavailable, using defaults: {e}")
                 self._redis = None
+                self._disabled = True
         return self._redis
 
     def _ensure_config(self):
@@ -107,19 +131,34 @@ class ServiceRegistry:
     def get_mediamtx_rtsp_port(self) -> int:
         return self.get_config("mediamtx_rtsp_port", 8554)
 
-    def get_simulator_api_port(self) -> int:
-        """Return the API port reported by the running simulator."""
-        info = self.get_service("simulator")
-        if info:
-            return info.get("api_port", 9997)
-        return 9997
+    def get_simulator_api_port(self) -> Optional[int]:
+        """MediaMTX control API port exposed by the simulator.
 
-    def get_simulator_rtsp_port(self) -> int:
-        """Return the RTSP port reported by the running simulator."""
+        Redis is optional in a single-node install, so fall back to an HTTP
+        probe. Returns ``None`` when no simulator is running, so the backend
+        keeps its own default port instead of assuming the development port.
+        """
         info = self.get_service("simulator")
         if info:
-            return info.get("rtsp_port", 8554)
-        return 8554
+            return info.get("api_port", 9996)
+        from app.services.service_probe import probe_simulator
+
+        probed = probe_simulator(timeout=0.35)
+        if probed:
+            return probed["mediamtx_api_port"]
+        return None
+
+    def get_simulator_rtsp_port(self) -> Optional[int]:
+        """RTSP port exposed by the simulator, or None when not running."""
+        info = self.get_service("simulator")
+        if info:
+            return info.get("rtsp_port", 8555)
+        from app.services.service_probe import probe_simulator
+
+        probed = probe_simulator(timeout=0.35)
+        if probed:
+            return probed["rtsp_port"]
+        return None
 
     def register_service(self, name: str, info: Optional[Dict] = None):
         r = self._get_redis()
@@ -217,7 +256,7 @@ class ServiceRegistry:
                 pass
 
     def register_mediamtx_owner(self, rtsp_port: int, api_port: int, pid: int):
-        """Record the PID that started MediaMTX, so stale instances can be identified."""
+        """Register MediaMTX owner information"""
         r = self._get_redis()
         if r is None:
             logger.warning("[Registry] Cannot register MediaMTX owner: Redis unavailable")
@@ -237,7 +276,7 @@ class ServiceRegistry:
             return False
 
     def get_mediamtx_owner(self) -> Optional[Dict]:
-        """Return the MediaMTX owner record, if any."""
+        """Get MediaMTX owner information"""
         r = self._get_redis()
         if r is None:
             return None
@@ -247,21 +286,20 @@ class ServiceRegistry:
         except Exception:
             return None
 
-    def is_mediamtx_owned_by(self, pid: int) -> bool:
-        """True if MediaMTX was started by the given PID."""
-        owner = self.get_mediamtx_owner()
-        if owner is None:
-            return False
-        return owner.get("pid") == pid
-
     def apply_mode_overrides(self, mode: str):
-        if mode == "production":
-            self.set_config("mediamtx_api_port", 9997)
-            self.set_config("mediamtx_rtsp_port", 8554)
-        else:
-            # Development uses the simulator defaults (api=9996, rtsp=8555).
+        """Publish default ports.
+
+        Development only borrows the simulator's MediaMTX when simulator
+        discovery is enabled; otherwise every mode uses the backend's own ports.
+        """
+        from app.config import config
+
+        if mode == "development" and config.SIMULATOR_DISCOVERY:
             self.set_config("mediamtx_api_port", 9996)
             self.set_config("mediamtx_rtsp_port", 8555)
+        else:
+            self.set_config("mediamtx_api_port", 9997)
+            self.set_config("mediamtx_rtsp_port", 8554)
 
     def close(self):
         self._stop_event.set()

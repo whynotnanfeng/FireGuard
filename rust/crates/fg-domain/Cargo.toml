@@ -1,0 +1,10 @@
+[package]
+name = "fg-domain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "FireGuard 纯领域类型与规则（无框架、无 IO）"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }

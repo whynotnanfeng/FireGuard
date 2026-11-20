@@ -2,49 +2,49 @@
   <div class="task-list-page fade-in">
     <div class="toolbar">
       <div class="toolbar-left">
-        <span class="filter-label">Task Name</span>
+        <span class="filter-label">任务名称</span>
         <a-input-search
           v-model:value="filters.search"
-          placeholder="Search..."
+          placeholder="搜索..."
           class="filter-item search-input"
           allow-clear
           @search="applyFilters"
           @change="onSearchChange"
         />
         
-        <span class="filter-label">Type</span>
+        <span class="filter-label">类型</span>
         <a-select 
           v-model:value="filters.task_type" 
-          placeholder="All" 
+          placeholder="全部" 
           allow-clear 
           class="filter-item"
           @change="applyFilters" 
         >
-          <a-select-option value="image">Image</a-select-option>
-          <a-select-option value="video">Video</a-select-option>
-          <a-select-option value="stream">Stream</a-select-option>
+          <a-select-option value="image">图片</a-select-option>
+          <a-select-option value="video">视频</a-select-option>
+          <a-select-option value="stream">流媒体</a-select-option>
         </a-select>
         
-        <span class="filter-label">Status</span>
+        <span class="filter-label">状态</span>
         <a-select 
           v-model:value="filters.status" 
-          placeholder="All" 
+          placeholder="全部" 
           allow-clear 
           class="filter-item"
           @change="applyFilters" 
         >
-          <a-select-option value="creating">Creating</a-select-option>
-          <a-select-option value="pending">Pending</a-select-option>
-          <a-select-option value="queued">Queued</a-select-option>
-          <a-select-option value="initializing">Initializing</a-select-option>
-          <a-select-option value="running">Running</a-select-option>
-          <a-select-option value="completed">Completed</a-select-option>
-          <a-select-option value="failed">Failed</a-select-option>
+          <a-select-option value="creating">创建中</a-select-option>
+          <a-select-option value="pending">待执行</a-select-option>
+          <a-select-option value="queued">排队中</a-select-option>
+          <a-select-option value="initializing">初始化中</a-select-option>
+          <a-select-option value="running">执行中</a-select-option>
+          <a-select-option value="completed">已完成</a-select-option>
+          <a-select-option value="failed">失败</a-select-option>
         </a-select>
 
         <a-button class="filter-item reset-btn" @click="resetFilters">
            <template #icon><ReloadOutlined /></template>
-           Reset
+           重置
         </a-button>
 
         <a-button 
@@ -56,21 +56,21 @@
             <DownOutlined v-if="!filtersExpanded" />
             <UpOutlined v-else />
           </template>
-          {{ filtersExpanded ? 'Collapse' : 'More Filters' }}
+          {{ filtersExpanded ? '收起' : '更多筛选' }}
         </a-button>
       </div>
       
       <a-button type="primary" @click="showCreate = true">
          <template #icon><PlusOutlined /></template>
-         New Task
+         新建任务
       </a-button>
     </div>
 
     <div v-show="filtersExpanded" class="advanced-filters">
-      <span class="filter-label">Model</span>
+      <span class="filter-label">模型</span>
       <a-select 
         v-model:value="filters.model_id" 
-        placeholder="All" 
+        placeholder="全部" 
         allow-clear 
         class="filter-item"
         @change="applyFilters" 
@@ -80,16 +80,16 @@
         </a-select-option>
       </a-select>
 
-      <span class="filter-label">Description</span>
+      <span class="filter-label">描述</span>
       <a-input
         v-model:value="filters.description"
-        placeholder="Keyword..."
+        placeholder="关键词..."
         class="filter-item desc-input"
         allow-clear
         @change="applyFilters"
       />
 
-      <span class="filter-label">Created At</span>
+      <span class="filter-label">创建时间</span>
       <a-range-picker
         v-model:value="filters.dateRange"
         class="filter-item date-picker"
@@ -105,6 +105,7 @@
          :pagination="false"
          rowKey="id"
          class="task-table"
+         :scroll="{ x: 860 }"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
@@ -144,28 +145,28 @@
                  type="link"
                  :disabled="!canView(record)"
                  @click="handleViewResult(record)"
-              >View</a-button>
+              >查看</a-button>
 
               <a-button 
                  type="link" 
                  :disabled="!canExecute(record)"
                  @click="handleExecute(record)"
-              >Execute</a-button>
-              
+              >执行</a-button>
+
               <a-button 
                  type="link"
-                 :disabled="!['running', 'initializing'].includes(record.status) || record.task_type !== 'stream'"
+                 :disabled="!['queued', 'initializing', 'running'].includes(record.status)"
                  @click="handleStop(record)"
-              >Stop</a-button>
+              >停止</a-button>
 
               <a-button 
                  type="link"
                  :disabled="record.status !== 'pending'"
                  @click="handleConfig(record)"
-              >Configure</a-button>
+              >配置</a-button>
               
-              <a-popconfirm title="Delete this task?" @confirm="handleDelete(record.id)">
-                 <a-button type="link" danger>Delete</a-button>
+              <a-popconfirm title="确定删除该任务吗？" @confirm="handleDelete(record.id)">
+                 <a-button type="link" danger>删除</a-button>
               </a-popconfirm>
             </a-space>
           </template>
@@ -174,7 +175,7 @@
 
       <div class="pagination-wrap" v-if="taskStore.total > 0">
         <span class="pagination-info">
-          Page {{ page }} of {{ totalPages }}, {{ taskStore.total }} total
+          第 {{ page }}/{{ totalPages }} 页，共 {{ taskStore.total }} 条
         </span>
         <a-select 
           v-model:value="pageSize" 
@@ -182,10 +183,10 @@
           @change="onPageSizeChange" 
           class="page-size-select"
         >
-          <a-select-option :value="10">10 / page</a-select-option>
-          <a-select-option :value="20">20 / page</a-select-option>
-          <a-select-option :value="50">50 / page</a-select-option>
-          <a-select-option :value="100">100 / page</a-select-option>
+          <a-select-option :value="10">10 条/页</a-select-option>
+          <a-select-option :value="20">20 条/页</a-select-option>
+          <a-select-option :value="50">50 条/页</a-select-option>
+          <a-select-option :value="100">100 条/页</a-select-option>
         </a-select>
         <CustomPagination
           v-model:current="page"
@@ -196,6 +197,7 @@
       </div>
     </div>
 
+    <!-- Modals -->
     <TaskCreate v-if="showCreate" @close="showCreate = false" @success="handleCreateSuccess" />
     <DetectionConfig 
        v-if="showConfig" 
@@ -234,6 +236,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from
 import { useTaskStore } from '@/stores/task'
 import { useAuthStore } from '@/stores/auth'
 import { tasksApi } from '@/api/tasks'
+import { authApi } from '@/api/auth'
 import { modelsApi } from '@/api/models'
 import TaskStatus from '@/components/TaskStatus.vue'
 import TaskCreate from './TaskCreate.vue'
@@ -273,17 +276,17 @@ watch(showResult, (val) => {
   if (!val) renderReady.value = false
 })
 
-const typeMap: any = { image: 'Image', video: 'Video', stream: 'Stream' }
+const typeMap: any = { image: '图片', video: '视频', stream: '流媒体' }
 
 
 const columns = [
-  { title: 'Task Name', dataIndex: 'name', key: 'name', width: 180, ellipsis: true },
-  { title: 'Type', key: 'task_type', width: 90 },
-  { title: 'Model', dataIndex: 'model_name', key: 'model_name', width: 240, ellipsis: true },
-  { title: 'Description', dataIndex: 'description', key: 'description', width: 150, ellipsis: true },
-  { title: 'Status', key: 'status', width: 100 },
-  { title: 'Created At', key: 'created_at', width: 170 },
-  { title: 'Actions', key: 'action', width: 240, fixed: 'right' }
+  { title: '任务名称', dataIndex: 'name', key: 'name', width: 180, ellipsis: true },
+  { title: '类型', key: 'task_type', width: 90 },
+  { title: '模型', dataIndex: 'model_name', key: 'model_name', width: 240, ellipsis: true },
+  { title: '描述', dataIndex: 'description', key: 'description', width: 150, ellipsis: true },
+  { title: '状态', key: 'status', width: 100 },
+  { title: '创建时间', key: 'created_at', width: 170 },
+  { title: '操作', key: 'action', width: 300, fixed: 'right' }
 ]
 
 function formatDate(ds: string) {
@@ -388,12 +391,20 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
 })
 
-function startNotifications() {
+async function startNotifications() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
+    const host = window.location.host // 自动包含端口
     const token = authStore.token
     if (!token) return
-    const url = `${protocol}//${host}/ws/notifications?token=${token}`
+    // 长期 JWT 不进 URL：先换 60 秒票据，再建立握手。
+    let ticket = ''
+    try {
+        ticket = (await authApi.wsTicket()).ticket
+    } catch {
+        setTimeout(() => { if (!notificationWs) startNotifications() }, 5000)
+        return
+    }
+    const url = `${protocol}//${host}/ws/notifications?ticket=${encodeURIComponent(ticket)}`
     notificationWs = new WebSocket(url)
     
     let lastNotificationTime = 0
@@ -448,7 +459,7 @@ async function handleExecute(row: any) {
   const oldStatus = row.status
   try {
     await tasksApi.execute(row.id)
-    message.success('Task started, connecting to the video source...')
+    message.success('任务已启动，正在连接视频源...')
     loadData()
   } catch(e) {
     row.status = oldStatus
@@ -457,18 +468,18 @@ async function handleExecute(row: any) {
 
 async function handleStop(record: any) {
     try {
-        await tasksApi.pause(record.id)
-        message.success('Task stopped')
+        await tasksApi.stop(record.id)
+        message.success(record.task_type === 'stream' ? '任务已停止，历史和记录保留' : '任务已停止，本次运行产物已清理')
         loadData()
     } catch (e) {
-        message.error('Failed to stop the task')
+        message.error('停止任务失败')
     }
 }
 
 async function handleDelete(id: string) {
   try {
     await taskStore.deleteTask(id)
-    message.success('Deleted')
+    message.success('删除成功')
     if (taskStore.tasks.length === 0 && page.value > 1) {
        page.value--
        loadData()
@@ -513,6 +524,8 @@ function handleConfig(row: any) {
   justify-content: space-between;
   align-items: center;
   gap: 16px;
+  flex-wrap: wrap;
+  row-gap: 12px;
   background: var(--bg-card);
   padding: 12px 16px;
   border-radius: 8px;
@@ -525,6 +538,8 @@ function handleConfig(row: any) {
   gap: 16px;
   align-items: center;
   flex: 1;
+  flex-wrap: wrap;
+  row-gap: 12px;
 }
 
 .filter-label {

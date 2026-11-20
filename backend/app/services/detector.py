@@ -1,5 +1,8 @@
 """
-ONNX model wrapper for YOLOv8 and RT-DETR (RGB and RGB-IR) exports.
+Unified inference engine supporting:
+  - ONNX .onnx via onnxruntime (YOLOv8 format)
+  - RT-DETR multi-modal (RGB-IR) models
+  - Multiple output format detection (YOLOv5/v8/RT-DETR)
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import numpy as np
 
 logger = logging.getLogger("detector")
 
-# Detection result
+# ── Detection result dataclass ───────────────────────────────────────────
 
 
 @dataclass
@@ -32,20 +35,20 @@ class Detection:
         }
 
 
-# Model cache, keyed by path and device.
+# ── Model cache (avoid reloading on every task) ──────────────────────────
 
 _model_cache: Dict[str, "Detector"] = {}
 
 
 def get_detector(model_path: str, use_gpu: bool = False) -> "Detector":
-    """Return a cached Detector for this path and device."""
+    """Singleton model engine management with GPU awareness."""
     cache_key = f"{model_path}_gpu_{use_gpu}"
     if cache_key not in _model_cache:
         _model_cache[cache_key] = Detector(model_path, use_gpu=use_gpu)
     return _model_cache[cache_key]
 
 
-# Detector
+# ── Detector ─────────────────────────────────────────────────────────────
 
 
 class Detector:
@@ -64,7 +67,7 @@ class Detector:
         self._diag_counter = 0
         self._load(model_path)
 
-    # Loading
+    # ── Loading ──────────────────────────────────────────────────────────
 
     def _load(self, path: str) -> None:
         if path.endswith(".onnx"):
@@ -198,11 +201,11 @@ class Detector:
                     try:
                         val = json.loads(meta[key])
                         if isinstance(val, dict):
-                            # Store both the full mapping and the ordered list.
+                            # Store both the full mapping and the ordered list
                             self.metadata_label_map = {
                                 str(k): str(v) for k, v in val.items()
                             }
-                            # Numeric keys give a stable class order.
+                            # Sort by keys to get consistent class_names list if keys are numeric strings
                             try:
                                 sorted_keys = sorted(val.keys(), key=lambda x: int(x))
                                 self.class_names = [str(val[k]) for k in sorted_keys]
@@ -249,7 +252,7 @@ class Detector:
                         "cudnn_conv_algo_search": "HEURISTIC",
                         "do_copy_in_default_stream": True,
                     }
-                    # No CPU fallback on GPU: a silent provider switch would hide driver issues.
+                    # No fallback for GPU inference: CPUExecutionProvider is not attached as a backup
                     return [
                         ("CUDAExecutionProvider", cuda_options),
                     ]
@@ -267,7 +270,7 @@ class Detector:
             raise
         return ["CPUExecutionProvider"]
 
-    # Inference
+    # ── Inference ────────────────────────────────────────────────────────
 
     def detect(
         self,
@@ -296,17 +299,20 @@ class Detector:
         task_id: str = "",
         label_mapping: Optional[dict] = None,
     ) -> List[Detection]:
-        """Run ONNX inference and decode the outputs."""
+        """ONNX inference with diagnostic logging and preprocessing."""
         if self.is_rgbir and isinstance(image, list) and len(image) >= 2:
+            # Multi-modal RGB-IR logic
             rgb_img, ir_img = image[0], image[1]
             orig_h, orig_w = rgb_img.shape[:2]
 
+            # Preprocess both
             rgb_tensor, ratio, pad = self._preprocess_multi(rgb_img, mode="rgb")
             ir_tensor, _, _ = self._preprocess_multi(ir_img, mode="ir")
 
+            # Run inference
             input_feed = {"rgb": rgb_tensor, "ir": ir_tensor}
 
-            # Tensor stats for the first 5 frames.
+            # ---- Diagnostics: preprocessed tensor statistics (first 5 frames only) ----
             self._rgbir_preproc_diag = getattr(self, '_rgbir_preproc_diag', 0) + 1
             if self._rgbir_preproc_diag <= 5:
                 logger.info(
@@ -331,7 +337,7 @@ class Detector:
             else:
                 outputs = self.session.run(None, input_feed)
 
-            # Output stats for the first 3 frames.
+            # ---- Diagnostics: ONNX output metadata (first 3 frames only) ----
             if self._rgbir_preproc_diag <= 3:
                 out_infos = self.session.get_outputs()
                 for i, (out, meta) in enumerate(zip(outputs, out_infos)):
@@ -340,6 +346,7 @@ class Detector:
                         f"dtype={out.dtype} min={float(out.min()):.6f} max={float(out.max()):.6f} "
                         f"mean={float(out.mean()):.6f}"
                     )
+                    # Log the raw values of the first 3 queries
                     if out.ndim >= 2:
                         flat = out.reshape(-1, out.shape[-1])
                         for q in range(min(3, flat.shape[0])):
@@ -347,9 +354,10 @@ class Detector:
                                 f"[DIAG-RGBIR-OUT]   query[{q}] = {flat[q].tolist()}"
                             )
 
-            # RGBIR RT-DETR outputs: boxes(300,4), scores(300,nc), ious(300,1).
-            # The export applies sigmoid and drops background, so scores are already probabilities.
-            # Identify outputs by name: box and score tensors can share a last-dim size.
+            # RT-DETR variant post-processing
+            # Model has 3 outputs: pred_logits(300,4), pred_boxes(300,4), pred_ious(300,1)
+            # ONNX export applies sigmoid+drop_background → pred_scores(300,3)
+            # Identify by output NAME, not shape (pred_boxes and pred_scores both have dim=4 or 3)
             out_names = [out.name for out in self.session.get_outputs()]
             pred_boxes, pred_scores, pred_ious = None, None, None
             for out, name in zip(outputs, out_names):
@@ -388,6 +396,7 @@ class Detector:
                 )
                 return []
 
+        # Standard single-input logic
         if isinstance(image, list):
             image = image[0]
         orig_h, orig_w = image.shape[:2]
@@ -445,11 +454,13 @@ class Detector:
                         f"[Detector-Diag] Sample first row: {sample.tolist()[:10]}"
                     )
 
+        # Determine effective primary output
         primary_out = outputs[0]
 
-        # Some exports split boxes, scores and classes into three tensors.
+        # Multi-output format detection: [Boxes(N,4), Scores(N), Classes(N)]
         if len(outputs) >= 3:
             b, s, c = outputs[0], outputs[1], outputs[2]
+            # Squeeze batch if present [1, N, 4] -> [N, 4]
             if b.ndim == 3:
                 b = b[0]
             if s.ndim == 2:
@@ -486,7 +497,7 @@ class Detector:
         pad_w = (size - new_w) // 2
         padded = np.full((size, size, 3), 114, dtype=np.uint8)
         padded[pad_h : pad_h + new_h, pad_w : pad_w + new_w] = resized
-        # BGR -> RGB, [0, 1], NCHW.
+        # BGR -> RGB, normalize, NCHW
         rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         tensor = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1))[np.newaxis])
         return tensor, ratio, (pad_w, pad_h)
@@ -494,7 +505,7 @@ class Detector:
     def _preprocess_multi(
         self, image: np.ndarray, mode: str = "rgb"
     ) -> Tuple[np.ndarray, float, Tuple[int, int]]:
-        """Letterbox resize plus per-modality mean/std normalization."""
+        """RGB-IR specific letterbox + Mean/Std normalization."""
         size = self.INPUT_SIZE
         h, w = image.shape[:2]
         ratio = min(size / h, size / w)
@@ -505,10 +516,10 @@ class Detector:
         padded = np.full((size, size, 3), 114, dtype=np.uint8)
         padded[pad_h : pad_h + new_h, pad_w : pad_w + new_w] = resized
 
-        # BGR -> RGB, [0, 1].
+        # RGB Conversion & 0~1 range
         img_f = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
 
-        # Per-modality mean/std.
+        # Apply Mean/Std normalization
         if mode == "rgb":
             mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
             std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -532,13 +543,17 @@ class Detector:
         task_id: str = "",
         label_mapping: Optional[dict] = None,
     ) -> List[Detection]:
-        """Parse YOLO outputs and apply NMS."""
+        """Parse YOLO architecture outputs and apply NMS."""
         try:
+            # Squeeze batch dimension if present
             if output.ndim == 3:
                 output = output[0]
 
-            # YOLO exports differ in axis order: some give [4+nc, 8400], others [8400, 4+nc].
-            # Transpose only when the second axis is large, which marks the points axis.
+            # YOLOv8 standard: [rows x cols] usually [class+4 x 8400]
+            # Some models export as [8400 x class+4]
+            # We want [N, 4+nc] format.
+            # We ONLY transpose if the column count is high (>100),
+            # indicating it's likely the "points" dimension of a YOLO output.
             if output.shape[0] < output.shape[1] and output.shape[1] > 100:
                 pred = output.T
             else:
@@ -548,7 +563,8 @@ class Detector:
             if self._diag_counter % 100 == 0:
                 logger.debug(f"[Detector] Post-processing matrix shape: {pred.shape}")
 
-            is_standard_6col = cols == 6  # [x1, y1, x2, y2, conf, cls]
+            # Identify format
+            is_standard_6col = cols == 6  # Common for [x1, y1, x2, y2, conf, cls]
 
             if is_standard_6col:
                 boxes_raw = pred[:, :4]
@@ -594,12 +610,14 @@ class Detector:
             confidences = confidences[mask]
 
             if is_standard_6col:
+                # Already in x1, y1, x2, y2
                 boxes_xyxy = pred[:, :4]
-                # cv2.dnn.NMSBoxes expects [x, y, w, h].
+                # For NMSBoxes, we MUST use [x, y, w, h]
                 boxes_for_nms = np.copy(boxes_xyxy)
                 boxes_for_nms[:, 2] = boxes_xyxy[:, 2] - boxes_xyxy[:, 0]  # w = x2 - x1
                 boxes_for_nms[:, 3] = boxes_xyxy[:, 3] - boxes_xyxy[:, 1]  # h = y2 - y1
             else:
+                # cx, cy, w, h -> x1,y1,x2,y2
                 cx, cy, bw, bh = pred[:, 0], pred[:, 1], pred[:, 2], pred[:, 3]
                 x1 = cx - bw / 2
                 y1 = cy - bh / 2
@@ -608,7 +626,9 @@ class Detector:
                 boxes_xyxy = np.stack([x1, y1, x2, y2], axis=1)
                 boxes_for_nms = np.stack([x1, y1, bw, bh], axis=1)
 
-            # 0.45 balances suppression against keeping nearby distinct boxes (usual range 0.4-0.5).
+            # NMS
+            # NMS IoU threshold 0.45: balance between suppressing overlapping boxes
+            # and keeping nearby but distinct detections (typical range 0.4-0.5)
             indices = cv2.dnn.NMSBoxes(
                 boxes_for_nms.tolist(), confidences.tolist(), conf_thresh, 0.45
             )
@@ -617,6 +637,7 @@ class Detector:
                     logger.debug("[Detector] NMS suppressed all detections")
                 return []
 
+            # Flatten indices into a simple list/array
             if isinstance(indices, np.ndarray):
                 indices = indices.flatten()
 
@@ -628,16 +649,19 @@ class Detector:
                 by1 = int((boxes_xyxy[idx][1] - pad_y) / ratio)
                 bx2 = int((boxes_xyxy[idx][2] - pad_x) / ratio)
                 by2 = int((boxes_xyxy[idx][3] - pad_y) / ratio)
+                # Clamp
                 bx1, by1 = max(0, bx1), max(0, by1)
                 bx2, by2 = min(orig_w, bx2), min(orig_h, by2)
                 cls_idx = int(class_ids[idx])
 
-                # User mapping wins; JSON keys arrive as strings.
+                # Priority 1: User defined mapping
                 if label_mapping and cls_idx in label_mapping:
                     cls_name = label_mapping[cls_idx]
                 elif label_mapping and str(cls_idx) in label_mapping:
+                    # JSON keys are always strings
                     cls_name = label_mapping[str(cls_idx)]
                 else:
+                    # Priority 2: Model metadata or fallback
                     cls_name = (
                         self.class_names[cls_idx]
                         if cls_idx < len(self.class_names)
@@ -651,6 +675,7 @@ class Detector:
                         class_name=cls_name,
                     )
                 )
+                # Explicitly log mapping result for verification
                 if self._diag_counter % 100 == 0:
                     logger.debug(
                         f"[Detector] Result: ID {cls_idx} -> Mapped to '{cls_name}' (conf: {confidences[idx]:.4f})"
@@ -679,10 +704,14 @@ class Detector:
         label_mapping: Optional[dict] = None,
         pred_ious: Optional[np.ndarray] = None,
     ) -> List[Detection]:
-        """Decode RGBIR RT-DETR output.
+        """Post-process for RGBIR RT-DETR model.
 
-        Boxes are normalized cxcywh; scores are post-sigmoid with background removed;
-        final scores are multiplied by sigmoid(iou). DETR-style, so no NMS.
+        Training code reference (models/rgbir_net.py):
+          - pred_boxes: normalized cxcywh [0,1]
+          - pred_scores: sigmoid(logits)[..., :-1] (background removed)
+          - final_scores = pred_scores * sigmoid(pred_ious)
+          - cxcywh -> xyxy -> denormalize by (orig_w, orig_h)
+          - No NMS (DETR-style)
         """
         if pred_boxes.ndim == 3:
             pred_boxes = pred_boxes[0]
@@ -691,13 +720,14 @@ class Detector:
         if pred_ious is not None and pred_ious.ndim == 3:
             pred_ious = pred_ious[0]
 
-        # Match the training-time post-process: scale scores by the IoU prediction.
+        # IoU-aware score fusion (matches training post_process)
         if pred_ious is not None:
             iou_scores = 1.0 / (1.0 + np.exp(-pred_ious))  # sigmoid(pred_ious)
             if iou_scores.ndim == 2:
                 iou_scores = iou_scores.squeeze(-1)  # (300,1) -> (300,)
             pred_scores = pred_scores * iou_scores[:, np.newaxis]
 
+        # ---- Diagnostic log ----
         self._rgbir_diag_counter = getattr(self, '_rgbir_diag_counter', 0) + 1
         if self._rgbir_diag_counter <= 5 or self._rgbir_diag_counter % 50 == 0:
             _box_min = float(np.min(pred_boxes)) if pred_boxes.size > 0 else 0.0
@@ -720,7 +750,7 @@ class Detector:
         pad_w, pad_h = pad
         detections: List[Detection] = []
 
-        # No NMS: the decoder already produces one box per query.
+        # Per-query processing (no NMS — DETR-style set prediction)
         max_scores = np.max(pred_scores, axis=1)  # (300,)
         for i in range(len(pred_scores)):
             conf = float(max_scores[i])
@@ -730,16 +760,19 @@ class Detector:
             cls_idx = int(np.argmax(pred_scores[i]))
             cx, cy, bw, bh = pred_boxes[i]
 
+            # cxcywh -> xyxy in 640x640 letterboxed space
             x1 = cx - bw / 2.0
             y1 = cy - bh / 2.0
             x2 = cx + bw / 2.0
             y2 = cy + bh / 2.0
 
+            # Inverse letterbox to original image space
             bx1 = (x1 * self.INPUT_SIZE - pad_w) / ratio
             by1 = (y1 * self.INPUT_SIZE - pad_h) / ratio
             bx2 = (x2 * self.INPUT_SIZE - pad_w) / ratio
             by2 = (y2 * self.INPUT_SIZE - pad_h) / ratio
 
+            # ---- Diagnostic log ----
             if self._rgbir_diag_counter <= 5 and i < 3:
                 logger.info(
                     f"[DIAG-RGBIR-BOX] i={i} cxcywh=({cx:.4f},{cy:.4f},{bw:.4f},{bh:.4f}) "
@@ -748,9 +781,11 @@ class Detector:
                     f"conf={conf:.4f} cls={cls_idx}"
                 )
 
+            # Clamp
             bx1, by1 = max(0, bx1), max(0, by1)
             bx2, by2 = min(orig_w, bx2), min(orig_h, by2)
 
+            # Skip degenerate boxes
             if bx2 <= bx1 or by2 <= by1:
                 continue
 
@@ -776,27 +811,29 @@ class Detector:
             )
         return detections
 
-    # Drawing
+    # ── Drawing helpers ──────────────────────────────────────────────────
 
     @staticmethod
     def draw_boxes(image: np.ndarray, detections: List[Detection]) -> np.ndarray:
-        """Draw boxes and labels on a copy of the image."""
+        """Draw bounding boxes on a copy of the image with labels and confidence."""
         img = image.copy()
-        # BGR colors, matching OverlayInjector.
+        # BGR Colors
         colors = {
-            "fire": (0, 60, 255),
-            "smoke": (80, 80, 80),
-            "person": (255, 165, 0),
-            "car": (255, 0, 255),
+            "fire": (0, 60, 255),  # Red-Orange
+            "smoke": (80, 80, 80),  # Dark Gray
+            "person": (255, 165, 0),  # Blue
+            "car": (255, 0, 255),  # Purple
         }
 
         for det in detections:
             x1, y1, x2, y2 = det.box
             cls_name = det.class_name.lower()
-            color = colors.get(cls_name, (0, 165, 255))  # default
+            color = colors.get(cls_name, (0, 165, 255))  # Default Orange
 
+            # 1. Draw main rectangle
             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
 
+            # 2. Draw label background (filled tab)
             label = f"{det.class_name} {det.confidence:.2f}"
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.5
@@ -804,10 +841,11 @@ class Detector:
 
             (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
 
-            # Keep the label inside the frame near the top edge.
+            # Ensure label doesn't go off top of image
             ty1 = max(y1, th + 10)
             cv2.rectangle(img, (x1, ty1 - th - 10), (x1 + tw + 10, ty1), color, -1)
 
+            # 3. Draw text
             cv2.putText(
                 img,
                 label,

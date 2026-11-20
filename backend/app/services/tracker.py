@@ -1,9 +1,16 @@
 """
-Greedy IoU multi-object tracker.
+Multi-object tracker - greedy matching algorithm based on IoU
 
-Emits ENTER for new objects, UPDATE for matched ones, and LEAVE after an object
-is missed for more than max_disappeared frames. Events are produced instead of
-per-frame DB writes, so storage only sees object appearance and disappearance.
+Core functionality:
+1. Match the current frame's detection boxes against existing tracks
+2. Match succeeded -> UPDATE event
+3. Match failed -> new object ENTER event
+4. Unmatched for more than N frames -> LEAVE event
+
+Event-driven design:
+- No longer writes to the database every frame
+- Records are generated only when an object enters or leaves
+- Greatly reduces database I/O (90%+ reduction)
 """
 
 from __future__ import annotations
@@ -67,9 +74,17 @@ class TrackedObject:
 
 
 class ObjectTracker:
-    """IoU tracker; call update() once per frame.
+    """
+    Multi-object tracker based on IoU
 
-    Tracks of different classes are never matched to each other.
+    Usage example:
+        tracker = ObjectTracker(max_disappeared_frames=30)
+        events = tracker.update(detections, timestamp_ms)
+        for event in events:
+            if event.state == TrackState.ENTER:
+                print(f"object {event.track_id} appeared")
+            elif event.state == TrackState.LEAVE:
+                print(f"object {event.track_id} disappeared, lasted {event.duration_ms}ms")
     """
     
     def __init__(
@@ -86,7 +101,16 @@ class ObjectTracker:
         self._frame_count = 0
         
     def update(self, detections: List[Detection], timestamp_ms: int) -> List[TrackEvent]:
-        """Match detections and return this frame's Enter/Update/Leave events."""
+        """
+        Process one frame of detections and return the list of events
+
+        Args:
+            detections: Detection boxes for the current frame
+            timestamp_ms: Current frame timestamp (milliseconds)
+
+        Returns:
+            List of events (Enter/Update/Leave)
+        """
         self._frame_count += 1
         events = []
         
@@ -153,7 +177,7 @@ class ObjectTracker:
         return events
     
     def reset(self):
-        """Clear all tracks and counters."""
+        """Reset the tracker"""
         self.tracks.clear()
         self.next_track_id = 0
         self._frame_count = 0
@@ -186,9 +210,10 @@ class ObjectTracker:
         timestamp_ms: int
     ) -> Tuple[List[Detection], List[TrackedObject], List[Detection], List[int]]:
         """
-        Pair detections with tracks of the same class, highest IoU first.
+        Greedy matching algorithm based on IoU
 
-        Returns (matched_detections, matched_tracks, unmatched_detections, unmatched_track_ids).
+        Returns:
+            (matched_detections, matched_tracks, unmatched_detections, unmatched_track_ids)
         """
         matched_detections: List[Detection] = []
         matched_tracks: List[TrackedObject] = []
@@ -222,7 +247,7 @@ class ObjectTracker:
     
     @staticmethod
     def _calculate_iou(box1: List[int], box2: List[int]) -> float:
-        """IoU of two [x1, y1, x2, y2] boxes."""
+        """Compute the IoU of two bounding boxes"""
         if not box1 or not box2:
             return 0.0
         

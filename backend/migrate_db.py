@@ -1,8 +1,9 @@
-"""Add tables and columns introduced by newer schema versions."""
+"""Database migration script: add new tables and new fields"""
 import sqlite3
 import os
 from pathlib import Path
 
+# Database path
 DB_PATH = Path(__file__).parent / "data" / "fire_detection.db"
 
 def migrate():
@@ -13,9 +14,10 @@ def migrate():
     conn = sqlite3.connect(str(DB_PATH))
     cursor = conn.cursor()
     
-    # detection_models columns
+    # 1. Add new fields to the detection_models table
     print("Checking detection_models table fields...")
     
+    # Check the default_threshold field
     cursor.execute("PRAGMA table_info(detection_models)")
     columns = [col[1] for col in cursor.fetchall()]
     
@@ -27,7 +29,7 @@ def migrate():
         print("Adding class_names field...")
         cursor.execute("ALTER TABLE detection_models ADD COLUMN class_names TEXT DEFAULT '[]'")
     
-    # tasks columns
+    # 2. Add new fields to the tasks table
     print("Checking tasks table fields...")
     cursor.execute("PRAGMA table_info(tasks)")
     columns = [col[1] for col in cursor.fetchall()]
@@ -36,6 +38,7 @@ def migrate():
         print("Adding detection_config field...")
         cursor.execute("ALTER TABLE tasks ADD COLUMN detection_config TEXT DEFAULT '{}'")
     
+    # 3. Create the detection_records table
     print("Creating detection_records table...")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS detection_records (
@@ -49,10 +52,11 @@ def migrate():
         )
     """)
     
+    # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_detection_records_task_id ON detection_records(task_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_detection_records_detected_at ON detection_records(detected_at)")
     
-    # detection_events table (track lifecycle)
+    # 4. Create the detection_events table (event-driven detection records)
     print("Creating detection_events table...")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS detection_events (
@@ -73,6 +77,7 @@ def migrate():
         )
     """)
     
+    # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_detection_events_task_id ON detection_events(task_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_detection_events_track_id ON detection_events(track_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_detection_events_event_type ON detection_events(event_type)")

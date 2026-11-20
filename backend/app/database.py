@@ -1,6 +1,6 @@
 from sqlmodel import SQLModel, create_engine, Session
 from app.config import config
-# Import models so their tables are registered before create_all()
+# V1.2.32: Explicitly import models to ensure registry is populated
 from app.models.user import User
 from app.models.task import Task
 from app.models.model import DetectionModel
@@ -58,7 +58,7 @@ def _create_indexes() -> None:
 
 
 def _migrate_new_columns() -> None:
-    """Add missing columns to existing tables; SQLite ALTER TABLE has no IF NOT EXISTS."""
+    """Add new columns to existing tables if they don't exist (SQLite safe migration)."""
     import sqlite3
     conn = sqlite3.connect(str(config.DB_PATH))
     cursor = conn.cursor()
@@ -87,6 +87,33 @@ def _migrate_new_columns() -> None:
         conn.commit()
     except Exception as e:
         print(f"[Migration] Error: {e}")
+    finally:
+        conn.close()
+
+    _migrate_detection_record_columns()
+
+
+def _migrate_detection_record_columns() -> None:
+    """Add the media-timeline columns to existing detection_records tables."""
+    import sqlite3
+    conn = sqlite3.connect(str(config.DB_PATH))
+    cursor = conn.cursor()
+    try:
+        cursor.execute("PRAGMA table_info(detection_records)")
+        existing = {row[1] for row in cursor.fetchall()}
+        if not existing:
+            return  # table is created fresh by SQLModel
+        for col_name in ("abs_ms", "media_pts_ms"):
+            if col_name not in existing:
+                cursor.execute(f"ALTER TABLE detection_records ADD COLUMN {col_name} INTEGER")
+                print(f"[Migration] Added column '{col_name}' to detection_records table")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_records_task_abs "
+            "ON detection_records(task_id, abs_ms)"
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"[Migration] detection_records migration skipped: {e}")
     finally:
         conn.close()
 

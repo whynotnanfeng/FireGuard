@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 ALLOWED_FORMATS = {".onnx"}
 
 
-# Schemas
+# ── Schemas ──────────────────────────────────────────────────────────────────
 
 class ModelResponse(BaseModel):
     id: str
@@ -64,7 +64,7 @@ def _to_response(m: DetectionModel) -> ModelResponse:
     )
 
 
-# Endpoints
+# ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("", response_model=ModelListResponse)
 def list_models(
@@ -89,20 +89,23 @@ async def analyze_model(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
 ):
-    """Extract labels and threshold from a model file without persisting it."""
+    """
+    Extract metadata from a model file without saving it to the database.
+    Used for real-time label extraction in the UI.
+    """
     _, ext = os.path.splitext(file.filename or "")
     ext = ext.lower()
     if ext not in ALLOWED_FORMATS:
         raise HTTPException(status_code=400, detail=f"Only {ALLOWED_FORMATS} files allowed")
 
-    # Temp file is removed in the finally block
+    # Save to temp file for analysis
     fd, temp_path = tempfile.mkstemp(suffix=ext)
     try:
         content = await file.read()
         with os.fdopen(fd, 'wb') as tmp:
             tmp.write(content)
         
-        # Bypass the singleton cache for one-off analysis
+        # Analyze using Detector (bypass singleton cache for one-off analysis)
         detector = Detector(temp_path)
         return {
             "label_config": detector.metadata_label_map or {},
@@ -120,9 +123,9 @@ async def analyze_model(
 @router.post("", response_model=ModelResponse, status_code=201)
 async def create_model(
     name: str = Form(...),
-    input_types: str = Form(...),          # JSON array, e.g. '["rgb"]'
+    input_types: str = Form(...),          # JSON array string e.g. '["rgb"]'
     description: str = Form(default=""),
-    label_config: Optional[str] = Form(default=None), # JSON class map
+    label_config: Optional[str] = Form(default=None), # JSON string of mapping
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
@@ -212,7 +215,7 @@ def update_model(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    # Direct write to bypass logging buffering
+    # Forced sync check log to bypass any logging buffering
     try:
         log_file = config.BASE_DIR / "logs" / "sync_check.log"
         with open(log_file, "a", encoding="utf-8") as f:

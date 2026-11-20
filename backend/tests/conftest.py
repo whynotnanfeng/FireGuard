@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 os.environ["SECRET_KEY"] = "test-secret-key-for-testing-only"
 os.environ["ACCESS_TOKEN_EXPIRE_MINUTES"] = "60"
 
-# Test database isolation
+# --- Test Database Isolation ---
 TEST_DB_URL = "sqlite:///test.db"
 test_engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
 
@@ -16,10 +16,16 @@ from app.main import app
 from app.database import get_session
 from app.models.user import User
 from app.dependencies import hash_password
+from app.limiter import limiter
+
+# Every test shares the same client address, so unrelated tests would trip the
+# login rate limiter. Rate limiting itself is not under test here.
+limiter.enabled = False
 
 
 @pytest.fixture(scope="function")
 def db_session() -> Generator[Session, None, None]:
+    # Use test_engine instead of the production engine
     SQLModel.metadata.create_all(test_engine)
     with Session(test_engine) as session:
         yield session
@@ -33,8 +39,12 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
         yield db_session
 
     app.dependency_overrides[get_session] = override_get_session
-    with TestClient(app) as c:
-        yield c
+    # Instantiate without the context manager on purpose: entering it runs the
+    # lifespan, which starts MediaMTX, Redis and the inference pool. Unit tests
+    # must not depend on those external services.
+    test_client = TestClient(app)
+    yield test_client
+    test_client.close()
     app.dependency_overrides.clear()
 
 

@@ -1,22 +1,34 @@
 <template>
   <div class="detection-events-panel">
     <div class="panel-header">
-      <h3>Detection Events</h3>
+      <h3>检测事件</h3>
       <div class="stats">
         <span class="stat-item">
           <span class="stat-dot"></span>
-          Active targets: {{ activeTracks }}
+          活跃目标: {{ activeTracks }}
         </span>
         <span class="stat-item">
           <span class="stat-dot green"></span>
-          Total events: {{ totalEvents }}
+          当前筛选: {{ total }}
         </span>
       </div>
     </div>
 
+    <div class="filter-bar">
+      <button
+        v-for="opt in filterOptions"
+        :key="opt.value"
+        class="filter-btn"
+        :class="{ active: filter === opt.value }"
+        @click="emit('update:filter', opt.value)"
+      >
+        {{ opt.label }}
+      </button>
+    </div>
+
     <div class="event-list">
       <div
-        v-for="event in displayEvents"
+        v-for="event in events"
         :key="event.id"
         class="event-item"
         :class="event.event_type"
@@ -28,33 +40,61 @@
         </div>
         <div class="event-content">
           <div class="event-header">
-            <span class="event-class">{{ event.class_name }}</span>
+            <span class="event-class">
+              <span class="event-track">#{{ event.track_id }}</span>
+              {{ event.class_name }}
+            </span>
             <span class="event-confidence">{{ (event.confidence * 100).toFixed(1) }}%</span>
           </div>
           <div class="event-meta">
             <span class="event-time">{{ formatTime(event.entered_at) }}</span>
+            <span class="event-state" :class="{ active: event.event_type !== 'leave' }">
+              {{ event.event_type === 'leave' ? '结束' : '活跃' }}
+            </span>
             <span v-if="event.duration_ms" class="event-duration">
-              Duration {{ formatDuration(event.duration_ms) }}
+              持续 {{ formatDuration(event.duration_ms) }}
             </span>
           </div>
           <div v-if="event.event_type === 'leave'" class="event-summary">
-            Max confidence: {{ (event.max_confidence * 100).toFixed(1) }}% |
-            Avg confidence: {{ (event.avg_confidence * 100).toFixed(1) }}% |
-            {{ event.update_count }} updates
+            最大置信度: {{ (event.max_confidence * 100).toFixed(1) }}% |
+            平均置信度: {{ (event.avg_confidence * 100).toFixed(1) }}% |
+            更新 {{ event.update_count }} 次
           </div>
         </div>
       </div>
 
-      <div v-if="displayEvents.length === 0" class="empty-state">
+      <div v-if="events.length === 0" class="empty-state">
         <span class="empty-icon">📋</span>
-        <span class="empty-text">No detection events</span>
+        <span class="empty-text">{{ emptyText }}</span>
       </div>
+    </div>
+
+    <div v-if="total > 0" class="panel-footer">
+      <span class="pagination-info">第 {{ page }}/{{ totalPages }} 页，共 {{ total }} 条</span>
+      <a-select
+        :value="pageSize"
+        size="small"
+        class="page-size-select"
+        @change="onPageSizeChange"
+      >
+        <a-select-option :value="10">10 条/页</a-select-option>
+        <a-select-option :value="20">20 条/页</a-select-option>
+        <a-select-option :value="50">50 条/页</a-select-option>
+      </a-select>
+      <CustomPagination
+        :current="page"
+        :page-size="pageSize"
+        :total="total"
+        @update:current="(p: number) => emit('update:page', p)"
+      />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { computed } from 'vue'
+import CustomPagination from '@/components/CustomPagination.vue'
+import type { EventFilter } from '@/composables/useDetectionFeed'
 
 interface DetectionEvent {
   id: string
@@ -75,16 +115,40 @@ const props = defineProps<{
   taskId: string
   events: DetectionEvent[]
   activeTracks?: number
+  total: number
+  filter: EventFilter
+  page: number
+  pageSize: number
 }>()
 
-const totalEvents = computed(() => props.events.length)
-const displayEvents = computed(() => {
-  return props.events.slice(0, 50)
+const emit = defineEmits<{
+  (e: 'update:filter', value: EventFilter): void
+  (e: 'update:page', value: number): void
+  (e: 'update:pageSize', value: number): void
+}>()
+
+const filterOptions: Array<{ value: EventFilter; label: string }> = [
+  { value: 'all', label: '全部' },
+  { value: 'active', label: '活跃' },
+  { value: 'closed', label: '结束' },
+]
+
+const totalPages = computed(() => Math.ceil(props.total / props.pageSize) || 1)
+
+const emptyText = computed(() => {
+  if (props.filter === 'active') return '暂无活跃目标'
+  if (props.filter === 'closed') return '暂无已结束目标'
+  return '暂无检测事件'
 })
+
+function onPageSizeChange(size: number) {
+  emit('update:pageSize', size)
+  emit('update:page', 1)
+}
 
 const formatTime = (timeStr: string) => {
   const date = new Date(timeStr)
-  return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 const formatDuration = (ms: number) => {
@@ -98,6 +162,14 @@ const formatDuration = (ms: number) => {
 
 <style scoped>
 .detection-events-panel {
+  /* 面板是视频上的深色浮层，这里把分页组件的主题变量覆写为深色。 */
+  --bg-card: rgba(255, 255, 255, 0.06);
+  --border-color: rgba(255, 255, 255, 0.16);
+  --text-primary: #e0e0e0;
+  --text-secondary: #a0a0a0;
+  --text-quaternary: rgba(255, 255, 255, 0.3);
+  --primary-blue: #4a9eff;
+
   background: #1a1a2e;
   border-radius: 8px;
   padding: 16px;
@@ -111,7 +183,7 @@ const formatDuration = (ms: number) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
@@ -153,12 +225,42 @@ const formatDuration = (ms: number) => {
   50% { opacity: 0.5; }
 }
 
+.filter-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.filter-btn {
+  flex: 1;
+  padding: 6px 0;
+  font-size: 13px;
+  color: #a0a0a0;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.filter-btn:hover {
+  color: #4a9eff;
+  border-color: #4a9eff;
+}
+
+.filter-btn.active {
+  color: #4a9eff;
+  border-color: #4a9eff;
+  background: rgba(74, 158, 255, 0.12);
+}
+
 .event-list {
   flex: 1;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-height: 0;
 }
 
 .event-item {
@@ -229,6 +331,12 @@ const formatDuration = (ms: number) => {
   text-transform: capitalize;
 }
 
+.event-track {
+  color: #4a9eff;
+  font-variant-numeric: tabular-nums;
+  margin-right: 4px;
+}
+
 .event-confidence {
   font-size: 12px;
   color: #a0a0a0;
@@ -240,6 +348,14 @@ const formatDuration = (ms: number) => {
   font-size: 12px;
   color: #808080;
   margin-bottom: 4px;
+}
+
+.event-state {
+  color: #808080;
+}
+
+.event-state.active {
+  color: #2ed573;
 }
 
 .event-summary {
@@ -264,5 +380,34 @@ const formatDuration = (ms: number) => {
 
 .empty-text {
   font-size: 14px;
+}
+
+.panel-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.pagination-info {
+  font-size: 12px;
+  color: #a0a0a0;
+  white-space: nowrap;
+}
+
+.page-size-select {
+  width: 92px;
+  flex-shrink: 0;
+}
+
+.panel-footer :deep(.custom-pagination) {
+  flex-wrap: nowrap;
+}
+
+.panel-footer :deep(.pagination-options) {
+  display: none;
 }
 </style>

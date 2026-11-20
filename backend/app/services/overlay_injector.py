@@ -1,5 +1,13 @@
-"""Draws detection boxes into the video frames themselves, so the HLS stream is
-already annotated and recordings need no extra rendering step."""
+"""
+In-frame detection box injector
+
+Draws detection results directly onto video frames, achieving natural synchronization
+of the five-in-one pipeline.
+Key advantages:
+- Boxes and picture share the same frame, so sync latency is 0ms
+- No Canvas drawing needed on the frontend, reducing complexity
+- Historical playback just plays the recorded stream, zero extra logic
+"""
 
 from __future__ import annotations
 
@@ -18,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class OverlayStyle:
-    """Detection box style parameters."""
+    """Detection box style configuration"""
     thickness: int = 2
     font_size: float = 0.6
     font_thickness: int = 1
@@ -30,16 +38,22 @@ class OverlayStyle:
 
 
 class OverlayInjector:
-    """Draws boxes, labels and an optional timestamp onto a BGR frame."""
+    """
+    Draws detection boxes directly onto video frames
 
-    # BGR colors, kept consistent with Detector.draw_boxes.
+    Usage example:
+        injector = OverlayInjector()
+        annotated_frame = injector.inject(frame, detections, timestamp_ms)
+    """
+
+    # BGR colors: kept consistent with Detector.draw_boxes
     DEFAULT_COLORS = {
-        "fire": (0, 60, 255),
-        "smoke": (80, 80, 80),
-        "person": (255, 165, 0),
-        "car": (255, 0, 255),
-        "vehicle": (255, 0, 255),  # alias for car
-        "default": (0, 165, 255),
+        "fire": (0, 60, 255),      # Red-Orange
+        "smoke": (80, 80, 80),     # Dark Gray
+        "person": (255, 165, 0),   # Blue
+        "car": (255, 0, 255),      # Purple
+        "vehicle": (255, 0, 255),  # Purple (alias for car)
+        "default": (0, 165, 255),  # Orange
     }
     
     def __init__(self, style: Optional[OverlayStyle] = None, custom_colors: Optional[Dict[str, Tuple[int, int, int]]] = None):
@@ -55,9 +69,16 @@ class OverlayInjector:
         copy: bool = True,
     ) -> np.ndarray:
         """
-        Draw detections and the timestamp.
+        Draw detection boxes and a timestamp watermark on the frame
 
-        copy=False draws in place and returns the same array.
+        Args:
+            frame: Raw BGR frame (H, W, 3)
+            detections: List of detection results
+            timestamp_ms: Unix timestamp (milliseconds)
+            copy: Whether to create a copy of the frame. If False, drawing happens in place.
+
+        Returns:
+            BGR frame with detection boxes drawn
         """
         if not detections:
             if self.style.show_timestamp and timestamp_ms > 0:

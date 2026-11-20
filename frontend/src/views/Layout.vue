@@ -6,40 +6,40 @@
           <FireOutlined />
         </div>
         <div class="logo-text">
-          <h2>FireGuard</h2>
-          <span class="logo-sub">Intelligent Fire Monitoring System</span>
+          <h2>火灾智能监测系统</h2>
+          <span class="logo-sub">FIRE GUARD</span>
         </div>
       </div>
       <nav class="nav-menu">
         <router-link to="/monitor" class="nav-item" active-class="active">
           <span class="nav-icon"><DashboardOutlined /></span>
-          <span class="nav-label">Dashboard</span>
+          <span class="nav-label">监控看板</span>
         </router-link>
         <router-link to="/tasks" class="nav-item" active-class="active">
           <span class="nav-icon"><UnorderedListOutlined /></span>
-          <span class="nav-label">Tasks</span>
+          <span class="nav-label">任务管理</span>
         </router-link>
         <router-link to="/models" class="nav-item" active-class="active">
           <span class="nav-icon"><AppstoreOutlined /></span>
-          <span class="nav-label">Models</span>
+          <span class="nav-label">模型库</span>
         </router-link>
       </nav>
       <div class="sidebar-footer">
-        <div class="version-info">v2.9.0</div>
+        <div class="version-info">v3.0.0</div>
       </div>
     </aside>
 
     <div class="main-content">
       <header class="header">
-        <div class="page-title">{{ route.path === '/monitor' ? 'Dashboard' : (route.path === '/models' ? 'Models' : 'Tasks') }}</div>
+        <div class="page-title">{{ route.path === '/monitor' ? '监控看板' : (route.path === '/models' ? '模型库' : '任务管理') }}</div>
         <div class="user-info">
           <a-dropdown :trigger="['click']">
             <span class="dropdown-link" @click.prevent>
-              <UserOutlined /> {{ authStore.user?.username || 'User' }}
+              <UserOutlined /> {{ authStore.user?.username || '用户' }}
             </span>
             <template #overlay>
               <a-menu>
-                <a-menu-item key="logout" @click="handleCommand('logout')">Log Out</a-menu-item>
+                <a-menu-item key="logout" @click="handleCommand('logout')">退出登录</a-menu-item>
               </a-menu>
             </template>
           </a-dropdown>
@@ -56,15 +56,15 @@
       <nav class="mobile-nav">
         <router-link to="/monitor" class="mobile-nav-item" active-class="active">
           <DashboardOutlined />
-          <span>Monitor</span>
+          <span>监控</span>
         </router-link>
         <router-link to="/tasks" class="mobile-nav-item" active-class="active">
           <UnorderedListOutlined />
-          <span>Tasks</span>
+          <span>任务</span>
         </router-link>
         <router-link to="/models" class="mobile-nav-item" active-class="active">
           <AppstoreOutlined />
-          <span>Models</span>
+          <span>模型</span>
         </router-link>
       </nav>
     </div>

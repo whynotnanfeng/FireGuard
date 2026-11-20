@@ -1,9 +1,12 @@
 """
-Turns tracker events into detection records.
+Event-driven detection record processor
 
-Enter writes a row immediately, Update only updates in-memory statistics, and Leave
-closes the row with duration and confidence stats. This cuts DB writes by ~90%
-compared with writing every frame.
+Core strategy:
+- Enter event: write to the database immediately (records the object appearing)
+- Update event: update in-memory statistics only, no DB write (reduces I/O)
+- Leave event: update the record (fills in disappearance time, duration, statistics)
+
+Compared with the legacy per-frame writes, database write volume drops by 90%+.
 """
 
 from __future__ import annotations
@@ -22,7 +25,14 @@ logger = logging.getLogger(__name__)
 
 
 class EventProcessor:
-    """Persists enter/leave events and keeps per-track confidence statistics."""
+    """
+    Processes tracking events and decides when to write to the database
+
+    Usage example:
+        processor = EventProcessor(task_id="task_123")
+        for event in tracker.update(detections, timestamp_ms):
+            processor.process_event(event)
+    """
     
     def __init__(self, task_id: str):
         self.task_id = task_id
@@ -37,7 +47,7 @@ class EventProcessor:
         elif event.state == TrackState.LEAVE:
             self._handle_leave(event)
     def reset(self):
-        """Clear pending state without writing it."""
+        """Reset processor state"""
         pending_count = len(self._pending_stats)
         enter_count = len(self._enter_records)
         self._pending_stats.clear()
@@ -48,7 +58,7 @@ class EventProcessor:
         )
     
     def _handle_enter(self, event: TrackEvent):
-        """Create and store the enter record."""
+        """Enter event: write to the database immediately"""
         record_id = str(uuid.uuid4())
         self._enter_records[event.track_id] = record_id
         
@@ -85,7 +95,7 @@ class EventProcessor:
         )
     
     def _handle_update(self, event: TrackEvent):
-        """Accumulate confidence statistics in memory."""
+        """Update event: update in-memory statistics only"""
         if event.track_id not in self._pending_stats:
             self._pending_stats[event.track_id] = {
                 "max_conf": event.confidence,
@@ -100,7 +110,7 @@ class EventProcessor:
         stats["count"] += 1
     
     def _handle_leave(self, event: TrackEvent):
-        """Write the leave record with totals from the stats."""
+        """Leave event: write the complete record"""
         stats = self._pending_stats.pop(event.track_id, None)
         self._enter_records.pop(event.track_id, None)
         
@@ -140,7 +150,7 @@ class EventProcessor:
         )
     
     def _save_to_db(self, record: DetectionEvent):
-        """Insert one record in its own session."""
+        """Write to the database"""
         from app.database import engine
         from sqlmodel import Session
 

@@ -177,9 +177,9 @@ def get_multiprocess_log_queue():
 
 
 def setup_child_process_logging():
-    """Reinitialize logging in child processes.
+    """Called in child processes: reinitialize logging to ensure file writing works
 
-    Per-PID log files avoid PermissionError when processes share one file.
+    [P2-2 fix]: isolate child process log files by PID to avoid PermissionError from multiple processes writing to the same file
     """
     import logging
     log_dir = config.LOGS_DIR
@@ -205,6 +205,7 @@ def setup_child_process_logging():
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
 
+    # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
     console_handler.setLevel(logging.INFO)

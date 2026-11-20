@@ -23,5 +23,10 @@ class DetectionRecord(SQLModel, table=True):
     confidence: float = Field()
     box: str = Field(default="[]", max_length=200)
     detected_at: datetime = Field(default_factory=now_beijing, index=True)
+    # Timeline anchors: abs_ms is the UTC epoch (timezone-independent), and
+    # media_pts_ms is the position inside the recording session. The frontend
+    # matches frames with media_pts_ms, so no wall-clock calibration is needed.
+    abs_ms: Optional[int] = Field(default=None, index=True)
+    media_pts_ms: Optional[int] = Field(default=None, index=True)
 
     task: Optional["Task"] = Relationship(back_populates="detection_records")

@@ -2,21 +2,21 @@
   <div class="dashboard-container">
     <div class="monitor-header">
       <div>
-        <span class="monitor-title">Dashboard</span>
-        <span class="monitor-count">{{ runningTasks.length }} running task(s)</span>
+        <span class="monitor-title">监控看板</span>
+        <span class="monitor-count">{{ runningTasks.length }} 个执行中任务</span>
       </div>
       <button class="fullscreen-btn" id="fullscreenBtn" @click="toggleFullscreen">
         <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
         </svg>
-        Fullscreen
+        全屏
       </button>
     </div>
 
     <div class="video-grid" :class="{ fullscreen: isFullscreen }" id="videoGrid">
       <div class="video-cell" v-for="task in runningTasks" :key="task.id">
         <div class="video-cell-media" ref="mediaContainers" :data-task-id="task.id">
-          <!-- Uniform transform scale keeps the player's internal proportions -->
+          <!-- 核心缩放适配层：使用等比例 transform scale 完美还原大型播放器的内部比例 -->
           <div class="video-scale-wrapper">
             <div class="video-scale-inner" :style="getScaleStyle(task.id)">
               <VideoPlayer 
@@ -37,6 +37,7 @@
         </div>
       </div>
       
+      <!-- Empty states if no tasks -->
       <div class="video-cell empty-cell" v-if="runningTasks.length === 0">
         <div class="video-cell-media">
           <div class="video-cell-placeholder">
@@ -45,7 +46,7 @@
                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
               </svg>
             </div>
-            <div class="text">No running monitoring tasks</div>
+            <div class="text">暂无执行中的监控任务</div>
           </div>
         </div>
       </div>
@@ -72,7 +73,7 @@ const wsStreamUrl = computed(() => {
   return `${protocol}//${host}/ws/stream`
 })
 
-// 16:10 baseline so 16:9 video gets black bars at the bottom for the overlay.
+// 基准尺寸：我们采用 1024x640 (16:10) 的比例，这样 16:9 的视频在垂直居中时，底部会自然留出黑边，用来放置文字 overlay，避免遮挡画面。
 const NATIVE_WIDTH = 1024
 const NATIVE_HEIGHT = 640
 
@@ -98,6 +99,7 @@ function updateObservers() {
       const target = entry.target as HTMLElement
       const taskId = target.getAttribute('data-task-id')
       if (taskId) {
+        // 计算实际容器宽度与基准宽度的比例，进行 transform 缩放
         const { width } = entry.contentRect
         const scale = width / NATIVE_WIDTH
         scaleMap.value[taskId] = `scale(${scale})`
@@ -266,6 +268,7 @@ onUnmounted(() => {
     overflow: hidden;
 }
 
+/* 核心缩放容器 */
 .video-scale-wrapper {
     position: absolute;
     top: 0;
@@ -277,15 +280,16 @@ onUnmounted(() => {
 
 .video-scale-inner {
     transform-origin: 0 0;
+    /* transition: transform 0.1s ease-out; */
 }
 
 .dashboard-video-player {
     width: 100%;
     height: 100%;
-    pointer-events: none; /* block accidental clicks on the native controls */
+    pointer-events: none; /* 在缩小面板中禁用误触原生控制栏 */
 }
 
-/* Remove player chrome so it blends into the cell */
+/* 移除原生播放器的多余内外边距和底色，保证纯净贴合 */
 :deep(.dashboard-video-player .video-player-container) {
     height: 100% !important;
     min-height: 0 !important;
@@ -298,7 +302,7 @@ onUnmounted(() => {
     background: transparent !important;
 }
 
-/* The dashboard has its own overlay, so hide the player's controls */
+/* 强制隐藏原生的控制按钮，因为看板统一由外部叠加 UI 管理 */
 :deep(.dashboard-video-player .controls),
 :deep(.dashboard-video-player .history-seekbar-container),
 :deep(.dashboard-video-player .detection-records-panel) {
@@ -387,7 +391,7 @@ onUnmounted(() => {
     flex-shrink: 0;
 }
 
-/* Fullscreen */
+/* Fullscreen mode */
 .video-grid.fullscreen {
     position: fixed;
     top: 0;

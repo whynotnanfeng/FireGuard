@@ -2,20 +2,20 @@
   <div class="model-list-page fade-in">
     <div class="toolbar">
       <div class="toolbar-left">
-        <span class="filter-label">Model Name</span>
+        <span class="filter-label">模型名称</span>
         <a-input-search
           v-model:value="filters.search"
-          placeholder="Search..."
+          placeholder="搜索..."
           class="filter-item search-input"
           allow-clear
           @search="applyFilters"
           @change="onSearchChange"
         />
         
-        <span class="filter-label">Format</span>
+        <span class="filter-label">格式</span>
         <a-select 
           v-model:value="filters.format" 
-          placeholder="All" 
+          placeholder="全部" 
           allow-clear 
           class="filter-item"
           @change="applyFilters" 
@@ -23,10 +23,10 @@
           <a-select-option value="onnx">ONNX</a-select-option>
         </a-select>
         
-        <span class="filter-label">Input Type</span>
+        <span class="filter-label">输入类型</span>
         <a-select 
           v-model:value="filters.input_type" 
-          placeholder="All" 
+          placeholder="全部" 
           allow-clear 
           class="filter-item"
           @change="applyFilters" 
@@ -38,7 +38,7 @@
 
         <a-button class="filter-item reset-btn" @click="resetFilters">
            <template #icon><ReloadOutlined /></template>
-           Reset
+           重置
         </a-button>
 
         <a-button 
@@ -50,39 +50,39 @@
             <DownOutlined v-if="!filtersExpanded" />
             <UpOutlined v-else />
           </template>
-          {{ filtersExpanded ? 'Collapse' : 'More Filters' }}
+          {{ filtersExpanded ? '收起' : '更多筛选' }}
         </a-button>
       </div>
       
       <a-button type="primary" @click="showCreate = true">
         <template #icon><CloudUploadOutlined /></template>
-        Upload Model
+        上传模型
       </a-button>
     </div>
 
     <div v-show="filtersExpanded" class="advanced-filters">
-      <span class="filter-label">Status</span>
+      <span class="filter-label">状态</span>
       <a-select 
         v-model:value="filters.status" 
-        placeholder="All" 
+        placeholder="全部" 
         allow-clear 
         class="filter-item"
         @change="applyFilters" 
       >
-        <a-select-option value="completed">Ready</a-select-option>
-        <a-select-option value="processing">Processing</a-select-option>
+        <a-select-option value="completed">可用</a-select-option>
+        <a-select-option value="processing">处理中</a-select-option>
       </a-select>
 
-      <span class="filter-label">Description</span>
+      <span class="filter-label">描述</span>
       <a-input
         v-model:value="filters.description"
-        placeholder="Keyword..."
+        placeholder="关键词..."
         class="filter-item desc-input"
         allow-clear
         @change="applyFilters"
       />
 
-      <span class="filter-label">Created At</span>
+      <span class="filter-label">创建时间</span>
       <a-range-picker
         v-model:value="filters.dateRange"
         class="filter-item date-picker"
@@ -98,6 +98,7 @@
          rowKey="id"
          :pagination="false"
          class="model-table"
+         :scroll="{ x: 860 }"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
@@ -120,7 +121,7 @@
           
           <template v-if="column.key === 'status'">
             <a-tag :color="record.status === 'completed' ? 'success' : 'warning'">
-               {{ record.status === 'completed' ? 'Ready' : 'Processing' }}
+               {{ record.status === 'completed' ? '可用' : '处理中' }}
             </a-tag>
           </template>
 
@@ -134,9 +135,9 @@
                  type="link" 
                  :disabled="record.status !== 'completed'"
                  @click="openEditLabels(record)"
-              >Edit Labels</a-button>
-              <a-popconfirm title="Delete this model?" @confirm="handleDelete(record.id)">
-                   <a-button type="link" danger :disabled="record.status !== 'completed'">Delete</a-button>
+              >编辑标签</a-button>
+              <a-popconfirm title="确定删除该模型吗？" @confirm="handleDelete(record.id)">
+                   <a-button type="link" danger :disabled="record.status !== 'completed'">删除</a-button>
               </a-popconfirm>
             </a-space>
           </template>
@@ -145,7 +146,7 @@
 
       <div class="pagination-wrap" v-if="totalFiltered > 0">
         <span class="pagination-info">
-          Page {{ page }} of {{ totalPages }}, {{ totalFiltered }} total
+          第 {{ page }}/{{ totalPages }} 页，共 {{ totalFiltered }} 条
         </span>
         <a-select 
           v-model:value="pageSize" 
@@ -153,10 +154,10 @@
           @change="onPageSizeChange" 
           class="page-size-select"
         >
-          <a-select-option :value="10">10 / page</a-select-option>
-          <a-select-option :value="20">20 / page</a-select-option>
-          <a-select-option :value="50">50 / page</a-select-option>
-          <a-select-option :value="100">100 / page</a-select-option>
+          <a-select-option :value="10">10 条/页</a-select-option>
+          <a-select-option :value="20">20 条/页</a-select-option>
+          <a-select-option :value="50">50 条/页</a-select-option>
+          <a-select-option :value="100">100 条/页</a-select-option>
         </a-select>
         <CustomPagination
           v-model:current="page"
@@ -166,54 +167,56 @@
       </div>
     </div>
 
+    <!-- Upload Modal -->
     <a-modal 
-      title="Upload Model" 
+      title="上传模型" 
       v-model:open="showCreate"
       width="500px"
       :bodyStyle="{ maxHeight: '550px', overflowY: 'auto' }"
       destroyOnClose
     >
       <a-form :model="form" ref="formRef" :rules="rules" :label-col="{ span: 5 }" :wrapper-col="{ span: 19 }">
-        <a-form-item label="Model Name" name="name">
-          <a-input v-model:value="form.name" placeholder="e.g. fire-detection-v1.onnx" />
+        <a-form-item label="模型名称" name="name">
+          <a-input v-model:value="form.name" placeholder="例如: fire-detection-v1.onnx" />
         </a-form-item>
-        <a-form-item label="Input Type" name="input_types">
+        <a-form-item label="输入类型" name="input_types">
           <a-checkbox-group v-model:value="form.input_types">
             <a-checkbox value="rgb">RGB</a-checkbox>
             <a-checkbox value="ir">IR</a-checkbox>
           </a-checkbox-group>
         </a-form-item>
-        <a-form-item label="Description">
+        <a-form-item label="模型描述">
           <a-textarea v-model:value="form.description" :rows="2" />
         </a-form-item>
-        <a-form-item label="Model File" required :extra="analyzing ? 'Parsing metadata...' : ''">
+        <a-form-item label="模型文件" required :extra="analyzing ? '正在解析元数据...' : ''">
           <div class="upload-zone" @click="fileInput?.click()">
              <CloudUploadOutlined v-if="!analyzing" class="icon" />
              <a-spin v-else size="large" style="margin-bottom: 8px" />
-             <div class="text">{{ analyzing ? 'Parsing...' : 'Click to upload an .onnx file' }}</div>
+             <div class="text">{{ analyzing ? '解析中...' : '点击上传 .onnx 文件' }}</div>
              <div class="files" v-if="file && !analyzing">{{file.name}} ({{(file.size/1024/1024).toFixed(2)}}MB)</div>
           </div>
           <input type="file" ref="fileInput" accept=".onnx" style="display:none" @change="onFileChange" />
         </a-form-item>
-        <a-form-item label="Label Mapping">
+        <a-form-item label="标签映射">
            <LabelMappingEditor v-model="form.label_config" />
         </a-form-item>
       </a-form>
       <template #footer>
-        <a-button @click="showCreate = false">Cancel</a-button>
-        <a-button type="primary" :loading="submitting" @click="submit">Upload</a-button>
+        <a-button @click="showCreate = false">取消</a-button>
+        <a-button type="primary" :loading="submitting" @click="submit">开始上传</a-button>
       </template>
     </a-modal>
 
+    <!-- Label Edit Modal -->
     <a-modal 
-      title="Edit Labels" 
+      title="编辑标签" 
       v-model:open="showEditLabels"
       width="500px"
       :bodyStyle="{ maxHeight: '550px', overflowY: 'auto' }"
       destroyOnClose
     >
       <div v-if="editingModel" style="margin-bottom: 12px">
-        Editing model: <strong>{{ editingModel.name }}</strong>
+        正在修改模型: <strong>{{ editingModel.name }}</strong>
       </div>
       <LabelMappingEditor 
         v-if="editingModel" 
@@ -221,8 +224,8 @@
         @update:modelValue="val => editLabelConfig = val"
       />
       <template #footer>
-        <a-button @click="showEditLabels = false">Cancel</a-button>
-        <a-button type="primary" :loading="updatingLabels" @click="saveLabelUpdate">Save Changes</a-button>
+        <a-button @click="showEditLabels = false">取消</a-button>
+        <a-button type="primary" :loading="updatingLabels" @click="saveLabelUpdate">保存修改</a-button>
       </template>
     </a-modal>
   </div>
@@ -254,6 +257,7 @@ const form = reactive({
   label_config: null as Record<string, string> | null
 })
 
+// Edit Labels State
 const showEditLabels = ref(false)
 const editingModel = ref<DetectionModel | null>(null)
 const editLabelConfig = ref<Record<string, string> | null>(null)
@@ -320,6 +324,7 @@ const pagedModels = computed(() => {
 })
 
 function onPageChange() {
+  // pagination component handles page/pageSize updates, computed recalculates
 }
 
 function onPageSizeChange() {
@@ -345,8 +350,8 @@ function resetFilters() {
 }
 
 const rules = {
-  name: [{ required: true, message: 'Please enter a model name' }],
-  input_types: [{ required: true, type: 'array', min: 1, message: 'Please select at least one input type' }]
+  name: [{ required: true, message: '请输入模型名称' }],
+  input_types: [{ required: true, type: 'array', min: 1, message: '请选择至少一种输入类型' }]
 }
 
 function resetForm() {
@@ -367,13 +372,13 @@ watch(showCreate, (val) => {
 })
 
 const columns = [
-  { title: 'Model Name', dataIndex: 'name', key: 'name', width: 200, ellipsis: true },
-  { title: 'Format', key: 'format', width: 100 },
-  { title: 'Input Types', key: 'input_types', width: 150 },
-  { title: 'Description', dataIndex: 'description', key: 'description', width: 150, ellipsis: true },
-  { title: 'Status', key: 'status', width: 100 },
-  { title: 'Created At', key: 'created_at', width: 180 },
-  { title: 'Actions', key: 'action', width: 200, fixed: 'right' }
+  { title: '模型名称', dataIndex: 'name', key: 'name', width: 200, ellipsis: true },
+  { title: '格式', key: 'format', width: 100 },
+  { title: '支持输入类型', key: 'input_types', width: 150 },
+  { title: '描述', dataIndex: 'description', key: 'description', width: 150, ellipsis: true },
+  { title: '状态', key: 'status', width: 100 },
+  { title: '创建时间', key: 'created_at', width: 180 },
+  { title: '操作', key: 'action', width: 200, fixed: 'right' }
 ]
 
 function formatDate(ds: string) {
@@ -398,21 +403,21 @@ onMounted(() => {
 async function handleDelete(id: string) {
   try {
     await modelsApi.delete(id)
-    message.success('Deleted')
+    message.success('删除成功')
     loadData()
   } catch(err: any) {
     if (err.response?.status === 409) {
       const detail = err.response.data?.detail || ''
       const match = detail.match(/tasks \[(.*)\]/)
-      let countText = 'some'
+      let countText = '一些'
       if (match && match[1]) {
         countText = match[1].split(',').length.toString()
       }
       
       Modal.error({
-        title: 'Cannot delete model',
-        content: `This model is used by ${countText} task(s). Please delete those tasks first.`,
-        okText: 'Got it',
+        title: '无法删除模型',
+        content: `该模型正被 ${countText} 个任务使用，请先删除对应任务。`,
+        okText: '知道了',
         centered: true
       })
     }
@@ -425,6 +430,7 @@ async function onFileChange(e: Event) {
       const selectedFile = target.files[0]
       file.value = selectedFile
 
+      // Auto analyze
       const fd = new FormData()
       fd.append('file', selectedFile)
       
@@ -433,7 +439,7 @@ async function onFileChange(e: Event) {
         const res = await modelsApi.analyze(fd)
         if (res.label_config && Object.keys(res.label_config).length > 0) {
           form.label_config = res.label_config
-          message.success('Model labels extracted automatically')
+          message.success('已自动提取模型标签')
         }
       } catch (err) {
         console.error('Failed to analyze model:', err)
@@ -452,7 +458,7 @@ async function submit() {
   }
   
   if (!file.value) {
-     message.warning('Please select a model file')
+     message.warning('请选择模型文件')
      return
   }
 
@@ -468,8 +474,9 @@ async function submit() {
   submitting.value = true
   try {
      await modelsApi.create(fd)
-     message.success('Upload succeeded')
+     message.success('上传成功')
      showCreate.value = false
+     // reset is now handled by watcher
      loadData()
   } catch(e) {} finally {
      submitting.value = false
@@ -493,16 +500,16 @@ async function saveLabelUpdate() {
   try {
     const updatedModel = await modelsApi.update(editingModel.value.id, payload)
 
-    // Detect a silent save failure
+    // Validation: Did the server actually save it?
     const sentCount = Object.keys(payload.label_config).length
     const receivedCount = Object.keys(updatedModel.label_config || {}).length
 
     if (sentCount > 0 && receivedCount === 0) {
-      message.error('The server responded successfully but the data was not persisted. Check whether the backend service needs a restart')
+      message.error('服务器响应成功但数据未持久化，请检查后端服务是否需要重启')
       return 
     }
 
-    message.success('Label mapping updated')
+    message.success('标签映射更新成功')
     showEditLabels.value = false
     loadData()
   } catch(e) {
@@ -525,6 +532,8 @@ async function saveLabelUpdate() {
   justify-content: space-between;
   align-items: center;
   gap: 16px;
+  flex-wrap: wrap;
+  row-gap: 12px;
   background: var(--bg-card);
   padding: 12px 16px;
   border-radius: 8px;
@@ -536,6 +545,8 @@ async function saveLabelUpdate() {
   gap: 16px;
   align-items: center;
   flex: 1;
+  flex-wrap: wrap;
+  row-gap: 12px;
 }
 .filter-label {
   font-size: 14px;

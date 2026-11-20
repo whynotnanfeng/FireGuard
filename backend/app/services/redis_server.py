@@ -10,45 +10,54 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 class RedisServerManager:
-    """Launches the bundled Redis binary when the backend starts."""
+    """
+    Redis service manager:
+    Automatically launches the bundled Redis process at backend startup, so that
+    starting the backend brings up the entire infrastructure.
+    """
 
     def __init__(self):
         self.process = None
         self._stop_event = threading.Event()
-        
-        # Bundled binary and config.
-        base_dir = Path(__file__).resolve().parent.parent.parent.parent
-        self.bin_path = base_dir / "bin" / "redis" / "redis-server.exe"
-        self.conf_path = base_dir / "bin" / "redis" / "redis.windows.conf"
+
+        # Locate the binary. A frozen build keeps resources under _MEIPASS, so
+        # check that first, then the repository layout used in development.
+        from app.config import config
+
+        candidates = [
+            config.RESOURCE_DIR / "bin" / "redis",
+            config.BASE_DIR.parent / "bin" / "redis",
+            config.BASE_DIR / "bin" / "redis",
+        ]
+        redis_dir = next(
+            (c for c in candidates if (c / "redis-server.exe").exists()),
+            candidates[0],
+        )
+        self.bin_path = redis_dir / "redis-server.exe"
+        self.conf_path = redis_dir / "redis.windows.conf"
 
     def _is_port_in_use(self, port: int) -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
+            s.settimeout(0.2)
             return s.connect_ex(('127.0.0.1', port)) == 0
 
     async def start(self):
-        """Start Redis in the background."""
+        """Start the bundled Redis, or reuse an instance that is already running"""
         if self._is_port_in_use(6379):
-            logger.info("[RedisServer] Port 6379 is in use. Attempting to clean up stale process...")
-            if os.name == 'nt':
-                # Kill a stale instance still holding the port.
-                try:
-                    subprocess.run(["taskkill", "/F", "/IM", "redis-server.exe"], 
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    await asyncio.sleep(1) # Give the OS time to release the port.
-                except Exception as e:
-                    logger.warning(f"[RedisServer] Failed to execute taskkill: {e}")
-            
-            # Still occupied: treat it as an externally managed Redis.
-            if self._is_port_in_use(6379):
-                logger.warning("[RedisServer] Port 6379 still in use. Assuming managed external Redis.")
-                return True
+            # Never kill a Redis the user started: it may hold other data or be
+            # managed by the host. Reuse it instead.
+            logger.info("[RedisServer] Port 6379 already in use, reusing the existing Redis instance.")
+            return True
 
         if not self.bin_path.exists():
-            logger.warning(f"[RedisServer] Binary not found at {self.bin_path}. Redis will not be started automatically.")
+            logger.info(
+                "[RedisServer] No bundled Redis binary. Using the in-memory broker "
+                "(single-node default; set REDIS_URL to use an external instance)."
+            )
             return False
 
         threading.Thread(target=self._run_daemon, daemon=True).start()
+        # Wait for startup to complete
         for _ in range(10):
             if self._is_port_in_use(6379):
                 logger.info("[RedisServer] Redis started successfully.")
@@ -68,7 +77,7 @@ class RedisServerManager:
 
             try:
                 logger.info(f"[RedisServer] Executing: {self.bin_path}")
-                # Writes stay enabled even if background saves fail.
+                # Explicitly pass --stop-writes-on-bgsave-error no as a belt-and-braces measure
                 self.process = subprocess.Popen(
                     [
                         str(self.bin_path), 
@@ -96,7 +105,7 @@ class RedisServerManager:
                 time.sleep(10.0)
 
     def stop(self):
-        """Stop Redis."""
+        """Stop Redis"""
         self._stop_event.set()
         if self.process:
             try:

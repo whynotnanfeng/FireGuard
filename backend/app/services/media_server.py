@@ -1,8 +1,10 @@
 """
-MediaMTX process management.
+Media server manager
 
-Starts the server according to FIREGUARD_MODE and otherwise leases an instance
-started by another process.
+Uses MediaMTX as the streaming server.
+Starts the appropriate server instance automatically based on the configuration.
+
+Startup: automatically launched when the backend/simulator starts, no manual action needed.
 """
 import subprocess
 import os
@@ -20,27 +22,45 @@ logger = logging.getLogger(__name__)
 
 
 class MediaServerManager:
-    """Starts or leases a MediaMTX instance.
+    """
+    Streaming media gateway manager (MediaMTX):
 
-    production: start a standalone MediaMTX.
-    development: wait for the simulator's instance, start one on timeout.
-    simulator: never start MediaMTX; the simulator owns it.
+    Run modes:
+    - production:   the backend starts a standalone MediaMTX
+    - development:  may borrow an already running MediaMTX (for example the
+                    simulator's) when SIMULATOR_DISCOVERY is on, and otherwise
+                    starts its own. The simulator is a separate project and is
+                    never required.
     """
 
     def __init__(self):
         self.process = None
         self._stop_event = threading.Event()
         self._mode = config.FIREGUARD_MODE
+        if self._mode == "simulator":
+            logger.warning(
+                "[MediaServer] FIREGUARD_MODE=simulator is deprecated. "
+                "The backend now always manages its own MediaMTX."
+            )
         self._lease_mode = False
         self._health_check_thread = None
 
-        base_dir = Path(__file__).resolve().parent.parent.parent.parent
-        root_bin = base_dir / "bin"
-        self.bin_path = root_bin / "mediamtx.exe"
-        self.config_path = root_bin / "mediamtx.yaml"
+        # In a PyInstaller build resources live under _MEIPASS (_internal); in
+        # development the binaries are in the repository root's bin/ folder.
+        for bin_dir in (config.RESOURCE_DIR / "bin", config.BASE_DIR.parent / "bin"):
+            if (bin_dir / "mediamtx.exe").exists():
+                self.bin_path = bin_dir / "mediamtx.exe"
+                break
+        else:
+            bin_dir = config.RESOURCE_DIR / "bin"
+            self.bin_path = bin_dir / "mediamtx.exe"
+
+        # The generated config must live in a writable directory: an installed
+        # app under Program Files cannot modify its own _internal/bin folder.
+        self.config_path = config.DATA_DIR / "mediamtx.generated.yaml"
 
     def _kill_orphaned_mediamtx(self):
-        """Kill leftover MediaMTX processes from an unclean shutdown."""
+        """Clean up orphaned MediaMTX processes (leftovers from a task that did not shut down normally)"""
         import subprocess as _sp
         try:
             if os.name == "nt":
@@ -53,25 +73,25 @@ class MediaServerManager:
                     ["pkill", "-9", "-f", "mediamtx"],
                     capture_output=True, timeout=5,
                 )
-            time.sleep(1.0)  # give the OS time to release the port
+            time.sleep(1.0)  # Wait for the OS to release the port
         except Exception:
             pass
 
     def _is_port_in_use(self, port: int) -> bool:
-        """True if the port accepts connections over IPv4 or IPv6."""
+        """Check whether a port is occupied, supporting both IPv4 and IPv6"""
         # Try IPv4 first
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1)
+                s.settimeout(0.2)
                 if s.connect_ex(('127.0.0.1', port)) == 0:
                     return True
         except Exception:
             pass
 
-        # IPv6 too: MediaMTX binds [::] by default.
+        # Then try IPv6 (MediaMTX binds [::] by default)
         try:
             with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
-                s.settimeout(1)
+                s.settimeout(0.2)
                 if s.connect_ex(('::1', port)) == 0:
                     return True
         except Exception:
@@ -82,10 +102,15 @@ class MediaServerManager:
     def _generate_config(self):
         rtsp_port = config.MEDIAMTX_RTSP_PORT
         api_port = config.MEDIAMTX_API_PORT
-        config_content = f"""protocols: [tcp]
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_content = f"""rtspTransports: [tcp]
 rtspAddress: :{rtsp_port}
 api: true
 apiAddress: :{api_port}
+rtmp: no
+srt: no
+hlsAddress: :{config.MEDIAMTX_HLS_PORT}
+webrtcAddress: :8889
 paths:
   all:
     source: publisher
@@ -93,35 +118,19 @@ paths:
         self.config_path.write_text(config_content, encoding="utf-8")
 
     async def start(self, service_type: Optional[str] = None):
-        """Start or lease MediaMTX. service_type is kept for callers that still pass it."""
-        logger.info(f"[MediaServer] Running in '{self._mode}' mode with mediamtx")
+        """Start the MediaMTX media server
 
-        if self._mode == "simulator":
-            logger.info("[MediaServer] Simulator mode: skipping MediaMTX startup")
-            return True
+        Args:
+            service_type: Reserved parameter, kept for backward compatibility
+        """
+        logger.info(f"[MediaServer] Running in '{self._mode}' mode with mediamtx")
 
         return await self._start_mediamtx()
 
     async def _start_mediamtx(self):
-        """Start MediaMTX, or lease an existing instance."""
+        """Start the MediaMTX server"""
         target_api_port = config.MEDIAMTX_API_PORT
         target_rtsp_port = config.MEDIAMTX_RTSP_PORT
-
-        # Development follows the simulator's ports from the registry.
-        if self._mode == "development":
-            try:
-                from app.services.registry import registry
-                sim_rtsp = registry.get_mediamtx_rtsp_port()
-                sim_api = registry.get_mediamtx_api_port()
-                if sim_rtsp != target_rtsp_port or sim_api != target_api_port:
-                    logger.info(
-                        f"[MediaServer] Config center reports simulator ports: "
-                        f"RTSP={sim_rtsp}, API={sim_api} (local config: RTSP={target_rtsp_port}, API={target_api_port})"
-                    )
-                    target_rtsp_port = sim_rtsp
-                    target_api_port = sim_api
-            except Exception as e:
-                logger.debug(f"[MediaServer] Config center unavailable for port discovery: {e}")
 
         logger.info(
             f"[MediaServer] Starting MediaMTX on RTSP:{target_rtsp_port} API:{target_api_port}"
@@ -129,11 +138,15 @@ paths:
         self.target_api_port = target_api_port
         self.target_rtsp_port = target_rtsp_port
 
-        # Another process may already own the server.
+        # [P0 fix]: check whether MediaMTX is already owned by another process
         try:
             from app.services.registry import registry
             owner = registry.get_mediamtx_owner()
-            if owner and owner.get("pid") != os.getpid():
+            if (
+                owner
+                and owner.get("pid") != os.getpid()
+                and owner.get("api_port") == target_api_port
+            ):
                 logger.info(
                     f"[MediaServer] MediaMTX already owned by PID={owner['pid']}. Lease Mode."
                 )
@@ -143,6 +156,7 @@ paths:
         except Exception as e:
             logger.debug(f"[MediaServer] Registry check failed: {e}")
 
+        # Check port occupancy status
         if self._is_port_in_use(target_api_port) and self._is_port_in_use(target_rtsp_port):
             logger.info(
                 f"[MediaServer] MediaMTX already running on :{target_rtsp_port}/:{target_api_port}. Lease Mode."
@@ -151,8 +165,8 @@ paths:
             self._start_health_check()
             return True
 
-        # In development, give the simulator time to bring up its instance.
-        if self._mode == "development":
+        # Wait for the simulator's MediaMTX only when sharing is enabled
+        if self._mode == "development" and config.SIMULATOR_DISCOVERY:
             max_wait = 5.0
             logger.info(
                 f"[MediaServer] Waiting for simulator MediaMTX on :{target_rtsp_port}/:{target_api_port} (max {max_wait}s)..."
@@ -162,7 +176,7 @@ paths:
                 api_ok = self._is_port_in_use(target_api_port)
                 rtsp_ok = self._is_port_in_use(target_rtsp_port)
                 
-                # The registry covers bind-address and detection-delay cases.
+                # Also check the registry to guard against port detection delays or bind address issues
                 owner = None
                 try:
                     owner = registry.get_mediamtx_owner()
@@ -194,7 +208,13 @@ paths:
             )
             return False
 
-        jitter = random.uniform(0.5, 2.0)
+        # A short jitter avoids a simultaneous start race with the optional
+        # simulator; a product install has no simulator, so keep it minimal.
+        jitter = (
+            random.uniform(0.5, 2.0)
+            if self._mode == "development"
+            else random.uniform(0.1, 0.3)
+        )
         logger.info(f"[MediaServer] Waiting {jitter:.1f}s (jitter) before starting MediaMTX...")
         await asyncio.sleep(jitter)
 
@@ -216,7 +236,15 @@ paths:
             daemon=True,
         ).start()
 
-        await asyncio.sleep(2)
+        # Poll for readiness instead of a fixed 2s sleep: MediaMTX usually
+        # opens its API port in a few hundred milliseconds.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if self._is_port_in_use(target_api_port):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            logger.warning("[MediaServer] MediaMTX did not open its API port within 5s")
         self._lease_mode = False
         return True
 
@@ -265,7 +293,8 @@ paths:
                     time.sleep(120)
                     continue
 
-                # Take over only if MediaMTX is unowned or already ours.
+                # [P0 fix]: before taking over, confirm MediaMTX is really down and that this process
+                # is the owner or that it is unowned
                 owner = None
                 try:
                     from app.services.registry import registry
@@ -273,7 +302,11 @@ paths:
                 except Exception:
                     pass
 
-                if owner and owner.get("pid") != os.getpid():
+                if (
+                    owner
+                    and owner.get("pid") != os.getpid()
+                    and owner.get("api_port") == self.target_api_port
+                ):
                     logger.warning(
                         f"[MediaServer] MediaMTX owned by PID={owner['pid']}, skipping takeover. "
                         f"Health check may have false negative."
@@ -351,7 +384,7 @@ paths:
                         startupinfo=startupinfo,
                     )
                     
-                    # Register ownership for takeover decisions.
+                    # [P0 fix]: register MediaMTX owner information
                     try:
                         from app.services.registry import registry
                         registry.register_mediamtx_owner(rtsp_port, api_port, self.process.pid)

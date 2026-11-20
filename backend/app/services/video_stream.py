@@ -8,7 +8,8 @@ import cv2
 
 cv2.setNumThreads(2)
 
-# Must be set before OpenCV/FFmpeg initializes, or VideoCapture ignores these options.
+# Global environment sanitization - force FFmpeg parameters before any library initializes
+# This ensures every VideoCapture correctly picks up the TCP transport and buffering configuration, fixing the ineffective-variable problem
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
     "rtsp_transport;tcp|"
     "threads;1|"
@@ -21,7 +22,7 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
     "fflags;+discardcorrupt"
 )
 
-# Silence OpenCV logging; must be set before importing cv2.
+# Suppress OpenCV logging to stderr (must be set before importing cv2)
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
 
@@ -43,15 +44,19 @@ from app.services.notifier import notifier  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Detections below this confidence are discarded.
+# Minimum detection confidence threshold: results below this value are dropped outright to prevent false positives
 DETECTION_CONF_FLOOR = 0.35
 
-# Thread pool for DB writes so the event loop is not blocked.
+# Global thread pool for async DB operations, avoiding blocking the main loop
 db_executor = ThreadPoolExecutor(max_workers=4)
 
 
 class DoubleBuffer:
-    """Two slots swapped by index; writer and reader never contend on the same lock."""
+    """Double buffer: the writer and the reader each use one buffer, swapped atomically.
+
+    Eliminates contention on a single lock between the consumer/writer/dispatcher threads.
+    The writer calls write() + swap(), the reader calls read(); neither blocks the other.
+    """
 
     __slots__ = ("_buffers", "_write_idx", "_lock")
 
@@ -61,21 +66,31 @@ class DoubleBuffer:
         self._lock = threading.Lock()  # Only protects the _write_idx swap
 
     def write(self, data):
+        """Write into the current write buffer (only the writer calls this)"""
         self._buffers[self._write_idx] = data
 
     def swap(self):
+        """Atomically swap the read and write buffers"""
         with self._lock:
             self._write_idx = 1 - self._write_idx
 
     def read(self):
+        """Read the current read buffer (only the reader calls this)"""
         return self._buffers[1 - self._write_idx]
 
 
 class VideoStream:
     """
-    Captures frames, schedules inference and writes HLS for one task.
+    Video stream AI analysis and HLS recording worker.
 
-    States: pending -> connecting -> [retry x5] -> loading -> running -> draining / exception
+    Architecture:
+    1. TaskPipelineManager + AnnotatedHLSWriter handle annotated-frame HLS recording
+    2. DirectHLSWriter (ffmpeg -c:v copy) handles raw video HLS recording
+    3. This class is responsible for frame capture, inference scheduling and detection result dispatch
+    4. Detection results are pushed to WebSocket via the broker (Redis/InMemory pub/sub)
+    5. Status updates are broadcast via notifier
+
+    States: pending -> connecting -> [retryx5] -> loading -> running -> draining / exception
     """
 
     MSG_CONNECTING = "connecting"
@@ -114,7 +129,7 @@ class VideoStream:
         self._latest_frame_timestamps: List[float] = [0.0] * len(self.sources)
         self._latest_frame_wall_clocks: List[float] = [0.0] * len(
             self.sources
-        )
+        )  # Frame capture wall-clock time
         self._ret: bool = False
         self._lock = threading.Lock()
         self._error_msg: Optional[str] = None
@@ -124,47 +139,53 @@ class VideoStream:
         self._first_connect_done = False
         self._has_ever_been_running = False
         self._session_start_time: float = 0.0
+        self._first_frame_time_set: bool = False
         self._last_frame_time: float = 0.0
         self._preload_resolution()
         self._latest_results: list[Detection] = []
         self._latest_results_timestamp: float = 0.0
         self._latest_results_wall_time: float = 0.0
-        self._frame_wall_clock_map: dict[float, float] = {}  # PTS -> capture wall clock
-        self._latest_results_lock = threading.Lock()  # Guards _latest_results across threads
+        self._frame_wall_clock_map: dict[float, float] = {}  # PTS→frame capture wall-clock map
+        self._latest_results_lock = threading.Lock()  # Guards cross-thread access to _latest_results
         self.label_mapping = label_mapping or {}
         self.detection_config: Optional[dict] = None
         self._last_results_time = 0.0
         self._last_valid_results: list[Detection] = []
-        self._frame_ring = None  # SharedMemory ring, created on first dispatch
+        self._frame_ring = None  # SharedMemory ring, lazy init in dispatch
+        self._frame_rings: Dict[str, object] = {}  # per-model rings (multi-model dispatch)
         self._pre_connecting = (
-            False  # Pre-check broadcasts rtsp_connecting; the monitor must not overwrite it
+            False  # Pre-check phase flag, prevents the status monitor from overwriting rtsp_connecting
         )
-        self._shared_grabber = None
+        self._shared_grabber = None  # Shared frame grabber reference
         self.natural_width: Optional[int] = None
         self.natural_height: Optional[int] = None
-        self._history_marked = False  # Marked at least once per task
+        self._history_marked = False  # Ensures each task is marked as history at least once
         self._is_resuming = False
-        self._is_draining = False
-        self._drain_done = threading.Event()
+        self._is_draining = False  # Graceful exit flag
+        self._drain_done = threading.Event()  # Drain completion signal
 
-        self._frame_count = 0
-        self._fps_estimate = 15.0  # Source fps, updated once capture starts
-        self._last_pts_ms = 0.0
-        self._pts_reset_count = 0
-        self._video_duration_ms = 0.0  # From ffprobe
+        # Fields for the hybrid timestamp strategy
+        self._frame_count = 0  # Cumulative frame count
+        self._fps_estimate = 15.0  # Source frame rate (dynamically updated after FFmpegCapture starts)
+        self._last_pts_ms = 0.0  # Previous PTS value
+        self._pts_reset_count = 0  # PTS reset counter
+        self._video_duration_ms = 0.0  # Total video duration (obtained via ffprobe)
 
+        # Track the HLS writer to keep status in sync
         self._primary_writer = None
 
+        # New architecture - TaskPipelineManager (detection box injection + event-driven recording)
         self.pipeline = None
         self._pipeline_initialized = False
 
+        # Multi-model support
         self.model_configs: Optional[List[dict]] = model_configs
         _mc = model_configs or []
         self.is_multi_model = len(_mc) > 1
         if self.is_multi_model:
             from app.services.fusion_engine import FusionEngine
             self._fusion_engine = FusionEngine(config=fusion_config or {})
-            # model_id -> latest detections
+            # Per-model result buffer {model_id: [Detection, ...]}
             self._latest_results_by_model: Dict[str, List[Detection]] = {
                 mc["model_id"]: [] for mc in _mc
             }
@@ -172,6 +193,7 @@ class VideoStream:
             self._results_by_model_wall_time: Dict[str, float] = {
                 mc["model_id"]: 0.0 for mc in _mc
             }
+            # Frame-level sync: record the frame timestamp corresponding to each model's latest result
             self._results_by_model_frame_ts: Dict[str, float] = {
                 mc["model_id"]: 0.0 for mc in _mc
             }
@@ -181,6 +203,7 @@ class VideoStream:
             self._results_by_model_lock = threading.Lock()
             self._results_by_model_wall_time = {}
 
+        # Determine whether this is multimodal (whether the given source contains a semicolon or the list length is >= 2)
         self.is_multimodal = len(self.sources) >= 2
 
     def _get_task_session(self):
@@ -199,19 +222,17 @@ class VideoStream:
         return _ctx()
 
     def _init_pipeline(self):
-        """Create the pipeline and annotated HLS writer at fixed 720p/10fps."""
+        """Server-side frame embedding renderer — 720p/10fps to reduce CPU load"""
         try:
             from pathlib import Path
             from app.services.task_pipeline_manager import TaskPipelineManager
             from app.config import config
 
-            fps = self.detection_config.get("fps", 15) if self.detection_config else 15
-            _hls_fps = 10.0  # 10fps annotated output, greatly reduces encoding CPU
+            _hls_fps = config.ANNOTATED_HLS_FPS
 
-            # Pipeline resolution must match frames written to the buffer, or FFmpeg receives
-            # the wrong rawvideo byte count and corrupts frames.
-            width = 1280
-            height = 720
+            # Key: the annotated stream resolution must match the frame resolution in _frame_buffer
+            width = config.STREAM_FRAME_WIDTH
+            height = config.STREAM_FRAME_HEIGHT
 
             logger.info(
                 f"[VideoStream] Pipeline init: task_id={self.task_id}, "
@@ -249,7 +270,7 @@ class VideoStream:
             self._pipeline_initialized = False
 
     def _annotated_frame_writer(self, _target_fps: float = 10.0):
-        """Write annotated frames at a fixed rate, repeating the last frame when starved."""
+        """Constant-frame-rate annotated HLS writing — frame-accurate box alignment"""
         _interval = 1.0 / _target_fps
         last_written_ts = 0.0
         next_write_time = time.time()
@@ -272,6 +293,7 @@ class VideoStream:
             if wait_remaining > 0.001:
                 self._stop_event.wait(max(0.010, wait_remaining))
 
+            # Read the primary source frame (Lock-protected)
             with self._lock:
                 frame = self._latest_frames[0]
                 frame_ts = self._latest_frame_timestamps[0]
@@ -284,6 +306,7 @@ class VideoStream:
 
             has_new_frame = frame is not None and frame_ts != last_written_ts
 
+            # Whether the detection results are still valid (no new results for over 1 second)
             results_fresh = self._results_are_fresh(now)
 
             if has_new_frame:
@@ -292,7 +315,7 @@ class VideoStream:
                     if results_fresh:
                         detections = self._get_current_detections(frame)
                     else:
-                        detections = []  # Drop stale boxes to avoid sticky overlays
+                        detections = []  # Results are stale: clear the boxes to avoid "sticky" overlays
                     ir_frame = None
                     if self.is_multimodal:
                         with self._lock:
@@ -357,18 +380,27 @@ class VideoStream:
         )
 
     def _results_are_fresh(self, now: float) -> bool:
-        """True while the newest result is younger than 1 s; covers both result buffers."""
+        """Whether the detection results are still within their validity window (new results within 1 second).
+
+        Supports both paths: multi-model → _results_by_model_wall_time, multimodal → _latest_results_wall_time
+        """
         latest = 0.0
         if self.is_multi_model:
             with self._results_by_model_lock:
                 if self._results_by_model_wall_time:
                     latest = max(self._results_by_model_wall_time.values())
+        # Fallback: also check the single-model buffer (updated by the multimodal dispatch path)
         with self._latest_results_lock:
             latest = max(latest, self._latest_results_wall_time)
         return (now - latest) < 1.0
 
     def _get_current_detections(self, frame: np.ndarray) -> list[Detection]:
-        """Current detections, fused for multi-model streams."""
+        """Get the current detection results: fused for multi-model, returned directly for single-model.
+
+        Supports both result routing paths:
+        - Multi-model dispatch (carries model_id) → _latest_results_by_model
+        - Multimodal dispatch (no model_id) → _latest_results
+        """
         if self.is_multi_model and self._fusion_engine is not None:
             from app.services.fusion_engine import ModelDetection
 
@@ -386,6 +418,7 @@ class VideoStream:
                         per_class_config=mc.get("per_class_config", {}),
                     ))
             fused = self._fusion_engine.fuse(model_results, rgb_frame=frame)
+            # Fallback: when multi-model fusion yields nothing, check the single-model buffer (multimodal dispatch path)
             if not fused:
                 with self._latest_results_lock:
                     if self._latest_results:
@@ -465,12 +498,17 @@ class VideoStream:
             logger.warning(f"[VideoStream] Broker snapshot update failed: {e}")
 
     def _save_detection_records_sync(
-        self, detections: List[Detection], timestamp_ms: int
+        self,
+        detections: List[Detection],
+        timestamp_ms: int,
+        media_pts_ms: int | None = None,
     ):
         from app.models.detection_record import DetectionRecord
         import time as _time
 
-        # detected_at is Beijing wall time for display; timestamp_ms is absolute Unix ms for sync.
+        # [Dual-timestamp architecture]:
+        # - detected_at: Beijing time (used by the frontend to display the detection record time)
+        # - timestamp_ms: absolute Unix timestamp (ms), used for five-in-one synchronization
         frame_detected_at = now_beijing()
         db_save_start = _time.time()
 
@@ -483,12 +521,13 @@ class VideoStream:
                 "confidence": float(d.confidence),
                 "box": d.box if isinstance(d.box, list) else list(d.box),
                 "detected_at": frame_detected_at.isoformat(),
-                "timestamp_ms": timestamp_ms,
+                "timestamp_ms": timestamp_ms,  # Synchronization timestamp
+                "media_pts_ms": media_pts_ms,  # Position inside the recording session
             }
             record_events.append(record_data)
 
         if record_events:
-            logger.info(
+            logger.debug(
                 f"[VideoStream] Publishing record_event: {len(record_events)} records "
                 f"for task {self.task_id}"
             )
@@ -497,7 +536,7 @@ class VideoStream:
                 {"type": "record_event", "records": record_events},
             )
 
-        # Retry: SQLite lock contention can cause silent write failures.
+        # Retry mechanism: prevents silent failures caused by SQLite lock contention
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -513,6 +552,8 @@ class VideoStream:
                             confidence=re_data["confidence"],
                             box=json.dumps(re_data["box"]),
                             detected_at=frame_detected_at,
+                            abs_ms=timestamp_ms,
+                            media_pts_ms=media_pts_ms,
                         )
                         for re_data in record_events
                     ]
@@ -521,18 +562,19 @@ class VideoStream:
                     session.commit()
 
                 db_save_duration = _time.time() - db_save_start
+                # Diagnostic log warning when the DB write exceeds 1 second
                 if db_save_duration > 1.0:
                     logger.warning(
                         f"[DIAG-DB] Slow DB write: {db_save_duration:.2f}s for task {self.task_id}, "
                         f"records={len(record_events)}, attempt={attempt + 1}"
                     )
-                break
+                break  # Exit on success
             except Exception as e:
                 if attempt < max_retries - 1:
                     logger.warning(
                         f"[DB Sync] Retry {attempt + 1}/{max_retries} for task {self.task_id}: {e}"
                     )
-                    time.sleep(0.1 * (attempt + 1))
+                    time.sleep(0.1 * (attempt + 1))  # Incremental delay
                 else:
                     logger.error(
                         f"[DB Sync] Failed to save detections for task {self.task_id} after {max_retries} retries: {e}",
@@ -582,20 +624,24 @@ class VideoStream:
         self._error_msg = None
         self._retry_count = 0
         self._cap_opened = False
-        # _is_resuming is owned by task_runner.start_stream().
+        # _is_resuming is no longer reset; keep the value set by task_runner.start_stream()
         self._is_draining = False
 
+        # Initialize the processing pipeline
         self._init_pipeline()
 
+        # --- MediaMTX Gateway Integration ---
         self._proxied_sources = []
 
-        # Start DirectHLSWriter for each source.
+        # Start DirectHLSWriter for each source (zero-copy recording)
         for idx, raw_url in enumerate(self.sources):
+            # 1. Dynamically register with the media gateway to obtain a highly available internal address
             proxied_url = media_gateway.register_proxy(self.task_id, raw_url, idx)
             self._proxied_sources.append(proxied_url)
 
             channel = "rgb" if idx == 0 else "ir"
 
+            # 2. Both recording and grabbing use the gateway proxy address
             logger.info(
                 f"[VideoStream] start_recording: channel={channel}, "
                 f"resume={self._is_resuming}"
@@ -604,14 +650,15 @@ class VideoStream:
                 self.task_id, proxied_url, channel=channel, resume=self._is_resuming
             )
             if idx == 0:
-                self._primary_writer = writer
+                self._primary_writer = writer  # Record the primary channel writer
 
             if not writer or writer.error_msg:
                 err = writer.error_msg if writer else "Unable to initialize the HLS recorder"
                 logger.error(f"[VideoStream] {err} for channel {channel}")
                 self._error_msg = f"Video source connected but frame conversion failed: {err}"
 
-            # Pre-check the proxied URL; the raw source may not be reachable directly.
+            # Shared grabber — the same URL is decoded only once
+            # Pre-check URL reachability (against the actual proxied_url, not the original source_url)
             from app.services.ffmpeg_capture import check_rtsp_reachable
             from app.utils.shared_grabber import grabber_registry
 
@@ -646,8 +693,8 @@ class VideoStream:
                 url=proxied_url,
                 task_id=self.task_id,
                 hw_accel=hw_accel,
-                width=self.natural_width or 1920,
-                height=self.natural_height or 1080,
+                width=config.STREAM_FRAME_WIDTH,
+                height=config.STREAM_FRAME_HEIGHT,
                 fps=self.detection_config.get("fps", 15)
                 if self.detection_config
                 else 15,
@@ -656,7 +703,7 @@ class VideoStream:
             self._shared_grabber = shared_g
             self._shared_grabber_is_new = is_new
 
-            # Consumer thread: grabber -> local buffer
+            # Consumer thread: reads frames from the shared grabber → writes to the local _latest_frames
             t = threading.Thread(
                 target=self._shared_frame_consumer,
                 args=(shared_g, idx, proxied_url),
@@ -669,6 +716,7 @@ class VideoStream:
                 f"subscribers={shared_g.subscriber_count})"
             )
 
+        # [New] Start a different dispatch thread depending on the modality and the number of models
         if self.is_multi_model:
             t_dispatch = threading.Thread(
                 target=self._dispatch_multi_model, daemon=True
@@ -692,6 +740,7 @@ class VideoStream:
 
         t_dispatch.start()
 
+        # 3. Start the status monitor (replaces the original run method's loop)
         t_status = threading.Thread(target=self._status_monitor_loop, daemon=True)
         t_status.start()
 
@@ -768,8 +817,9 @@ class VideoStream:
             self._stop_event.set()
             self._is_resuming = True
 
-            # Stop the pipeline before StorageManager; its zombie cleanup would otherwise kill
-            # this FFmpeg process and cause broken pipes.
+            # Stop the Pipeline (AnnotatedHLSWriter) first, then stop StorageManager.
+            # Otherwise StorageManager._ensure_all_zombies_gone would mistakenly kill
+            # AnnotatedHLSWriter's FFmpeg process, causing Broken pipe errors.
             if self.pipeline:
                 try:
                     self.pipeline.stop()
@@ -784,7 +834,7 @@ class VideoStream:
             storage_manager.stop_recording(self.task_id)
             media_gateway.unregister_proxy(self.task_id, len(self.sources))
 
-            # Release shared memory so restart does not hit FileExistsError.
+            # Release the shared memory ring to prevent FileExistsError on restart
             if self._frame_ring is not None:
                 try:
                     self._frame_ring.cleanup()
@@ -792,6 +842,13 @@ class VideoStream:
                 except Exception as e:
                     logger.warning(f"[VideoStream] SharedMemory cleanup error: {e}")
                 self._frame_ring = None
+
+            for _model_path, _ring in list(self._frame_rings.items()):
+                try:
+                    _ring.cleanup()
+                except Exception as e:
+                    logger.warning(f"[VideoStream] SharedMemory cleanup error for {_model_path}: {e}")
+            self._frame_rings.clear()
 
             logger.info(
                 f"[VideoStream] Terminal Stop completed for task {self.task_id}"
@@ -809,6 +866,20 @@ class VideoStream:
 
         threading.Thread(target=deferred_stop, daemon=True).start()
 
+    @staticmethod
+    def _rings_have_room(target_queues, ring) -> bool:
+        """Whether every target queue can consume a new frame without overwriting.
+
+        A slot is reused after ``ring.capacity`` writes, so a queue deeper than
+        that means the worker would read a newer frame under an older
+        timestamp — the cause of boxes appearing out of sync.
+        """
+        try:
+            return all(q.qsize() < ring.capacity - 1 for q in target_queues)
+        except Exception:
+            return True
+
+    # --- Dispatch logic 1: single-modal fast dispatch (JPEG compression) ---
     def _dispatch_single(self):
         from app.services.task_runner import stream_manager
 
@@ -820,33 +891,43 @@ class VideoStream:
         stale_frame_count = 0
         MAX_STALE_FRAMES = 100
 
-        # Dispatch rate adapts to inference queue depth (PI control) and CPU load.
-        # Clamped to [8 fps, min(user fps, source fps)]; source fps is a physical ceiling.
+        # ── System-level resource-aware adaptive scheduling ──
+        # Multi-dimensional inputs:
+        #   1. Inference queue depth (PI controller, target=5)
+        #   2. CPU utilization (psutil, every 2s)
+        #   3. Source frame rate (read in real time from FFmpegCapture)
+        #
+        # Rate range: 5fps (floor) ~ source_fps (source frame rate)
+        #   5fps: the minimum usable frame rate for industrial fire/smoke detection (Frigate default)
+        #  15-30fps: depends on the actual camera/video source
+        #
+        # User configuration detection_config.fps = desired inference upper limit; defaults to following the source frame rate
         source_fps = float(getattr(self, "_fps_estimate", 15.0) or 15.0)
         user_max_fps = float(
             self.detection_config.get("fps", source_fps)
             if self.detection_config
             else source_fps
         )
+        # Inference upper limit = min(user expectation, source frame rate). The source frame rate is a physical ceiling and cannot be exceeded
         abs_max_fps = min(user_max_fps, source_fps)
-        abs_min_fps = 8.0  # Shared grabber frees CPU, so the floor is 8, not 5.
+        abs_min_fps = 8.0  # The shared grabber frees CPU, so the floor is raised from 5 to 8fps
 
-        dispatch_interval = 1.0 / abs_max_fps
+        dispatch_interval = 1.0 / abs_max_fps  # Initial fastest rate
         last_detect_time = 0.0
         last_resource_check = 0.0
         last_pi_check = 0.0
         current_queue_depth = 0
-        current_cpu_pct = 50.0
+        current_cpu_pct = 50.0  # Initially assume a moderate load
 
-        # PI control on queue depth.
-        target_depth = 5
+        # PI controller: dynamically adjusts the dispatch interval based on the inference queue depth
+        target_depth = 5          # Target queue depth (in frames)
         integral = 0.0
-        Kp = 0.06
-        Ki = 0.008
+        Kp = 0.06                 # Proportional gain: sensitivity of error → interval adjustment
+        Ki = 0.008                # Integral gain: eliminates steady-state error
 
-        # Exponential smoothing avoids abrupt interval changes.
+        # Exponential smoothing: suppresses sudden changes in the dispatch interval, avoiding sharp inference load swings
         smoothed_interval = dispatch_interval
-        alpha = 0.35              # 0 = fully smoothed, 1 = none; 0.35 balances response and stability
+        alpha = 0.35              # Smoothing factor (0=fully smoothed, 1=no smoothing); 0.35 balances responsiveness and stability
 
         while not self._stop_event.is_set():
             if self._is_draining:
@@ -854,7 +935,7 @@ class VideoStream:
 
             now = time.time()
 
-            # CPU check every 2 s.
+            # ── Resource awareness: check CPU utilization every 2s ──
             if now - last_resource_check >= 2.0:
                 try:
                     import psutil
@@ -864,23 +945,23 @@ class VideoStream:
                     current_cpu_pct = 50.0
 
                 if self.use_gpu:
-                    # On GPU, only the queue controller decides.
+                    # GPU inference: CPU is not the bottleneck, so only the queue PI controller adjusts
                     resource_max_fps = abs_max_fps
                 else:
-                    # On CPU, throttle by utilization.
+                    # CPU inference: CPU utilization directly reflects the inference load, so throttling is needed
                     if current_cpu_pct < 40:
-                        resource_max_fps = abs_max_fps
+                        resource_max_fps = abs_max_fps  # Resources plentiful, full speed
                     elif current_cpu_pct < 65:
-                        resource_max_fps = abs_max_fps * 0.80
+                        resource_max_fps = abs_max_fps * 0.80  # Moderate, reduce 20%
                     elif current_cpu_pct < 85:
-                        resource_max_fps = abs_max_fps * 0.60
+                        resource_max_fps = abs_max_fps * 0.60  # Tight, reduce 40%
                     else:
-                        resource_max_fps = abs_min_fps
+                        resource_max_fps = abs_min_fps  # Saturated, fall back to 8fps
 
                 resource_max_fps = max(abs_min_fps, min(abs_max_fps, resource_max_fps))
                 last_resource_check = now
 
-            # Queue check every 1 s.
+            # ── Queue PI control: every 1s ──
             if now - last_pi_check >= 1.0:
                 try:
                     current_queue_depth = stream_manager.global_inference_in_q.qsize()
@@ -892,11 +973,13 @@ class VideoStream:
                 adjustment = Kp * error + Ki * integral
 
                 raw_interval = dispatch_interval * (1.0 + adjustment)
+                # Combine the resource limits
                 resource_interval = 1.0 / resource_max_fps
                 raw_interval = max(
-                    1.0 / abs_max_fps,
-                    min(1.0 / abs_min_fps, raw_interval),
+                    1.0 / abs_max_fps,  # Do not exceed the user upper limit
+                    min(1.0 / abs_min_fps, raw_interval),  # Do not fall below the floor
                 )
+                # Hard resource constraint
                 raw_interval = max(resource_interval, raw_interval)
 
                 smoothed_interval = (
@@ -915,12 +998,13 @@ class VideoStream:
                         f"n={self._dispatch_count}"
                     )
 
-            # Adaptive sleep instead of busy-waiting.
+            # Adaptive sleep replaces a fixed busy-wait, lowering CPU usage while idle
             if now - last_detect_time < smoothed_interval:
                 wait_ms = max(20, (smoothed_interval - (now - last_detect_time)) * 1000)
                 self._stop_event.wait(wait_ms / 1000.0)
                 continue
 
+            # Read the primary source frame (Lock-protected)
             frame = None
             frame_timestamp = 0.0
             with self._lock:
@@ -937,7 +1021,8 @@ class VideoStream:
                     frame_timestamp = _ts
 
             if frame is None:
-                # No new frame is normal (empty scene); the grabber handles recovery.
+                # Wait silently when there is no new frame; SharedGrabber recovers capture independently
+                # Real scenarios may have no target for a long time, which should not be treated as an error
                 self._stop_event.wait(0.05)
                 continue
 
@@ -952,7 +1037,6 @@ class VideoStream:
                     for _shm_retry in range(3):
                         try:
                             self._frame_ring = SharedFrameRing(
-                                n_buffers=3,
                                 shape=(h, w, 3),
                                 name_prefix=f"shm_{self.task_id}",
                             )
@@ -968,6 +1052,13 @@ class VideoStream:
                         f"[VideoStream] SharedMemory ring created for {self.task_id} "
                         f"({w}x{h}, {self._frame_ring.frame_bytes / 1024 / 1024:.1f}MB/buf)"
                     )
+                if not self._rings_have_room(
+                    [stream_manager.global_inference_in_q], self._frame_ring
+                ):
+                    # Worker is behind: drop this frame rather than overwrite an
+                    # in-flight shared-memory slot.
+                    self._stop_event.wait(0.005)
+                    continue
                 shm_name, shm_shape, shm_dtype, _ = self._frame_ring.put(frame)
                 _jpeg_encode_ms = (time.time() - _encode_t0) * 1000
 
@@ -985,7 +1076,7 @@ class VideoStream:
                 stream_manager.global_inference_in_q.put_nowait(payload)
                 last_detect_time = now
 
-                # Time sync every 50 frames.
+                # Send a time sync message every 50 frames
                 if self._dispatch_count % 50 == 0:
                     time_sync_msg = {
                         "type": "time_sync",
@@ -1002,6 +1093,7 @@ class VideoStream:
 
                 self._dispatch_count += 1
 
+                # Output scheduling diagnostics every 10 seconds
                 now_diag = time.time()
                 if not hasattr(self, "_last_dispatch_diag"):
                     self._last_dispatch_diag = 0.0
@@ -1026,13 +1118,16 @@ class VideoStream:
                     )
                 pass
 
+    # --- Dispatch logic 2: multimodal aligned dispatch (JPEG compression) ---
     def _alignment_and_dispatch_dual(self):
         from app.services.task_runner import stream_manager
 
-        # Track the last timestamp; a failed read can otherwise resend a stale frame.
+        # [P0 fix]: track the last dispatched timestamp to prevent redispatching the same
+        # timestamp after cap.read() fails
         last_dispatched_timestamp = 0.0
         stale_frame_count = 0
 
+        # [P1 fix]: inference pipeline backpressure optimization (same as single-modal)
         fps_target = (
             self.detection_config.get("fps", config.DETECTION_FPS_STREAM)
             if self.detection_config
@@ -1049,6 +1144,7 @@ class VideoStream:
 
             now = time.time()
 
+            # Check the queue depth every 0.5 seconds
             if now - last_queue_depth_check >= 0.5:
                 try:
                     current_queue_depth = stream_manager.global_inference_in_q.qsize()
@@ -1056,6 +1152,7 @@ class VideoStream:
                     current_queue_depth = 0
                 last_queue_depth_check = now
 
+            # Dynamic FPS limit
             if current_queue_depth > 300:
                 dynamic_interval = 0.2
             elif current_queue_depth > 100:
@@ -1067,6 +1164,7 @@ class VideoStream:
                 self._stop_event.wait(0.05)
                 continue
 
+            # Read RGB + IR directly from _latest_frames (no alignment buffer)
             with self._lock:
                 f_rgb = self._latest_frames[0]
                 f_ir = self._latest_frames[1] if len(self._latest_frames) > 1 else None
@@ -1076,6 +1174,7 @@ class VideoStream:
                 self._stop_event.wait(0.05)
                 continue
 
+            # timestamp stagnation detection
             if (
                 frame_timestamp == last_dispatched_timestamp
                 and last_dispatched_timestamp > 0
@@ -1096,17 +1195,18 @@ class VideoStream:
                 stale_frame_count = 0
                 last_dispatched_timestamp = frame_timestamp
 
+            # SharedMemory dual-frame zero-copy dispatch
             try:
                 if not hasattr(self, '_rgb_ring') or self._rgb_ring is None:
                     h_r, w_r = f_rgb.shape[:2]
                     h_i, w_i = f_ir.shape[:2]
                     from app.utils.shared_frame import SharedFrameRing
                     self._rgb_ring = SharedFrameRing(
-                        n_buffers=3, shape=(h_r, w_r, 3),
+                        shape=(h_r, w_r, 3),
                         name_prefix=f"shm_rgb_{self.task_id}",
                     )
                     self._ir_ring = SharedFrameRing(
-                        n_buffers=3, shape=(h_i, w_i, 3),
+                        shape=(h_i, w_i, 3),
                         name_prefix=f"shm_ir_{self.task_id}",
                     )
                     logger.info(
@@ -1114,6 +1214,11 @@ class VideoStream:
                         f"(rgb={w_r}x{h_r}, ir={w_i}x{h_i})"
                     )
 
+                if not self._rings_have_room(
+                    [stream_manager.global_inference_in_q], self._rgb_ring
+                ):
+                    self._stop_event.wait(0.005)
+                    continue
                 rgb_shm_name, rgb_shm_shape, rgb_shm_dtype, _ = self._rgb_ring.put(f_rgb)
                 ir_shm_name, ir_shm_shape, ir_shm_dtype, _ = self._ir_ring.put(f_ir)
             except Exception as shm_err:
@@ -1127,13 +1232,13 @@ class VideoStream:
                 self.model_path,
                 self.label_mapping,
                 DETECTION_CONF_FLOOR,
-                "DUAL",  # two-frame payload; IR fields follow below
-                rgb_shm_shape, rgb_shm_dtype,
+                "DUAL",                            # shm_name = marker flag
+                rgb_shm_shape, rgb_shm_dtype,       # RGB metadata
                 self.use_gpu,
-                rgb_shm_name,
-                ir_shm_name,
-                ir_shm_shape,
-                ir_shm_dtype,
+                rgb_shm_name,                       # [9] RGB shm_name
+                ir_shm_name,                        # [10] IR shm_name
+                ir_shm_shape,                       # [11] IR shape
+                ir_shm_dtype,                       # [12] IR dtype
             )
             try:
                 stream_manager.global_inference_in_q.put_nowait(payload)
@@ -1159,7 +1264,13 @@ class VideoStream:
                     )
 
     def _dispatch_multi_model(self):
-        """Dispatch by modality; payloads carry model_id and go to per-model queues."""
+        """Unified multi-model dispatch thread: dispatches by modality category, with each payload carrying a model_id.
+
+        Model categories:
+        - rgbir models → JPEG dual-frame encoding (RGB+IR)
+        - rgb-only models → SharedMemory zero-copy (RGB frame only)
+        - ir-only models → SharedMemory zero-copy (IR frame only)
+        """
         from app.services.task_runner import stream_manager
 
         assert self.model_configs is not None
@@ -1182,7 +1293,7 @@ class VideoStream:
         )
         min_interval = 1.0 / fps_target if fps_target > 0 else 0.0
         last_detect_time = 0.0
-        dispatch_gap = 0.02  # Stagger models 20 ms apart to avoid a queue burst.
+        dispatch_gap = 0.02  # Stagger models by 20ms to avoid a momentary queue overload
 
         while not self._stop_event.is_set():
             if self._is_draining:
@@ -1193,6 +1304,7 @@ class VideoStream:
                 self._stop_event.wait(0.02)
                 continue
 
+            # Read the primary source frame (Lock-protected)
             with self._lock:
                 frame = self._latest_frames[0]
                 frame_ts = self._latest_frame_timestamps[0]
@@ -1204,7 +1316,9 @@ class VideoStream:
                 continue
             last_dispatched_ts = frame_ts
 
+            # Modality-category dispatch
             try:
+                # 1. RGBIR models: SharedMemory dual frame
                 if rgbir_configs and self.is_multimodal:
                     ir_frame = self._get_secondary_frame(1)
                     if ir_frame is not None:
@@ -1214,13 +1328,22 @@ class VideoStream:
                                 h_i, w_i = ir_frame.shape[:2]
                                 from app.utils.shared_frame import SharedFrameRing
                                 self._rgb_ring = SharedFrameRing(
-                                    n_buffers=3, shape=(h_r, w_r, 3),
+                                    shape=(h_r, w_r, 3),
                                     name_prefix=f"shm_rgb_{self.task_id}",
                                 )
                                 self._ir_ring = SharedFrameRing(
-                                    n_buffers=3, shape=(h_i, w_i, 3),
+                                    shape=(h_i, w_i, 3),
                                     name_prefix=f"shm_ir_{self.task_id}",
                                 )
+                            _rgbir_queues = [
+                                stream_manager.get_model_queue(
+                                    mc["model_path"], self.use_gpu
+                                )
+                                or stream_manager.global_inference_in_q
+                                for mc in rgbir_configs
+                            ]
+                            if not self._rings_have_room(_rgbir_queues, self._rgb_ring):
+                                continue
                             rgb_n, rgb_s, rgb_d, _ = self._rgb_ring.put(frame)
                             ir_n, ir_s, ir_d, _ = self._ir_ring.put(ir_frame)
                         except Exception as shm_err:
@@ -1236,6 +1359,7 @@ class VideoStream:
                                 rgb_n, ir_n, ir_s, ir_d,
                                 mc["model_id"],
                             )
+                            # Route to the per-model worker queue (parallel inference)
                             model_q = stream_manager.get_model_queue(mc["model_path"], self.use_gpu)
                             if model_q:
                                 model_q.put_nowait(payload)
@@ -1243,10 +1367,12 @@ class VideoStream:
                                 stream_manager.global_inference_in_q.put_nowait(payload)
                             time.sleep(dispatch_gap)
 
+                # 2. RGB-only models: SharedMemory
                 for mc in rgb_configs:
                     self._dispatch_shared_frame(frame, frame_ts, mc)
                     time.sleep(dispatch_gap)
 
+                # 3. IR-only models: SharedMemory
                 if ir_configs and self.is_multimodal:
                     ir_frame = self._get_secondary_frame(1)
                     if ir_frame is not None:
@@ -1266,28 +1392,29 @@ class VideoStream:
     def _dispatch_shared_frame(self, frame, timestamp, model_config):
         """Single-frame SharedMemory dispatch, carrying model_id."""
         from app.services.task_runner import stream_manager
+        from app.utils.shared_frame import SharedFrameRing
 
-        if self._frame_ring is None:
+        target_q = stream_manager.get_model_queue(
+            model_config["model_path"], self.use_gpu
+        ) or stream_manager.global_inference_in_q
+
+        # One ring per model: models consume at different speeds, and a shared
+        # ring lets a slow model overwrite another model's in-flight frame.
+        ring = self._frame_rings.get(model_config["model_path"])
+        if ring is None:
             h, w = frame.shape[:2]
-            from app.utils.shared_frame import SharedFrameRing
-            for _retry in range(3):
-                try:
-                    self._frame_ring = SharedFrameRing(
-                        n_buffers=3, shape=(h, w, 3),
-                        name_prefix=f"shm_{self.task_id}",
-                    )
-                    break
-                except FileExistsError:
-                    import shutil, os
-                    _dir = f"/dev/shm/shm_{self.task_id}"
-                    if os.path.exists(_dir):
-                        shutil.rmtree(_dir, ignore_errors=True)
-            if self._frame_ring is None:
-                self._frame_ring = SharedFrameRing(
-                    n_buffers=3, shape=(h, w, 3),
-                    name_prefix=f"shm_{self.task_id}",
-                )
-        shm_name, shm_shape, shm_dtype, _ = self._frame_ring.put(frame)
+            ring = SharedFrameRing(
+                shape=(h, w, 3),
+                name_prefix=f"shm_{self.task_id}_{len(self._frame_rings)}",
+            )
+            self._frame_rings[model_config["model_path"]] = ring
+
+        if not self._rings_have_room([target_q], ring):
+            # Worker is behind: drop this frame instead of overwriting a
+            # buffer that the worker is still reading.
+            return
+
+        shm_name, shm_shape, shm_dtype, _ = ring.put(frame)
         payload = (
             self.task_id, timestamp,
             model_config["model_path"], model_config["label_mapping"],
@@ -1295,12 +1422,13 @@ class VideoStream:
             shm_name, shm_shape, shm_dtype,
             self.use_gpu, model_config["model_id"],
         )
-        model_q = stream_manager.get_model_queue(model_config["model_path"], self.use_gpu)
-        if model_q:
-            model_q.put_nowait(payload)
-        else:
-            stream_manager.global_inference_in_q.put_nowait(payload)
+        # Route to the per-model worker queue (parallel inference)
+        try:
+            target_q.put_nowait(payload)
+        except queue.Full:
+            pass
 
+    # Pure frame consumer — captures frames + writes to the buffer (native resolution, for inference and Canvas overlay)
     def _shared_frame_consumer(self, shared_grabber, idx: int, source_url: str):
         from app.utils.shared_grabber import grabber_registry
 
@@ -1308,7 +1436,7 @@ class VideoStream:
         last_diag = time.time()
 
         while not self._stop_event.is_set():
-            # Blocks on a new frame instead of polling every 15 ms.
+            # Event-driven: block waiting for a new frame, eliminating the 15ms polling delay and CPU waste
             frame, pts_ms = shared_grabber.latest_frame_and_pts(timeout=0.1)
             if frame is None:
                 continue
@@ -1316,34 +1444,46 @@ class VideoStream:
             if timestamp == last_frame_ts:
                 continue
 
-            # latest_frame_and_pts already returns a copy.
-            frame = cv2.resize(
-                frame, (1280, 720), interpolation=cv2.INTER_LINEAR
-            )
+            # frame is already copied inside latest_frame_and_pts, so no second copy is needed.
+            # Capture is configured at the pipeline size, so this resize is normally a no-op.
+            _target_w, _target_h = config.STREAM_FRAME_WIDTH, config.STREAM_FRAME_HEIGHT
+            if frame.shape[1] != _target_w or frame.shape[0] != _target_h:
+                frame = cv2.resize(
+                    frame, (_target_w, _target_h), interpolation=cv2.INTER_LINEAR
+                )
             last_frame_ts = timestamp
             _capture_wall_clock = time.time()
 
+            # Anchor the wall clock on the first frame so abs time is
+            # session_start + media_pts, not "process start + media_pts".
+            if not self._first_frame_time_set:
+                self._first_frame_time_set = True
+                self._session_start_time = _capture_wall_clock - timestamp
+
             if idx == 0:
+                # Primary source: lock-protected write
                 with self._lock:
                     self._latest_frames[0] = frame
                     self._latest_frame_timestamps[0] = timestamp
                     self._latest_frame_wall_clocks[0] = _capture_wall_clock
             else:
+                # Secondary sources (IR, etc.): keep the existing lock protection
                 with self._lock:
                     self._latest_frames[idx] = frame
                     self._latest_frame_timestamps[idx] = timestamp
                     self._latest_frame_wall_clocks[idx] = _capture_wall_clock
 
+            # Grabber first-frame log
             if idx == 0 and not hasattr(self, '_grabber_feed_logged'):
                 self._grabber_feed_logged = True
                 logger.info(f"[VideoStream] Grabber started for {self.task_id}")
 
-            # Only the consumer writes this map; _lock makes it visible across threads.
+            # The metadata below is written only by the consumer; _lock guarantees cross-thread visibility
             with self._lock:
                 self._frame_wall_clock_map[timestamp] = (
-                    _capture_wall_clock
+                    _capture_wall_clock  # PTS→wall clock
                 )
-                # Keep the map bounded (~300 entries).
+                # Cap the map size, keeping the most recent 300 entries
                 if len(self._frame_wall_clock_map) > 300:
                     _oldest = sorted(self._frame_wall_clock_map.keys())[:-200]
                     for _k in _oldest:
@@ -1367,15 +1507,18 @@ class VideoStream:
                 )
                 last_diag = time.time()
 
+            # No extra wait needed: latest_frame_and_pts(timeout=0.1) already blocks until a new frame
+
         grabber_registry.unsubscribe(source_url, self.task_id)
 
+    # --- Reception and dispatch (called by StreamManager's global Dispatcher) ---
     def _status_monitor_loop(self):
-        """Poll stream state and broadcast status transitions."""
+        """Every step's condition has a diagnostic log"""
         logger.info(f"[StatusMon] STARTED for {self.task_id}")
         last_broadcast = 0
         has_broadcast_running = False
         _state_enter_time = time.time()
-        _diag_count = 0
+        _diag_count = 0  # Diagnostic counter, outputs detailed state every 10 rounds
 
         while not self._stop_event.is_set():
             now = time.time()
@@ -1393,8 +1536,10 @@ class VideoStream:
                     self._broadcast_status(self.MSG_ERROR, self._error_msg, force=True)
                     break
 
+                # Check the frame queue
                 has_frame = self._latest_frames[0] is not None
 
+                # Output diagnostics every 10 rounds (≈ every 5 seconds)
                 if _diag_count % 10 == 0:
                     aw_status = "client-render "
                     pw_status = "none"
@@ -1419,7 +1564,7 @@ class VideoStream:
                 if not has_frame:
                     has_broadcast_running = False
                     if self._pre_connecting:
-                        pass  # Pre-check loop broadcasts rtsp_connecting itself.
+                        pass  # The grabber pre-check loop broadcasts rtsp_connecting itself; do not overwrite it
                     else:
                         retry = self._retry_count
                         if retry > 0:
@@ -1438,7 +1583,7 @@ class VideoStream:
                             )
                     continue
 
-                # Annotated stream takes priority when checking HLS readiness.
+                # ── has_frame=True: check HLS (annotated stream takes priority) ──
                 hls_ready = False
                 if self.pipeline and self.pipeline.annotated_writer:
                     aw = self.pipeline.annotated_writer
@@ -1483,7 +1628,7 @@ class VideoStream:
                         },
                         force=True,
                     )
-                    # Notify the frontend; otherwise its status does not refresh.
+                    # Push the status update to the frontend over the notifier WebSocket (otherwise the frontend will not refresh)
                     try:
                         _loop = self._main_loop or asyncio.get_event_loop()
                         _loop.call_soon_threadsafe(
@@ -1503,6 +1648,7 @@ class VideoStream:
                         logger.info(
                             f"[VideoStream] Task {self.task_id}: Running normally"
                         )
+                # else: hls_ready and already running → silent, no status change needed
             except Exception as e:
                 logger.error(f"[VideoStream] Status monitor iteration error: {e}")
 
@@ -1513,7 +1659,8 @@ class VideoStream:
             return True
         if img.shape[2] != 3:
             return True
-# Cheap pure-black check: sample corners and centre before scanning.
+# Cheap sampling check for a pure-black frame (avoids scanning the whole image)
+    # If all four corner samples are 0 and the centre is 0 too, it is most likely a bad frame
         h, w = img.shape[:2]
         samples = [
             img[0, 0],
@@ -1523,12 +1670,13 @@ class VideoStream:
             img[h // 2, w // 2],
         ]
         if all(np.sum(s) < 1 for s in samples):
+            # If every sampled pixel is black, confirm once more with a low-frequency count_nonzero
             if np.count_nonzero(img[::10, ::10]) < 10:
                 return True
         return False
 
     def _handle_client_messages(self, data: dict):
-        """Legacy UI control messages; kept for compatibility."""
+        """Handle control messages from UI (via API now, but keeping for compatibility)"""
         action = data.get("action")
         if action == "stop":
             self.stop()

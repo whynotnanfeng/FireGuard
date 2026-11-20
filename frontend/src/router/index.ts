@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
+// Lazy-loaded views
 const Login = () => import('@/views/Login.vue')
 const Layout = () => import('@/views/Layout.vue')
 const TaskList = () => import('@/views/TaskList.vue')
@@ -28,6 +29,7 @@ const router = createRouter({
   ],
 })
 
+// Navigation guard
 router.beforeEach((to) => {
   const auth = useAuthStore()
   if (!to.meta.public && !auth.isLoggedIn) {
